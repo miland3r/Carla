@@ -394,7 +394,9 @@ endif
 	install -d $(DESTDIR)$(INCLUDEDIR)/carla/includes
 ifeq ($(LINUX),true)
 ifeq ($(HAVE_JACK),true)
+ifeq ($(JACKBRIDGE_DIRECT),true)
 	install -d $(DESTDIR)$(JACK_LIBDIR)
+endif
 endif
 endif
 
@@ -437,10 +439,12 @@ endif
 
 ifeq ($(LINUX),true)
 ifeq ($(HAVE_JACK),true)
+ifeq ($(JACKBRIDGE_DIRECT),true)
 	# Install internal jack client
 	ln -sf \
 		$(LIBDIR)/carla/libcarla_standalone2.so \
 		$(DESTDIR)$(JACK_LIBDIR)/carla.so
+endif
 endif
 
 ifneq ($(JACKBRIDGE_DIRECT),true)
@@ -657,11 +661,11 @@ ifeq ($(LINUX),true)
 	$(LINK) ../../carla/jack $(DESTDIR)$(LIBDIR)/lv2/carla.lv2/jack
 endif
 
+ifeq ($(HAVE_PYQT),true)
 	# Link resources for lv2 plugin
 	rm -rf $(DESTDIR)$(LIBDIR)/lv2/carla.lv2/resources
 	$(LINK) ../../../share/carla/resources $(DESTDIR)$(LIBDIR)/lv2/carla.lv2/resources
 
-ifeq ($(HAVE_PYQT),true)
 	# Link styles for lv2 plugin
 	rm -rf $(DESTDIR)$(LIBDIR)/lv2/carla.lv2/styles
 	$(LINK) ../../carla/styles $(DESTDIR)$(LIBDIR)/lv2/carla.lv2/styles
@@ -763,14 +767,10 @@ ifneq ($(WIN32),true)
 else
 	@printf -- "LV2 plugin:    $(ANS_NO)  $(mZ)Not available for Windows$(mE)\n"
 endif
-ifeq ($(LINUX),true)
-ifeq ($(HAVE_X11),true)
+ifneq ($(HAIKU),true)
 	@printf -- "VST plugin:    $(ANS_YES)\n"
-else # HAVE_X11
-	@printf -- "VST plugin:    $(ANS_NO)  $(mS)X11 missing$(mE)\n"
-endif
-else # LINUX
-	@printf -- "VST plugin:    $(ANS_NO)  $(mZ)Linux only$(mE)\n"
+else
+	@printf -- "VST plugin:    $(ANS_NO)  $(mZ)Not available for Haiku$(mE)\n"
 endif
 else
 	@printf -- "Front-End:     $(ANS_NO)  $(mS)Missing PyQt$(mE)\n"

@@ -1,6 +1,6 @@
 /*
  * Carla Native Plugins
- * Copyright (C) 2013-2018 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2013-2019 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -45,13 +45,17 @@ struct PluginListManager {
         {
             const NativePluginDescriptor* const desc(carla_getNativePluginDescriptor(i));
 
-            if (std::strcmp(desc->label, "lfo"             ) == 0 ||
-                std::strcmp(desc->label, "midichanfilter"  ) == 0 ||
+            if (std::strcmp(desc->label, "audiofile"       ) == 0 ||
+                std::strcmp(desc->label, "audiogain"       ) == 0 ||
+                std::strcmp(desc->label, "audiogain_s"     ) == 0 ||
+                std::strcmp(desc->label, "lfo"             ) == 0 ||
                 std::strcmp(desc->label, "midichanab"      ) == 0 ||
+                std::strcmp(desc->label, "midichanfilter"  ) == 0 ||
+                std::strcmp(desc->label, "midichannelize"  ) == 0 ||
+                std::strcmp(desc->label, "midifile"        ) == 0 ||
                 std::strcmp(desc->label, "midigain"        ) == 0 ||
                 std::strcmp(desc->label, "midijoin"        ) == 0 ||
                 std::strcmp(desc->label, "midisplit"       ) == 0 ||
-                std::strcmp(desc->label, "midithrough"     ) == 0 ||
                 std::strcmp(desc->label, "miditranspose"   ) == 0 ||
                 std::strcmp(desc->label, "midipattern"     ) == 0 ||
                 std::strcmp(desc->label, "carlarack"       ) == 0 ||
@@ -59,10 +63,9 @@ struct PluginListManager {
                 std::strcmp(desc->label, "carlapatchbay3s" ) == 0 ||
                 std::strcmp(desc->label, "carlapatchbay16" ) == 0 ||
                 std::strcmp(desc->label, "carlapatchbay32" ) == 0 ||
-                std::strcmp(desc->label, "bigmeter"        ) == 0 ||
-                /*std::strcmp(desc->label, "notes"           ) == 0*/
-                std::strcmp(desc->label, "audiofile"       ) == 0 ||
-                std::strcmp(desc->label, "midifile"        ) == 0)
+                std::strcmp(desc->label, "carlapatchbay64" ) == 0 ||
+                std::strcmp(desc->label, "bigmeter"        ) == 0
+                /*std::strcmp(desc->label, "notes"           ) == 0*/)
             {
                 descs.append(desc);
             }
@@ -72,6 +75,7 @@ struct PluginListManager {
         descs.append(carla_get_native_patchbay_plugin());
         descs.append(carla_get_native_patchbay16_plugin());
         descs.append(carla_get_native_patchbay32_plugin());
+        descs.append(carla_get_native_patchbay64_plugin());
 #endif
     }
 
