@@ -78,6 +78,9 @@ ALL_LIBS += $(3RD_LIBS)
 
 3rd: $(3RD_LIBS)
 	@$(MAKE) -C source/theme
+ifeq ($(HAVE_QT4),true)
+	@$(MAKE) -C source/bridges-ui ui_lv2-qt4
+endif
 
 libs: $(ALL_LIBS)
 
@@ -762,11 +765,7 @@ features_print_main:
 	@printf -- "$(tS)---> Main features $(tE)\n"
 ifeq ($(HAVE_PYQT),true)
 	@printf -- "Front-End:     $(ANS_YES)\n"
-ifneq ($(WIN32),true)
 	@printf -- "LV2 plugin:    $(ANS_YES)\n"
-else
-	@printf -- "LV2 plugin:    $(ANS_NO)  $(mZ)Not available for Windows$(mE)\n"
-endif
 ifneq ($(HAIKU),true)
 	@printf -- "VST plugin:    $(ANS_YES)\n"
 else
@@ -930,13 +929,8 @@ endif
 
 	@printf -- "$(tS)---> Internal plugins: $(tE)\n"
 	@printf -- "Basic Plugins:    $(ANS_YES)\n"
-ifneq ($(WIN32),true)
 	@printf -- "Carla-Patchbay:   $(ANS_YES)\n"
 	@printf -- "Carla-Rack:       $(ANS_YES)\n"
-else
-	@printf -- "Carla-Patchbay:   $(ANS_NO) $(mS)Not available for Windows$(mE)\n"
-	@printf -- "Carla-Rack:       $(ANS_NO) $(mS)Not available for Windows$(mE)\n"
-endif
 ifeq ($(EXTERNAL_PLUGINS),true)
 	@printf -- "External Plugins: $(ANS_YES)\n"
 else

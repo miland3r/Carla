@@ -10,15 +10,21 @@ include ../modules/Makefile.mk
 
 # ---------------------------------------------------------------------------------------------------------------------
 
+ifeq ($(WIN32),true)
+NON_STATIC_LINK_FLAGS = $(shell echo $(LINK_FLAGS) | awk 'sub(" -static","")') -static-libgcc
+else
+NON_STATIC_LINK_FLAGS = $(LINK_FLAGS)
+endif
+
 ifeq ($(HAVE_QT4),true)
 QT4_CXX_FLAGS  = $(BUILD_CXX_FLAGS) $(shell pkg-config --cflags QtCore QtGui)
-QT4_LINK_FLAGS = $(LINK_FLAGS) $(shell pkg-config --libs QtCore QtGui)
+QT4_LINK_FLAGS = $(NON_STATIC_LINK_FLAGS) $(shell pkg-config --libs QtCore QtGui)
 QT4_STYLES_DIR = $(shell pkg-config --variable=libdir QtCore)/qt4/plugins/styles
 endif
 
 ifeq ($(HAVE_QT5),true)
 QT5_CXX_FLAGS  = $(BUILD_CXX_FLAGS) $(shell pkg-config --cflags Qt5Core Qt5Gui Qt5Widgets)
-QT5_LINK_FLAGS = $(LINK_FLAGS) $(shell pkg-config --libs Qt5Core Qt5Gui Qt5Widgets)
+QT5_LINK_FLAGS = $(NON_STATIC_LINK_FLAGS) $(shell pkg-config --libs Qt5Core Qt5Gui Qt5Widgets)
 QT5_STYLES_DIR = $(shell pkg-config --variable=libdir Qt5Core)/qt5/plugins/styles
 endif
 
@@ -112,7 +118,7 @@ $(MODULEDIR)/$(MODULENAME).qt5.a: $(FILES_qt5) $(OBJS_qt5)
 $(BINDIR)/styles/carlastyle.dll: $(FILES_qt5) $(OBJS_qt5_shared)
 	-@mkdir -p $(BINDIR)/styles
 	@echo "Linking carlastyle.dll"
-	@$(CXX) $(OBJS_qt5_shared) $(QT5_LINK_FLAGS) -luuid -lwinspool -lgdi32 -limm32 -lole32 -lshell32 -lws2_32 -shared -o $@
+	@$(CXX) $(OBJS_qt5_shared) $(QT5_LINK_FLAGS) -shared -o $@
 
 $(BINDIR)/styles/carlastyle.dylib: $(FILES_qt5) $(OBJS_qt5_shared)
 	-@mkdir -p $(BINDIR)/styles

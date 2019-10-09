@@ -218,6 +218,11 @@ HAVE_HYLIA = true
 endif
 endif
 
+# FIXME make mingw compatible
+# ifeq ($(WIN32),true)
+# HAVE_HYLIA = true
+# endif
+
 ifeq ($(MACOS_OR_WIN32),true)
 HAVE_DGL   = true
 else
@@ -238,7 +243,8 @@ HAVE_FLUIDSYNTH = $(shell pkg-config --atleast-version=1.1.7 fluidsynth && echo 
 HAVE_JACK       = $(shell pkg-config --exists jack && echo true)
 HAVE_LIBLO      = $(shell pkg-config --exists liblo && echo true)
 HAVE_QT4        = $(shell pkg-config --exists QtCore QtGui && echo true)
-HAVE_QT5        = $(shell pkg-config --exists Qt5Core Qt5Gui Qt5Widgets && echo true)
+HAVE_QT5        = $(shell pkg-config --exists Qt5Core Qt5Gui Qt5Widgets && \
+                          pkg-config --variable=qt_config Qt5Core | grep -q -v "static" && echo true)
 HAVE_SNDFILE    = $(shell pkg-config --exists sndfile && echo true)
 
 ifeq ($(JACKBRIDGE_DIRECT),true)
