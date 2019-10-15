@@ -1004,11 +1004,11 @@ public:
             if (opts.processMode == ENGINE_PROCESS_MODE_CONTINUOUS_RACK)
             {
                 // FIXME?
-                pData->graph.create(0, 0);
+                pData->graph.create(0, 0, 0, 0);
             }
             else
             {
-                pData->graph.create(2, 2);
+                pData->graph.create(2, 2, 0, 0);
                 // pData->graph.setUsingExternalHost(true);
                 // pData->graph.setUsingExternalOSC(true);
                 patchbayRefresh(true, false, false);
@@ -2268,7 +2268,7 @@ protected:
 
                 portNameToId.rename(shortPortName, newFullName);
                 callback(fExternalPatchbayHost, fExternalPatchbayOsc,
-                         ENGINE_CALLBACK_PATCHBAY_PORT_RENAMED,
+                         ENGINE_CALLBACK_PATCHBAY_PORT_CHANGED,
                          portNameToId.group,
                          static_cast<int>(portNameToId.port),
                          0, 0, 0.0f,
