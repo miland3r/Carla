@@ -193,6 +193,38 @@ const EngineDriverDeviceInfo* CarlaEngine::getDriverDeviceInfo(const uint index2
     return nullptr;
 }
 
+bool CarlaEngine::showDriverDeviceControlPanel(const uint index2, const char* const deviceName)
+{
+    carla_debug("CarlaEngine::showDriverDeviceControlPanel(%i, \"%s\")", index2, deviceName);
+
+    uint index = index2;
+
+    if (jackbridge_is_ok() && index-- == 0)
+    {
+        return false;
+    }
+
+#ifndef BUILD_BRIDGE
+# ifdef USING_JUCE
+    if (const uint count = getJuceApiCount())
+    {
+        if (index < count)
+            return showJuceDeviceControlPanel(index, deviceName);
+        index -= count;
+    }
+# else
+    if (const uint count = getRtAudioApiCount())
+    {
+        if (index < count)
+            return false;
+    }
+# endif
+#endif
+
+    carla_stderr("CarlaEngine::showDriverDeviceControlPanel(%i, \"%s\") - invalid index", index2, deviceName);
+    return false;
+}
+
 CarlaEngine* CarlaEngine::newDriverByName(const char* const driverName)
 {
     CARLA_SAFE_ASSERT_RETURN(driverName != nullptr && driverName[0] != '\0', nullptr);
@@ -227,6 +259,8 @@ CarlaEngine* CarlaEngine::newDriverByName(const char* const driverName)
         return newJuce(AUDIO_API_ASIO);
     if (std::strcmp(driverName, "DirectSound") == 0)
         return newJuce(AUDIO_API_DIRECTSOUND);
+    if (std::strcmp(driverName, "WASAPI") == 0 || std::strcmp(driverName, "Windows Audio") == 0)
+        return newJuce(AUDIO_API_WASAPI);
 # else
     // -------------------------------------------------------------------
     // common
@@ -369,6 +403,16 @@ void CarlaEngine::clearXruns() const noexcept
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
     pData->xruns = 0;
 #endif
+}
+
+bool CarlaEngine::showDeviceControlPanel() const noexcept
+{
+    return false;
+}
+
+bool CarlaEngine::setBufferSizeAndSampleRate(const uint, const double)
+{
+    return false;
 }
 
 // -----------------------------------------------------------------------
@@ -1200,11 +1244,6 @@ void CarlaEngine::clearCurrentProjectFilename() noexcept
 
 // -----------------------------------------------------------------------
 // Information (base)
-
-uint CarlaEngine::getHints() const noexcept
-{
-    return pData->hints;
-}
 
 uint32_t CarlaEngine::getBufferSize() const noexcept
 {

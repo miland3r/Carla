@@ -587,7 +587,7 @@ protected:
 /*!
  * Carla Engine client.
  * Each plugin requires one client from the engine (created via CarlaEngine::addClient()).
- * @note This is a virtual class, some engine types provide custom funtionality.
+ * @note This is a virtual class, some engine types provide custom functionality.
  */
 class CARLA_API CarlaEngineClient
 {
@@ -733,6 +733,12 @@ public:
     static const EngineDriverDeviceInfo* getDriverDeviceInfo(const uint index, const char* const driverName);
 
     /*!
+     * Show a device custom control panel.
+     * @see ENGINE_DRIVER_DEVICE_HAS_CONTROL_PANEL
+     */
+    static bool showDriverDeviceControlPanel(const uint index, const char* const deviceName);
+
+    /*!
      * Create a new engine, using driver @a driverName.
      * Returned value must be deleted when no longer needed.
      * @note This only initializes engine data, it doesn't actually start the engine.
@@ -768,7 +774,7 @@ public:
 
     /*!
      * Initialize/start the engine, using @a clientName.
-     * When the engine is intialized, you need to call idle() at regular intervals.
+     * When the engine is initialized, you need to call idle() at regular intervals.
      */
     virtual bool init(const char* const clientName) = 0;
 
@@ -830,6 +836,19 @@ public:
      * Clear the xrun count.
      */
     virtual void clearXruns() const noexcept;
+
+    /*!
+     * Dynamically change buffer size and/or sample rate while engine is running.
+     * @see ENGINE_DRIVER_DEVICE_VARIABLE_BUFFER_SIZE
+     * @see ENGINE_DRIVER_DEVICE_VARIABLE_SAMPLE_RATE
+     */
+    virtual bool setBufferSizeAndSampleRate(const uint bufferSize, const double sampleRate);
+
+    /*!
+     * Show the custom control panel for the current engine device.
+     * @see ENGINE_DRIVER_DEVICE_HAS_CONTROL_PANEL
+     */
+    virtual bool showDeviceControlPanel() const noexcept;
 
     // -------------------------------------------------------------------
     // Plugin management
@@ -950,12 +969,6 @@ public:
     // Information (base)
 
     /*!
-     * Get the current engine driver hints.
-     * @see EngineDriverHints
-     */
-    uint getHints() const noexcept;
-
-    /*!
      * Get the current buffer size.
      */
     uint32_t getBufferSize() const noexcept;
@@ -971,7 +984,7 @@ public:
     const char* getName() const noexcept;
 
     /*!
-     * Get the current engine proccess mode.
+     * Get the current engine process mode.
      */
     EngineProcessMode getProccessMode() const noexcept;
 
@@ -1290,6 +1303,7 @@ public:
     static const char*        getJuceApiName(const uint index);
     static const char* const* getJuceApiDeviceNames(const uint index);
     static const EngineDriverDeviceInfo* getJuceDeviceInfo(const uint index, const char* const deviceName);
+    static bool               showJuceDeviceControlPanel(const uint index, const char* const deviceName);
 # else
     // RtAudio
     static CarlaEngine*       newRtAudio(const AudioApi api);

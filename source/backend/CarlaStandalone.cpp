@@ -163,6 +163,11 @@ const EngineDriverDeviceInfo* carla_get_engine_driver_device_info(uint index, co
     return &retDevInfo;
 }
 
+bool carla_show_engine_driver_device_control_panel(uint index, const char* name)
+{
+    return CarlaEngine::showDriverDeviceControlPanel(index, name);
+}
+
 // --------------------------------------------------------------------------------------------------------------------
 
 CarlaEngine* carla_get_engine()
@@ -333,7 +338,7 @@ bool carla_engine_init(const char* driverName, const char* clientName)
 #endif
 
     CarlaEngine* const engine = CarlaEngine::newDriverByName(driverName);
-    CARLA_SAFE_ASSERT_WITH_LAST_ERROR_RETURN(engine != nullptr, "The seleted audio driver is not available", false);
+    CARLA_SAFE_ASSERT_WITH_LAST_ERROR_RETURN(engine != nullptr, "The selected audio driver is not available", false);
 
     gStandalone.engine = engine;
 
@@ -404,7 +409,7 @@ bool carla_engine_init_bridge(const char audioBaseName[6+1], const char rtClient
                                                              nonRtClientBaseName,
                                                              nonRtServerBaseName));
 
-    CARLA_SAFE_ASSERT_WITH_LAST_ERROR_RETURN(engine != nullptr, "The seleted audio driver is not available", false);
+    CARLA_SAFE_ASSERT_WITH_LAST_ERROR_RETURN(engine != nullptr, "The selected audio driver is not available", false);
 
     engine->setOption(CB::ENGINE_OPTION_PROCESS_MODE,   CB::ENGINE_PROCESS_MODE_BRIDGE,   nullptr);
     engine->setOption(CB::ENGINE_OPTION_TRANSPORT_MODE, CB::ENGINE_TRANSPORT_MODE_BRIDGE, nullptr);
@@ -491,6 +496,65 @@ const CarlaRuntimeEngineInfo* carla_get_runtime_engine_info()
     retInfo.xruns = gStandalone.engine->getTotalXruns();
 
     return &retInfo;
+}
+
+const CarlaRuntimeEngineDriverDeviceInfo* carla_get_runtime_engine_driver_device_info()
+{
+    static CarlaRuntimeEngineDriverDeviceInfo retInfo;
+
+    // reset
+    retInfo.name = gNullCharPtr;
+    retInfo.hints = 0x0;
+    retInfo.bufferSize = 0;
+    retInfo.bufferSizes = nullptr;
+    retInfo.sampleRate = 0.0;
+    retInfo.sampleRates = nullptr;
+
+    CARLA_SAFE_ASSERT_RETURN(gStandalone.engine != nullptr, &retInfo);
+    const char* const audioDriver = gStandalone.engine->getCurrentDriverName();
+
+    uint index = 0;
+    uint count = CarlaEngine::getDriverCount();
+    for (; index<count; ++index)
+    {
+        const char* const testDriverName = CarlaEngine::getDriverName(index);
+        CARLA_SAFE_ASSERT_CONTINUE(testDriverName != nullptr);
+
+        if (std::strcmp(testDriverName, audioDriver) == 0)
+            break;
+    }
+    CARLA_SAFE_ASSERT_RETURN(index != count, &retInfo);
+
+    const EngineOptions& options(gStandalone.engine->getOptions());
+    const char* const audioDevice = options.audioDevice;
+
+    const EngineDriverDeviceInfo* const devInfo = CarlaEngine::getDriverDeviceInfo(index, audioDevice);
+    CARLA_SAFE_ASSERT_RETURN(devInfo != nullptr, &retInfo);
+
+    retInfo.name        = audioDevice;
+    retInfo.hints       = devInfo->hints;
+    retInfo.bufferSize  = gStandalone.engine->getBufferSize();
+    retInfo.bufferSizes = devInfo->bufferSizes;
+    retInfo.sampleRate  = gStandalone.engine->getSampleRate();
+    retInfo.sampleRates = devInfo->sampleRates;
+
+    return &retInfo;
+}
+
+bool carla_set_engine_buffer_size_and_sample_rate(uint bufferSize, double sampleRate)
+{
+    CARLA_SAFE_ASSERT_RETURN(gStandalone.engine != nullptr, false);
+    carla_debug("carla_set_engine_buffer_size_and_sample_rate(%u, %f)", bufferSize, sampleRate);
+
+    return gStandalone.engine->setBufferSizeAndSampleRate(bufferSize, sampleRate);
+}
+
+bool carla_show_engine_device_control_panel()
+{
+    CARLA_SAFE_ASSERT_RETURN(gStandalone.engine != nullptr, false);
+    carla_debug("carla_show_engine_device_control_panel()");
+
+    return gStandalone.engine->showDeviceControlPanel();
 }
 
 void carla_clear_engine_xruns()

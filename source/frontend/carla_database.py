@@ -133,7 +133,7 @@ def findFilenames(filePath, stype):
 # ---------------------------------------------------------------------------------------------------------------------
 # Plugin Query
 
-PLUGIN_QUERY_API_VERSION = 9
+PLUGIN_QUERY_API_VERSION = 11
 
 PyPluginInfo = {
     'API': PLUGIN_QUERY_API_VERSION,
@@ -1469,7 +1469,9 @@ class PluginDatabaseW(QDialog):
         self.ui.ch_bridged.clicked.connect(self.slot_checkFilters)
         self.ui.ch_bridged_wine.clicked.connect(self.slot_checkFilters)
         self.ui.ch_rtsafe.clicked.connect(self.slot_checkFilters)
+        self.ui.ch_cv.clicked.connect(self.slot_checkFilters)
         self.ui.ch_gui.clicked.connect(self.slot_checkFilters)
+        self.ui.ch_inline_display.clicked.connect(self.slot_checkFilters)
         self.ui.ch_stereo.clicked.connect(self.slot_checkFilters)
 
         # ----------------------------------------------------------------------------------------------------
@@ -1531,7 +1533,9 @@ class PluginDatabaseW(QDialog):
         settings.setValue("PluginDatabase/ShowBridged", self.ui.ch_bridged.isChecked())
         settings.setValue("PluginDatabase/ShowBridgedWine", self.ui.ch_bridged_wine.isChecked())
         settings.setValue("PluginDatabase/ShowRtSafe", self.ui.ch_rtsafe.isChecked())
+        settings.setValue("PluginDatabase/ShowHasCV", self.ui.ch_cv.isChecked())
         settings.setValue("PluginDatabase/ShowHasGUI", self.ui.ch_gui.isChecked())
+        settings.setValue("PluginDatabase/ShowHasInlineDisplay", self.ui.ch_inline_display.isChecked())
         settings.setValue("PluginDatabase/ShowStereoOnly", self.ui.ch_stereo.isChecked())
         settings.setValue("PluginDatabase/SearchText", self.ui.lineEdit.text())
 
@@ -1556,7 +1560,9 @@ class PluginDatabaseW(QDialog):
         self.ui.ch_bridged.setChecked(settings.value("PluginDatabase/ShowBridged", True, type=bool))
         self.ui.ch_bridged_wine.setChecked(settings.value("PluginDatabase/ShowBridgedWine", True, type=bool))
         self.ui.ch_rtsafe.setChecked(settings.value("PluginDatabase/ShowRtSafe", False, type=bool))
+        self.ui.ch_cv.setChecked(settings.value("PluginDatabase/ShowHasCV", False, type=bool))
         self.ui.ch_gui.setChecked(settings.value("PluginDatabase/ShowHasGUI", False, type=bool))
+        self.ui.ch_inline_display.setChecked(settings.value("PluginDatabase/ShowHasInlineDisplay", False, type=bool))
         self.ui.ch_stereo.setChecked(settings.value("PluginDatabase/ShowStereoOnly", False, type=bool))
         self.ui.lineEdit.setText(settings.value("PluginDatabase/SearchText", "", type=str))
 
@@ -1592,7 +1598,9 @@ class PluginDatabaseW(QDialog):
         hideBridgedWine = not self.ui.ch_bridged_wine.isChecked()
 
         hideNonRtSafe = self.ui.ch_rtsafe.isChecked()
+        hideNonCV     = self.ui.ch_cv.isChecked()
         hideNonGui    = self.ui.ch_gui.isChecked()
+        hideNonIDisp  = self.ui.ch_inline_display.isChecked()
         hideNonStereo = self.ui.ch_stereo.isChecked()
 
         if HAIKU or LINUX or MACOS:
@@ -1611,6 +1619,8 @@ class PluginDatabaseW(QDialog):
             plugin = self.ui.tableWidget.item(i, 0).data(Qt.UserRole)
             aIns   = plugin['audio.ins']
             aOuts  = plugin['audio.outs']
+            cvIns  = plugin['cv.ins']
+            cvOuts = plugin['cv.outs']
             mIns   = plugin['midi.ins']
             mOuts  = plugin['midi.outs']
             ptype  = self.ui.tableWidget.item(i, 12).text()
@@ -1622,7 +1632,9 @@ class PluginDatabaseW(QDialog):
             isNative = bool(plugin['build'] == BINARY_NATIVE)
             isRtSafe = bool(plugin['hints'] & PLUGIN_IS_RTSAFE)
             isStereo = bool(aIns == 2 and aOuts == 2) or (isSynth and aOuts == 2)
+            hasCV    = bool(cvIns + cvOuts > 0)
             hasGui   = bool(plugin['hints'] & PLUGIN_HAS_CUSTOM_UI)
+            hasIDisp = bool(plugin['hints'] & PLUGIN_HAS_INLINE_DISPLAY)
 
             isBridged = bool(not isNative and plugin['build'] in nativeBins)
             isBridgedWine = bool(not isNative and plugin['build'] in wineBins)
@@ -1659,7 +1671,11 @@ class PluginDatabaseW(QDialog):
                 self.ui.tableWidget.hideRow(i)
             elif hideNonRtSafe and not isRtSafe:
                 self.ui.tableWidget.hideRow(i)
+            elif hideNonCV and not hasCV:
+                self.ui.tableWidget.hideRow(i)
             elif hideNonGui and not hasGui:
+                self.ui.tableWidget.hideRow(i)
+            elif hideNonIDisp and not hasIDisp:
                 self.ui.tableWidget.hideRow(i)
             elif hideNonStereo and not isStereo:
                 self.ui.tableWidget.hideRow(i)
@@ -1682,9 +1698,8 @@ class PluginDatabaseW(QDialog):
     # --------------------------------------------------------------------------------------------------------
 
     def _addPluginToTable(self, plugin, ptype):
-        if plugin['API'] != PLUGIN_QUERY_API_VERSION and ptype == self.tr("Internal"):
+        if plugin['API'] != PLUGIN_QUERY_API_VERSION:
             return
-
         if ptype in (self.tr("Internal"), "LV2", "SF2", "SFZ"):
             plugin['build'] = BINARY_NATIVE
 
@@ -1949,9 +1964,11 @@ class JackApplicationW(QDialog):
     UI_SESSION_LADISH = 1
     UI_SESSION_NSM    = 2
 
-    FLAG_CONTROL_WINDOW        = 0x01
-    FLAG_CAPTURE_FIRST_WINDOW  = 0x02
-    FLAG_BUFFERS_ADDITION_MODE = 0x10
+    FLAG_CONTROL_WINDOW              = 0x01
+    FLAG_CAPTURE_FIRST_WINDOW        = 0x02
+    FLAG_BUFFERS_ADDITION_MODE       = 0x10
+    FLAG_MIDI_OUTPUT_CHANNEL_MIXDOWN = 0x20
+    FLAG_EXTERNAL_START              = 0x40
 
     def __init__(self, parent, host):
         QDialog.__init__(self, parent)
@@ -2000,6 +2017,10 @@ class JackApplicationW(QDialog):
             flags |= self.FLAG_CAPTURE_FIRST_WINDOW
         if self.ui.cb_buffers_addition_mode.isChecked():
             flags |= self.FLAG_BUFFERS_ADDITION_MODE
+        if self.ui.cb_out_midi_mixdown.isChecked():
+            flags |= self.FLAG_MIDI_OUTPUT_CHANNEL_MIXDOWN
+        if self.ui.cb_external_start.isChecked():
+            flags |= self.FLAG_EXTERNAL_START
 
         baseIntVal = ord('0')
         labelSetup = "%s%s%s%s%s%s" % (chr(baseIntVal+self.ui.sb_audio_ins.value()),
@@ -2039,6 +2060,8 @@ class JackApplicationW(QDialog):
         self.ui.sb_midi_ins.setValue(settings.value("NumMidiIns", 0, type=int))
         self.ui.sb_midi_outs.setValue(settings.value("NumMidiOuts", 0, type=int))
         self.ui.cb_manage_window.setChecked(settings.value("ManageWindow", True, type=bool))
+        self.ui.cb_capture_first_window.setChecked(settings.value("CaptureFirstWindow", False, type=bool))
+        self.ui.cb_out_midi_mixdown.setChecked(settings.value("MidiOutMixdown", False, type=bool))
 
         self.checkIfButtonBoxShouldBeEnabled(self.ui.cb_session_mgr.currentIndex(),
                                              self.ui.le_command.text())
@@ -2064,6 +2087,8 @@ class JackApplicationW(QDialog):
         settings.setValue("NumMidiIns", self.ui.sb_midi_ins.value())
         settings.setValue("NumMidiOuts", self.ui.sb_midi_outs.value())
         settings.setValue("ManageWindow", self.ui.cb_manage_window.isChecked())
+        settings.setValue("CaptureFirstWindow", self.ui.cb_capture_first_window.isChecked())
+        settings.setValue("MidiOutMixdown", self.ui.cb_out_midi_mixdown.isChecked())
 
     # -----------------------------------------------------------------------------------------------------------------
 

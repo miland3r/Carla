@@ -155,7 +155,7 @@ MAX_PATCHBAY_PLUGINS = 255
 MAX_DEFAULT_PARAMETERS = 200
 
 # The "plugin Id" for the global Carla instance.
-# Curently only used for audio peaks.
+# Currently only used for audio peaks.
 MAIN_CARLA_PLUGIN_ID = 0xFFFF
 
 # ------------------------------------------------------------------------------------------------------------
@@ -471,7 +471,7 @@ PARAMETER_UNKNOWN = 0
 # Input parameter.
 PARAMETER_INPUT = 1
 
-# Ouput parameter.
+# Output parameter.
 PARAMETER_OUTPUT = 2
 
 # ------------------------------------------------------------------------------------------------------------
@@ -1212,7 +1212,7 @@ class CarlaPluginInfo(Structure):
         ("iconName", c_char_p),
 
         # Plugin unique Id.
-        # This Id is dependant on the plugin type and may sometimes be 0.
+        # This Id is dependent on the plugin type and may sometimes be 0.
         ("uniqueId", c_int64)
     ]
 
@@ -1291,6 +1291,31 @@ class CarlaRuntimeEngineInfo(Structure):
         ("xruns", c_uint32)
     ]
 
+# Runtime engine driver device information.
+class CarlaRuntimeEngineDriverDeviceInfo(Structure):
+    _fields_ = [
+        # Name of the driver device.
+        ("name", c_char_p),
+
+        # This driver device hints.
+        # @see EngineDriverHints
+        ("hints", c_uint),
+
+        # Current buffer size.
+        ("bufferSize", c_uint32),
+
+        # Available buffer sizes.
+        # Terminated with 0.
+        ("bufferSizes", POINTER(c_uint32)),
+
+        # Current sample rate.
+        ("sampleRate", c_double),
+
+        # Available sample rates.
+        # Terminated with 0.0.
+        ("sampleRates", POINTER(c_double))
+    ]
+
 # Image data for LV2 inline display API.
 # raw image pixmap format is ARGB32,
 class CarlaInlineDisplayImageSurface(Structure):
@@ -1342,18 +1367,28 @@ PyCarlaScalePointInfo = {
 
 # @see CarlaTransportInfo
 PyCarlaTransportInfo = {
-    "playing": False,
-    "frame": 0,
-    "bar": 0,
-    "beat": 0,
-    "tick": 0,
-    "bpm": 0.0
+    'playing': False,
+    'frame': 0,
+    'bar': 0,
+    'beat': 0,
+    'tick': 0,
+    'bpm': 0.0
 }
 
 # @see CarlaRuntimeEngineInfo
 PyCarlaRuntimeEngineInfo = {
-    "load": 0.0,
-    "xruns": 0
+    'load': 0.0,
+    'xruns': 0
+}
+
+# @see CarlaRuntimeEngineDriverDeviceInfo
+PyCarlaRuntimeEngineDriverDeviceInfo = {
+    'name': "",
+    'hints': 0x0,
+    'bufferSize': 0,
+    'bufferSizes': [],
+    'sampleRate': 0.0,
+    'sampleRates': []
 }
 
 # ------------------------------------------------------------------------------------------------------------
@@ -1429,6 +1464,14 @@ class CarlaHostMeta(object):
     def get_engine_driver_device_info(self, index, name):
         raise NotImplementedError
 
+    # Show a device custom control panel.
+    # @see ENGINE_DRIVER_DEVICE_HAS_CONTROL_PANEL
+    # @param index Driver index
+    # @param name  Device name
+    @abstractmethod
+    def show_engine_driver_device_control_panel(self, index, name):
+        raise NotImplementedError
+
     # Initialize the engine.
     # Make sure to call carla_engine_idle() at regular intervals afterwards.
     # @param driverName Driver to use
@@ -1458,6 +1501,22 @@ class CarlaHostMeta(object):
     # Get information about the currently running engine.
     @abstractmethod
     def get_runtime_engine_info(self):
+        raise NotImplementedError
+
+    # Get information about the currently running engine driver device.
+    @abstractmethod
+    def get_runtime_engine_driver_device_info(self):
+        raise NotImplementedError
+
+    # Dynamically change buffer size and/or sample rate while engine is running.
+    # @see ENGINE_DRIVER_DEVICE_VARIABLE_BUFFER_SIZE
+    # @see ENGINE_DRIVER_DEVICE_VARIABLE_SAMPLE_RATE
+    def set_engine_buffer_size_and_sample_rate(self, bufferSize, sampleRate):
+        raise NotImplementedError
+
+    # Show the custom control panel for the current engine device.
+    # @see ENGINE_DRIVER_DEVICE_HAS_CONTROL_PANEL
+    def show_engine_device_control_panel(self):
         raise NotImplementedError
 
     # Clear the xrun count on the engine, so that the next time carla_get_runtime_engine_info() is called, it returns 0.
@@ -2083,6 +2142,9 @@ class CarlaHostNull(CarlaHostMeta):
     def get_engine_driver_device_info(self, index, name):
         return PyEngineDriverDeviceInfo
 
+    def show_engine_driver_device_control_panel(self, index, name):
+        return False
+
     def engine_init(self, driverName, clientName):
         self.fEngineRunning = True
         if self.fEngineCallback is not None:
@@ -2109,6 +2171,15 @@ class CarlaHostNull(CarlaHostMeta):
 
     def get_runtime_engine_info(self):
         return PyCarlaRuntimeEngineInfo
+
+    def get_runtime_engine_driver_device_info(self):
+        return PyCarlaRuntimeEngineDriverDeviceInfo
+
+    def set_engine_buffer_size_and_sample_rate(self, bufferSize, sampleRate):
+        return False
+
+    def show_engine_device_control_panel(self):
+        return False
 
     def clear_engine_xruns(self):
         return
@@ -2395,6 +2466,9 @@ class CarlaHostDLL(CarlaHostMeta):
         self.lib.carla_get_engine_driver_device_info.argtypes = [c_uint, c_char_p]
         self.lib.carla_get_engine_driver_device_info.restype = POINTER(EngineDriverDeviceInfo)
 
+        self.lib.carla_show_engine_driver_device_control_panel.argtypes = [c_uint, c_char_p]
+        self.lib.carla_show_engine_driver_device_control_panel.restype = c_bool
+
         self.lib.carla_engine_init.argtypes = [c_char_p, c_char_p]
         self.lib.carla_engine_init.restype = c_bool
 
@@ -2409,6 +2483,15 @@ class CarlaHostDLL(CarlaHostMeta):
 
         self.lib.carla_get_runtime_engine_info.argtypes = None
         self.lib.carla_get_runtime_engine_info.restype = POINTER(CarlaRuntimeEngineInfo)
+
+        self.lib.carla_get_runtime_engine_driver_device_info.argtypes = None
+        self.lib.carla_get_runtime_engine_driver_device_info.restype = POINTER(CarlaRuntimeEngineDriverDeviceInfo)
+
+        self.lib.carla_set_engine_buffer_size_and_sample_rate.argtypes = [c_uint, c_double]
+        self.lib.carla_set_engine_buffer_size_and_sample_rate.restype = c_bool
+
+        self.lib.carla_show_engine_device_control_panel.argtypes = None
+        self.lib.carla_show_engine_device_control_panel.restype = c_bool
 
         self.lib.carla_clear_engine_xruns.argtypes = None
         self.lib.carla_clear_engine_xruns.restype = None
@@ -2685,6 +2768,9 @@ class CarlaHostDLL(CarlaHostMeta):
     def get_engine_driver_device_info(self, index, name):
         return structToDict(self.lib.carla_get_engine_driver_device_info(index, name.encode("utf-8")).contents)
 
+    def show_engine_driver_device_control_panel(self, index, name):
+        return bool(self.lib.carla_show_engine_driver_device_control_panel(index, name.encode("utf-8")))
+
     def engine_init(self, driverName, clientName):
         return bool(self.lib.carla_engine_init(driverName.encode("utf-8"), clientName.encode("utf-8")))
 
@@ -2700,11 +2786,20 @@ class CarlaHostDLL(CarlaHostMeta):
     def get_runtime_engine_info(self):
         return structToDict(self.lib.carla_get_runtime_engine_info().contents)
 
+    def get_runtime_engine_driver_device_info(self):
+        return structToDict(self.lib.carla_get_runtime_engine_driver_device_info().contents)
+
+    def set_engine_buffer_size_and_sample_rate(self, bufferSize, sampleRate):
+        return bool(self.lib.carla_set_engine_buffer_size_and_sample_rate(bufferSize, sampleRate))
+
+    def show_engine_device_control_panel(self):
+        return bool(self.lib.carla_show_engine_device_control_panel())
+
     def clear_engine_xruns(self):
-        return self.lib.carla_clear_engine_xruns()
+        self.lib.carla_clear_engine_xruns()
 
     def cancel_engine_action(self):
-        return self.lib.carla_cancel_engine_action()
+        self.lib.carla_cancel_engine_action()
 
     def set_engine_about_to_close(self):
         return bool(self.lib.carla_set_engine_about_to_close())
@@ -3078,8 +3173,20 @@ class CarlaHostPlugin(CarlaHostMeta):
     def get_engine_driver_device_info(self, index, name):
         return PyEngineDriverDeviceInfo
 
+    def show_engine_driver_device_control_panel(self, index, name):
+        return False
+
     def get_runtime_engine_info(self):
         return self.fRuntimeEngineInfo
+
+    def get_runtime_engine_driver_device_info(self):
+        return PyCarlaRuntimeEngineDriverDeviceInfo
+
+    def set_engine_buffer_size_and_sample_rate(self, bufferSize, sampleRate):
+        return False
+
+    def show_engine_device_control_panel(self):
+        return False
 
     def clear_engine_xruns(self):
         self.sendMsg(["clear_engine_xruns"])

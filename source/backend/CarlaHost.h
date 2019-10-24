@@ -128,7 +128,7 @@ typedef struct _CarlaPluginInfo {
 
     /*!
      * Plugin unique Id.
-     * This Id is dependant on the plugin type and may sometimes be 0.
+     * This Id is dependent on the plugin type and may sometimes be 0.
      */
     int64_t uniqueId;
 
@@ -291,6 +291,45 @@ typedef struct _CarlaRuntimeEngineInfo {
 } CarlaRuntimeEngineInfo;
 
 /*!
+ * Runtime engine driver device information.
+ */
+typedef struct {
+    /*!
+     * Name of the driver device.
+     */
+    const char* name;
+
+    /*!
+     * This driver device hints.
+     * @see EngineDriverHints
+     */
+    uint hints;
+
+    /*!
+     * Current buffer size.
+     */
+    uint bufferSize;
+
+    /*!
+     * Available buffer sizes.
+     * Terminated with 0.
+     */
+    const uint32_t* bufferSizes;
+
+    /*!
+     * Current sample rate.
+     */
+    double sampleRate;
+
+    /*!
+     * Available sample rates.
+     * Terminated with 0.0.
+     */
+    const double* sampleRates;
+
+} CarlaRuntimeEngineDriverDeviceInfo;
+
+/*!
  * Image data for LV2 inline display API.
  * raw image pixmap format is ARGB32,
  */
@@ -327,6 +366,14 @@ CARLA_EXPORT const char* const* carla_get_engine_driver_device_names(uint index)
  * @param name  Device name
  */
 CARLA_EXPORT const EngineDriverDeviceInfo* carla_get_engine_driver_device_info(uint index, const char* name);
+
+/*!
+ * Show a device custom control panel.
+ * @see ENGINE_DRIVER_DEVICE_HAS_CONTROL_PANEL
+ * @param index Driver index
+ * @param name  Device name
+ */
+CARLA_EXPORT bool carla_show_engine_driver_device_control_panel(uint index, const char* name);
 
 #ifdef __cplusplus
 /*!
@@ -374,6 +421,24 @@ CARLA_EXPORT bool carla_is_engine_running();
  * Get information about the currently running engine.
  */
 CARLA_EXPORT const CarlaRuntimeEngineInfo* carla_get_runtime_engine_info();
+
+/*!
+ * Get information about the currently running engine driver device.
+ */
+CARLA_EXPORT const CarlaRuntimeEngineDriverDeviceInfo* carla_get_runtime_engine_driver_device_info();
+
+/*!
+ * Dynamically change buffer size and/or sample rate while engine is running.
+ * @see ENGINE_DRIVER_DEVICE_VARIABLE_BUFFER_SIZE
+ * @see ENGINE_DRIVER_DEVICE_VARIABLE_SAMPLE_RATE
+ */
+CARLA_EXPORT bool carla_set_engine_buffer_size_and_sample_rate(uint bufferSize, double sampleRate);
+
+/*!
+ * Show the custom control panel for the current engine device.
+ * @see ENGINE_DRIVER_DEVICE_HAS_CONTROL_PANEL
+ */
+CARLA_EXPORT bool carla_show_engine_device_control_panel();
 
 /*!
  * Clear the xrun count on the engine, so that the next time carla_get_runtime_engine_info() is called, it returns 0.

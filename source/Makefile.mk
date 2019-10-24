@@ -119,7 +119,7 @@ endif
 
 ifeq ($(NOOPT),true)
 # No CPU-specific optimization flags
-BASE_OPTS  = -O2 -ffast-math -fdata-sections -ffunction-sections
+BASE_OPTS  = -O2 -ffast-math -fdata-sections -ffunction-sections -DBUILDING_CARLA_NOOPT
 endif
 
 ifeq ($(WIN32),true)
@@ -218,10 +218,9 @@ HAVE_HYLIA = true
 endif
 endif
 
-# FIXME make mingw compatible
-# ifeq ($(WIN32),true)
-# HAVE_HYLIA = true
-# endif
+ifeq ($(WIN32),true)
+HAVE_HYLIA = true
+endif
 
 ifeq ($(MACOS_OR_WIN32),true)
 HAVE_DGL   = true
@@ -522,6 +521,7 @@ endif
 
 ifeq ($(WIN32),true)
 HYLIA_FLAGS      = -DLINK_PLATFORM_WINDOWS=1
+HYLIA_LIBS       = -liphlpapi
 JACKBRIDGE_LIBS  = -lpthread
 LILV_LIBS        = -lm
 RTMEMPOOL_LIBS   = -lpthread

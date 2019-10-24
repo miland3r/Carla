@@ -1926,7 +1926,7 @@ const LV2_RDF_Descriptor* lv2_rdf_new(const LV2_URI uri, const bool loadPresets)
                     rdfPort->Types |= LV2_PORT_DATA_MIDI_EVENT;
                 }
                 else
-                    carla_stderr("lv2_rdf_new(\"%s\") - port '%s' is of unkown data type", uri, rdfPort->Name);
+                    carla_stderr("lv2_rdf_new(\"%s\") - port '%s' is of unknown data type", uri, rdfPort->Name);
             }
 
             // --------------------------------------------------------------------------------------------------------
@@ -2942,6 +2942,8 @@ bool is_lv2_feature_supported(const LV2_URI uri) noexcept
     if (std::strcmp(uri, LV2_CORE__isLive) == 0)
         return true;
     if (std::strcmp(uri, LV2_EVENT_URI) == 0)
+        return true;
+    if (std::strcmp(uri, LV2_INLINEDISPLAY__queue_draw) == 0)
         return true;
     if (std::strcmp(uri, LV2_LOG__log) == 0)
         return true;
