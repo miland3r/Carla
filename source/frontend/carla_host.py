@@ -142,6 +142,9 @@ class HostWindow(QMainWindow):
         self.fPluginCount = 0
         self.fPluginList  = []
 
+        self.fPluginDatabaseDialog = None
+        self.fFavoritePlugins = []
+
         self.fProjectFilename  = ""
         self.fIsProjectLoading = False
         self.fCurrentlyRemovingAllPlugins = False
@@ -873,12 +876,14 @@ class HostWindow(QMainWindow):
         if not dialog.exec_():
             return
 
-        if not self.host.is_engine_running():
-            QMessageBox.warning(self, self.tr("Warning"), self.tr("Engine was stopped while configuring settings, all changes have been ignored"))
-            return
+        audioDevice, bufferSize, sampleRate = dialog.getValues()
 
-        bufferSize, sampleRate = dialog.getValues()
-        self.host.set_engine_buffer_size_and_sample_rate(bufferSize, sampleRate)
+        if self.host.is_engine_running():
+            self.host.set_engine_buffer_size_and_sample_rate(bufferSize, sampleRate)
+        else:
+            self.host.set_engine_option(ENGINE_OPTION_AUDIO_DEVICE, 0, audioDevice)
+            self.host.set_engine_option(ENGINE_OPTION_AUDIO_BUFFER_SIZE, bufferSize, "")
+            self.host.set_engine_option(ENGINE_OPTION_AUDIO_SAMPLE_RATE, sampleRate, "")
 
     @pyqtSlot()
     def slot_engineStopTryAgain(self):
@@ -1067,9 +1072,16 @@ class HostWindow(QMainWindow):
     # Plugins (menu actions)
 
     def showAddPluginDialog(self):
-        dialog = PluginDatabaseW(self.fParentOrSelf, self.host)
+        if self.fPluginDatabaseDialog is None:
+            self.fPluginDatabaseDialog = PluginDatabaseW(self.fParentOrSelf, self.host)
+        dialog = self.fPluginDatabaseDialog
 
-        if not dialog.exec_():
+        ret = dialog.exec_()
+
+        if dialog.fFavoritePluginsChanged:
+            self.fFavoritePlugins = dialog.fFavoritePlugins
+
+        if not ret:
             return
 
         if not self.host.is_engine_running():
@@ -1098,11 +1110,35 @@ class HostWindow(QMainWindow):
         return dialog.getCommandAndFlags()
 
     @pyqtSlot()
+    def slot_favoritePluginAdd(self):
+        plugin = self.sender().data()
+
+        if plugin is None:
+            return
+
+        if not self.host.add_plugin(plugin['build'], plugin['type'], plugin['filename'], None,
+                                    plugin['label'], plugin['uniqueId'], None, 0x0):
+            CustomMessageBox(self,
+                             QMessageBox.Critical,
+                             self.tr("Error"),
+                             self.tr("Failed to load plugin"),
+                             self.host.get_last_error(), QMessageBox.Ok, QMessageBox.Ok)
+
+    @pyqtSlot()
     def showPluginActionsMenu(self):
         menu = QMenu(self)
 
         menu.addSection("Plugins")
         menu.addAction(self.ui.act_plugin_add)
+
+        if len(self.fFavoritePlugins) != 0:
+            fmenu = QMenu("Add from favorites", self)
+            for p in self.fFavoritePlugins:
+                act = fmenu.addAction(p['name'])
+                act.setData(p)
+                act.triggered.connect(self.slot_favoritePluginAdd)
+            menu.addMenu(fmenu)
+
         menu.addAction(self.ui.act_plugin_remove_all)
 
         menu.addSection("All plugins (macros)")
@@ -1730,6 +1766,9 @@ class HostWindow(QMainWindow):
             self.ui.scrollArea.setVisible(showKeyboard)
 
             QTimer.singleShot(100, self.slot_restoreCanvasScrollbarValues)
+
+            settingsDBf = QSettings("falkTX", "CarlaDatabase2")
+            self.fFavoritePlugins = settingsDBf.value("PluginDatabase/Favorites", [], type=list)
 
         # TODO - complete this
 
@@ -3161,6 +3200,7 @@ def setEngineSettings(host):
 
     # Only setup audio things if engine is not running
     if not host.is_engine_running():
+        host.set_engine_option(ENGINE_OPTION_AUDIO_DRIVER, 0, audioDriver)
         host.set_engine_option(ENGINE_OPTION_AUDIO_DEVICE, 0, audioDevice)
 
         if not audioDriver.startswith("JACK"):

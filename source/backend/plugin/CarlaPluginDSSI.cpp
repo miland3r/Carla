@@ -468,68 +468,69 @@ public:
         return fParamBuffers[parameterId];
     }
 
-    void getLabel(char* const strBuf) const noexcept override
+    bool getLabel(char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor        != nullptr, nullStrBuf(strBuf));
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor->Label != nullptr, nullStrBuf(strBuf));
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor->Label != nullptr, false);
 
         std::strncpy(strBuf, fDescriptor->Label, STR_MAX);
+        return true;
     }
 
-    void getMaker(char* const strBuf) const noexcept override
+    bool getMaker(char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor        != nullptr, nullStrBuf(strBuf));
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor->Maker != nullptr, nullStrBuf(strBuf));
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor->Maker != nullptr, false);
 
         std::strncpy(strBuf, fDescriptor->Maker, STR_MAX);
+        return true;
     }
 
-    void getCopyright(char* const strBuf) const noexcept override
+    bool getCopyright(char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor            != nullptr, nullStrBuf(strBuf));
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor->Copyright != nullptr, nullStrBuf(strBuf));
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor->Copyright != nullptr, false);
 
         std::strncpy(strBuf, fDescriptor->Copyright, STR_MAX);
+        return true;
     }
 
-    void getRealName(char* const strBuf) const noexcept override
+    bool getRealName(char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor       != nullptr, nullStrBuf(strBuf));
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor->Name != nullptr, nullStrBuf(strBuf));
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor->Name != nullptr, false);
 
         std::strncpy(strBuf, fDescriptor->Name, STR_MAX);
+        return true;
     }
 
-    void getParameterName(const uint32_t parameterId, char* const strBuf) const noexcept override
+    bool getParameterName(const uint32_t parameterId, char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr,           nullStrBuf(strBuf));
-        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, nullStrBuf(strBuf));
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, false);
 
         const int32_t rindex(pData->param.data[parameterId].rindex);
-        CARLA_SAFE_ASSERT_RETURN(rindex >= 0,                                           nullStrBuf(strBuf));
-        CARLA_SAFE_ASSERT_RETURN(rindex < static_cast<int32_t>(fDescriptor->PortCount), nullStrBuf(strBuf));
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor->PortNames[rindex] != nullptr,             nullStrBuf(strBuf));
+        CARLA_SAFE_ASSERT_RETURN(rindex >= 0, false);
+        CARLA_SAFE_ASSERT_RETURN(rindex < static_cast<int32_t>(fDescriptor->PortCount), false);
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor->PortNames[rindex] != nullptr, false);
 
-        if (getSeparatedParameterNameOrUnit(fDescriptor->PortNames[rindex], strBuf, true))
-            return;
+        if (! getSeparatedParameterNameOrUnit(fDescriptor->PortNames[rindex], strBuf, true))
+            std::strncpy(strBuf, fDescriptor->PortNames[rindex], STR_MAX);
 
-        std::strncpy(strBuf, fDescriptor->PortNames[rindex], STR_MAX);
+        return true;
     }
 
-    void getParameterUnit(const uint32_t parameterId, char* const strBuf) const noexcept override
+    bool getParameterUnit(const uint32_t parameterId, char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, nullStrBuf(strBuf));
+        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, false);
 
         const int32_t rindex(pData->param.data[parameterId].rindex);
-        CARLA_SAFE_ASSERT_RETURN(rindex >= 0, nullStrBuf(strBuf));
+        CARLA_SAFE_ASSERT_RETURN(rindex >= 0, false);
 
-        CARLA_SAFE_ASSERT_RETURN(rindex < static_cast<int32_t>(fDescriptor->PortCount), nullStrBuf(strBuf));
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor->PortNames[rindex] != nullptr,             nullStrBuf(strBuf));
+        CARLA_SAFE_ASSERT_RETURN(rindex < static_cast<int32_t>(fDescriptor->PortCount), false);
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor->PortNames[rindex] != nullptr, false);
 
-        if (getSeparatedParameterNameOrUnit(fDescriptor->PortNames[rindex], strBuf, false))
-            return;
-
-        nullStrBuf(strBuf);
+        return getSeparatedParameterNameOrUnit(fDescriptor->PortNames[rindex], strBuf, false);
     }
 
     // -------------------------------------------------------------------
@@ -563,7 +564,7 @@ public:
         CarlaPlugin::setParameterValue(parameterId, fixedValue, sendGui, sendOsc, sendCallback);
     }
 
-    void setParameterValueRT(const uint32_t parameterId, const float value) noexcept override
+    void setParameterValueRT(const uint32_t parameterId, const float value, const bool sendCallbackLater) noexcept override
     {
         CARLA_SAFE_ASSERT_RETURN(fParamBuffers != nullptr,);
         CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count,);
@@ -571,7 +572,7 @@ public:
         const float fixedValue(pData->param.getFixedValue(parameterId, value));
         fParamBuffers[parameterId] = fixedValue;
 
-        CarlaPlugin::setParameterValueRT(parameterId, fixedValue);
+        CarlaPlugin::setParameterValueRT(parameterId, fixedValue, sendCallbackLater);
     }
 
     void setCustomData(const char* const type, const char* const key, const char* const value, const bool sendGui) override
@@ -660,7 +661,7 @@ public:
         CarlaPlugin::setMidiProgram(index, sendGui, sendOsc, sendCallback, doingInit);
     }
 
-    void setMidiProgramRT(const uint32_t uindex) noexcept override
+    void setMidiProgramRT(const uint32_t uindex, const bool sendCallbackLater) noexcept override
     {
         CARLA_SAFE_ASSERT_RETURN(fDssiDescriptor != nullptr,);
         CARLA_SAFE_ASSERT_RETURN(fDssiDescriptor->select_program != nullptr,);
@@ -668,7 +669,7 @@ public:
 
         setMidiProgramInDSSI(uindex);
 
-        CarlaPlugin::setMidiProgramRT(uindex);
+        CarlaPlugin::setMidiProgramRT(uindex, sendCallbackLater);
     }
 
     void setMidiProgramInDSSI(const uint32_t uindex) noexcept
@@ -1458,13 +1459,13 @@ public:
                             if (MIDI_IS_CONTROL_BREATH_CONTROLLER(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_DRYWET) != 0)
                             {
                                 value = ctrlEvent.value;
-                                setDryWetRT(value);
+                                setDryWetRT(value, true);
                             }
 
                             if (MIDI_IS_CONTROL_CHANNEL_VOLUME(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_VOLUME) != 0)
                             {
                                 value = ctrlEvent.value*127.0f/100.0f;
-                                setVolumeRT(value);
+                                setVolumeRT(value, true);
                             }
 
                             if (MIDI_IS_CONTROL_BALANCE(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_BALANCE) != 0)
@@ -1488,8 +1489,8 @@ public:
                                     right = 1.0f;
                                 }
 
-                                setBalanceLeftRT(left);
-                                setBalanceRightRT(right);
+                                setBalanceLeftRT(left, true);
+                                setBalanceRightRT(right, true);
                             }
                         }
 #endif
@@ -1522,7 +1523,7 @@ public:
                                     value = std::rint(value);
                             }
 
-                            setParameterValueRT(k, value);
+                            setParameterValueRT(k, value, true);
                         }
 
                         if ((pData->options & PLUGIN_OPTION_SEND_CONTROL_CHANGES) != 0 && ctrlEvent.param < MAX_MIDI_CONTROL)
@@ -1557,7 +1558,7 @@ public:
                             {
                                 if (pData->midiprog.data[k].bank == nextBankId && pData->midiprog.data[k].program == nextProgramId)
                                 {
-                                    setMidiProgramRT(k);
+                                    setMidiProgramRT(k, true);
                                     break;
                                 }
                             }
@@ -1635,7 +1636,7 @@ public:
                         seqEvent.data.note.channel = event.channel;
                         seqEvent.data.note.note    = note;
 
-                        pData->postponeRtEvent(kPluginPostRtEventNoteOff, event.channel, note, 0, 0.0f);
+                        pData->postponeRtEvent(kPluginPostRtEventNoteOff, true, event.channel, note, 0, 0.0f);
                         break;
                     }
 
@@ -1648,7 +1649,7 @@ public:
                         seqEvent.data.note.note     = note;
                         seqEvent.data.note.velocity = velo;
 
-                        pData->postponeRtEvent(kPluginPostRtEventNoteOn, event.channel, note, velo, 0.0f);
+                        pData->postponeRtEvent(kPluginPostRtEventNoteOn, true, event.channel, note, velo, 0.0f);
                         break;
                     }
 

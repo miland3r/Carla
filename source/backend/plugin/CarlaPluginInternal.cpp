@@ -244,7 +244,7 @@ void PluginParameterData::clear() noexcept
     count = 0;
 }
 
-float PluginParameterData::getFixedValue(const uint32_t parameterId, const float& value) const noexcept
+float PluginParameterData::getFixedValue(const uint32_t parameterId, float value) const noexcept
 {
     CARLA_SAFE_ASSERT_RETURN(parameterId < count, 0.0f);
 
@@ -750,6 +750,7 @@ void CarlaPlugin::ProtectedData::postponeRtEvent(const PluginPostRtEvent& rtEven
 }
 
 void CarlaPlugin::ProtectedData::postponeRtEvent(const PluginPostRtEventType type,
+                                                 const bool sendCallbackLater,
                                                  const int32_t value1,
                                                  const int32_t value2,
                                                  const int32_t value3,
@@ -757,7 +758,7 @@ void CarlaPlugin::ProtectedData::postponeRtEvent(const PluginPostRtEventType typ
 {
     CARLA_SAFE_ASSERT_RETURN(type != kPluginPostRtEventNull,);
 
-    PluginPostRtEvent rtEvent = { type, value1, value2, value3, valuef };
+    PluginPostRtEvent rtEvent = { type, sendCallbackLater, value1, value2, value3, valuef };
 
     postRtEvents.appendRT(rtEvent);
 }

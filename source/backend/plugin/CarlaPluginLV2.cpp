@@ -68,6 +68,7 @@ const uint PLUGIN_HAS_EXTENSION_PROGRAMS       = 0x02000;
 const uint PLUGIN_HAS_EXTENSION_STATE          = 0x04000;
 const uint PLUGIN_HAS_EXTENSION_WORKER         = 0x08000;
 const uint PLUGIN_HAS_EXTENSION_INLINE_DISPLAY = 0x10000;
+const uint PLUGIN_HAS_EXTENSION_MIDNAM         = 0x20000;
 
 // Extra Parameter Hints
 const uint PARAMETER_IS_STRICT_BOUNDS = 0x1000;
@@ -165,6 +166,7 @@ enum CarlaLv2Features {
     kFeatureIdUridUnmap,
     kFeatureIdWorker,
     kFeatureIdInlineDisplay,
+    kFeatureIdMidnam,
     kFeatureCountPlugin,
     // UI features
     kFeatureIdUiDataAccess = kFeatureCountPlugin,
@@ -934,55 +936,66 @@ public:
         return 0.0f;
     }
 
-    void getLabel(char* const strBuf) const noexcept override
+    bool getLabel(char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(fRdfDescriptor != nullptr,);
-        CARLA_SAFE_ASSERT_RETURN(fRdfDescriptor->URI != nullptr,);
+        CARLA_SAFE_ASSERT_RETURN(fRdfDescriptor != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(fRdfDescriptor->URI != nullptr, false);
 
         std::strncpy(strBuf, fRdfDescriptor->URI, STR_MAX);
+        return true;
     }
 
-    void getMaker(char* const strBuf) const noexcept override
+    bool getMaker(char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(fRdfDescriptor != nullptr,);
+        CARLA_SAFE_ASSERT_RETURN(fRdfDescriptor != nullptr, false);
 
         if (fRdfDescriptor->Author != nullptr)
+        {
             std::strncpy(strBuf, fRdfDescriptor->Author, STR_MAX);
-        else
-            CarlaPlugin::getMaker(strBuf);
+            return true;
+        }
+
+        return false;
     }
 
-    void getCopyright(char* const strBuf) const noexcept override
+    bool getCopyright(char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(fRdfDescriptor != nullptr,);
+        CARLA_SAFE_ASSERT_RETURN(fRdfDescriptor != nullptr, false);
 
         if (fRdfDescriptor->License != nullptr)
+        {
             std::strncpy(strBuf, fRdfDescriptor->License, STR_MAX);
-        else
-            CarlaPlugin::getCopyright(strBuf);
+            return true;
+        }
+
+        return false;
     }
 
-    void getRealName(char* const strBuf) const noexcept override
+    bool getRealName(char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(fRdfDescriptor != nullptr,);
+        CARLA_SAFE_ASSERT_RETURN(fRdfDescriptor != nullptr, false);
 
         if (fRdfDescriptor->Name != nullptr)
+        {
             std::strncpy(strBuf, fRdfDescriptor->Name, STR_MAX);
-        else
-            CarlaPlugin::getRealName(strBuf);
+            return true;
+        }
+
+        return false;
     }
 
-    void getParameterName(const uint32_t parameterId, char* const strBuf) const noexcept override
+    bool getParameterName(const uint32_t parameterId, char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(fRdfDescriptor != nullptr,);
-        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count,);
+        CARLA_SAFE_ASSERT_RETURN(fRdfDescriptor != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, false);
 
         int32_t rindex = pData->param.data[parameterId].rindex;
+        CARLA_SAFE_ASSERT_RETURN(rindex >= 0, false);
 
         if (rindex < static_cast<int32_t>(fRdfDescriptor->PortCount))
         {
             std::strncpy(strBuf, fRdfDescriptor->Ports[rindex].Name, STR_MAX);
-            return;
+            return true;
         }
 
         rindex -= static_cast<int32_t>(fRdfDescriptor->PortCount);
@@ -990,23 +1003,24 @@ public:
         if (rindex < static_cast<int32_t>(fRdfDescriptor->ParameterCount))
         {
             std::strncpy(strBuf, fRdfDescriptor->Parameters[rindex].Label, STR_MAX);
-            return;
+            return true;
         }
 
-        CarlaPlugin::getParameterName(parameterId, strBuf);
+        return CarlaPlugin::getParameterName(parameterId, strBuf);
     }
 
-    void getParameterSymbol(const uint32_t parameterId, char* const strBuf) const noexcept override
+    bool getParameterSymbol(const uint32_t parameterId, char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(fRdfDescriptor != nullptr,);
-        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count,);
+        CARLA_SAFE_ASSERT_RETURN(fRdfDescriptor != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, false);
 
         int32_t rindex = pData->param.data[parameterId].rindex;
+        CARLA_SAFE_ASSERT_RETURN(rindex >= 0, false);
 
         if (rindex < static_cast<int32_t>(fRdfDescriptor->PortCount))
         {
             std::strncpy(strBuf, fRdfDescriptor->Ports[rindex].Symbol, STR_MAX);
-            return;
+            return true;
         }
 
         rindex -= static_cast<int32_t>(fRdfDescriptor->PortCount);
@@ -1014,20 +1028,21 @@ public:
         if (rindex < static_cast<int32_t>(fRdfDescriptor->ParameterCount))
         {
             std::strncpy(strBuf, fRdfDescriptor->Parameters[rindex].URI, STR_MAX);
-            return;
+            return true;
         }
 
-        CarlaPlugin::getParameterSymbol(parameterId, strBuf);
+        return CarlaPlugin::getParameterSymbol(parameterId, strBuf);
     }
 
-    void getParameterUnit(const uint32_t parameterId, char* const strBuf) const noexcept override
+    bool getParameterUnit(const uint32_t parameterId, char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(fRdfDescriptor != nullptr,);
-        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count,);
+        CARLA_SAFE_ASSERT_RETURN(fRdfDescriptor != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, false);
 
         LV2_RDF_PortUnit* portUnit = nullptr;
 
         int32_t rindex = pData->param.data[parameterId].rindex;
+        CARLA_SAFE_ASSERT_RETURN(rindex >= 0, false);
 
         if (rindex < static_cast<int32_t>(fRdfDescriptor->PortCount))
         {
@@ -1048,7 +1063,7 @@ public:
             if (LV2_HAVE_PORT_UNIT_SYMBOL(portUnit->Hints) && portUnit->Symbol != nullptr)
             {
                 std::strncpy(strBuf, portUnit->Symbol, STR_MAX);
-                return;
+                return true;
             }
 
             if (LV2_HAVE_PORT_UNIT_UNIT(portUnit->Hints))
@@ -1057,105 +1072,183 @@ public:
                 {
                 case LV2_PORT_UNIT_BAR:
                     std::strncpy(strBuf, "bars", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_BEAT:
                     std::strncpy(strBuf, "beats", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_BPM:
                     std::strncpy(strBuf, "BPM", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_CENT:
                     std::strncpy(strBuf, "ct", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_CM:
                     std::strncpy(strBuf, "cm", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_COEF:
                     std::strncpy(strBuf, "(coef)", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_DB:
                     std::strncpy(strBuf, "dB", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_DEGREE:
                     std::strncpy(strBuf, "deg", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_FRAME:
                     std::strncpy(strBuf, "frames", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_HZ:
                     std::strncpy(strBuf, "Hz", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_INCH:
                     std::strncpy(strBuf, "in", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_KHZ:
                     std::strncpy(strBuf, "kHz", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_KM:
                     std::strncpy(strBuf, "km", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_M:
                     std::strncpy(strBuf, "m", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_MHZ:
                     std::strncpy(strBuf, "MHz", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_MIDINOTE:
                     std::strncpy(strBuf, "note", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_MILE:
                     std::strncpy(strBuf, "mi", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_MIN:
                     std::strncpy(strBuf, "min", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_MM:
                     std::strncpy(strBuf, "mm", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_MS:
                     std::strncpy(strBuf, "ms", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_OCT:
                     std::strncpy(strBuf, "oct", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_PC:
                     std::strncpy(strBuf, "%", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_S:
                     std::strncpy(strBuf, "s", STR_MAX);
-                    return;
+                    return true;
                 case LV2_PORT_UNIT_SEMITONE:
                     std::strncpy(strBuf, "semi", STR_MAX);
-                    return;
+                    return true;
                 }
             }
         }
 
-        CarlaPlugin::getParameterUnit(parameterId, strBuf);
+        return CarlaPlugin::getParameterUnit(parameterId, strBuf);
     }
 
-    void getParameterScalePointLabel(const uint32_t parameterId, const uint32_t scalePointId, char* const strBuf) const noexcept override
+    bool getParameterComment(const uint32_t parameterId, char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(fRdfDescriptor != nullptr,);
-        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count,);
+        CARLA_SAFE_ASSERT_RETURN(fRdfDescriptor != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, false);
+
+        int32_t rindex = pData->param.data[parameterId].rindex;
+        CARLA_SAFE_ASSERT_RETURN(rindex >= 0, false);
+
+        if (rindex < static_cast<int32_t>(fRdfDescriptor->PortCount))
+        {
+            if (const char* const comment = fRdfDescriptor->Ports[rindex].Comment)
+            {
+                std::strncpy(strBuf, comment, STR_MAX);
+                return true;
+            }
+            return false;
+        }
+
+        rindex -= static_cast<int32_t>(fRdfDescriptor->PortCount);
+
+        if (rindex < static_cast<int32_t>(fRdfDescriptor->ParameterCount))
+        {
+            if (const char* const comment = fRdfDescriptor->Parameters[rindex].Comment)
+            {
+                std::strncpy(strBuf, comment, STR_MAX);
+                return true;
+            }
+            return false;
+        }
+
+        return CarlaPlugin::getParameterComment(parameterId, strBuf);
+    }
+
+    bool getParameterGroupName(const uint32_t parameterId, char* const strBuf) const noexcept override
+    {
+        CARLA_SAFE_ASSERT_RETURN(fRdfDescriptor != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, false);
+
+        int32_t rindex = pData->param.data[parameterId].rindex;
+        CARLA_SAFE_ASSERT_RETURN(rindex >= 0, false);
+
+        const char* uri = nullptr;
+
+        if (rindex < static_cast<int32_t>(fRdfDescriptor->PortCount))
+        {
+            uri = fRdfDescriptor->Ports[rindex].GroupURI;
+        }
+        else
+        {
+            rindex -= static_cast<int32_t>(fRdfDescriptor->PortCount);
+
+            if (rindex < static_cast<int32_t>(fRdfDescriptor->ParameterCount))
+                uri = fRdfDescriptor->Parameters[rindex].GroupURI;
+        }
+
+        if (uri == nullptr)
+            return false;
+
+        for (uint32_t i=0; i<fRdfDescriptor->PortGroupCount; ++i)
+        {
+            if (std::strcmp(fRdfDescriptor->PortGroups[i].URI, uri) == 0)
+            {
+                const char* const name   = fRdfDescriptor->PortGroups[i].Name;
+                const char* const symbol = fRdfDescriptor->PortGroups[i].Symbol;
+
+                if (name != nullptr && symbol != nullptr)
+                {
+                    std::snprintf(strBuf, STR_MAX, "%s:%s", symbol, name);
+                    return true;
+                }
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    bool getParameterScalePointLabel(const uint32_t parameterId, const uint32_t scalePointId, char* const strBuf) const noexcept override
+    {
+        CARLA_SAFE_ASSERT_RETURN(fRdfDescriptor != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, false);
 
         const int32_t rindex(pData->param.data[parameterId].rindex);
+        CARLA_SAFE_ASSERT_RETURN(rindex >= 0, false);
 
         if (rindex < static_cast<int32_t>(fRdfDescriptor->PortCount))
         {
             const LV2_RDF_Port* const port(&fRdfDescriptor->Ports[rindex]);
-            CARLA_SAFE_ASSERT_RETURN(scalePointId < port->ScalePointCount,);
+            CARLA_SAFE_ASSERT_RETURN(scalePointId < port->ScalePointCount, false);
 
             const LV2_RDF_PortScalePoint* const portScalePoint(&port->ScalePoints[scalePointId]);
 
             if (portScalePoint->Label != nullptr)
             {
                 std::strncpy(strBuf, portScalePoint->Label, STR_MAX);
-                return;
+                return true;
             }
         }
 
-        CarlaPlugin::getParameterScalePointLabel(parameterId, scalePointId, strBuf);
+        return CarlaPlugin::getParameterScalePointLabel(parameterId, scalePointId, strBuf);
     }
 
     // -------------------------------------------------------------------
@@ -1272,14 +1365,14 @@ public:
         CarlaPlugin::setParameterValue(parameterId, fixedValue, sendGui, sendOsc, sendCallback);
     }
 
-    void setParameterValueRT(const uint32_t parameterId, const float value) noexcept override
+    void setParameterValueRT(const uint32_t parameterId, const float value, const bool sendCallbackLater) noexcept override
     {
         CARLA_SAFE_ASSERT_RETURN(fParamBuffers != nullptr,);
         CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count,);
 
         const float fixedValue = setParamterValueCommon(parameterId, value);
 
-        CarlaPlugin::setParameterValueRT(parameterId, fixedValue);
+        CarlaPlugin::setParameterValueRT(parameterId, fixedValue, sendCallbackLater);
     }
 
     void setCustomData(const char* const type, const char* const key, const char* const value, const bool sendGui) override
@@ -1362,7 +1455,7 @@ public:
         CarlaPlugin::setMidiProgram(index, sendGui, sendOsc, sendCallback, doingInit);
     }
 
-    void setMidiProgramRT(const uint32_t uindex) noexcept override
+    void setMidiProgramRT(const uint32_t uindex, const bool sendCallbackLater) noexcept override
     {
         CARLA_SAFE_ASSERT_RETURN(fHandle != nullptr,);
         CARLA_SAFE_ASSERT_RETURN(uindex < pData->midiprog.count,);
@@ -1384,7 +1477,7 @@ public:
             }
         }
 
-        CarlaPlugin::setMidiProgramRT(uindex);
+        CarlaPlugin::setMidiProgramRT(uindex, sendCallbackLater);
     }
 
     // -------------------------------------------------------------------
@@ -2744,6 +2837,17 @@ public:
         if (fEventsOut.ctrl != nullptr && fEventsOut.ctrl->port == nullptr)
             fEventsOut.ctrl->port = pData->event.portOut;
 
+        if (fEventsIn.ctrl != nullptr && fExt.midnam != nullptr)
+        {
+            if (char* const midnam = fExt.midnam->midnam(fHandle))
+            {
+                fEventsIn.ctrl->port->setMetaData("http://www.midi.org/dtds/MIDINameDocument10.dtd",
+                                                    midnam, "text/xml");
+                if (fExt.midnam->free != nullptr)
+                    fExt.midnam->free(midnam);
+            }
+        }
+
         if (forcedStereoIn || forcedStereoOut)
             pData->options |= PLUGIN_OPTION_FORCE_STEREO;
         else
@@ -3238,6 +3342,7 @@ public:
 
                 if (doPostRt)
                     pData->postponeRtEvent(kPluginPostRtEventParameterChange,
+                                           true,
                                            static_cast<int32_t>(k),
                                            0,
                                            0,
@@ -3500,13 +3605,13 @@ public:
                             if (MIDI_IS_CONTROL_BREATH_CONTROLLER(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_DRYWET) != 0)
                             {
                                 value = ctrlEvent.value;
-                                setDryWetRT(value);
+                                setDryWetRT(value, true);
                             }
 
                             if (MIDI_IS_CONTROL_CHANNEL_VOLUME(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_VOLUME) != 0)
                             {
                                 value = ctrlEvent.value*127.0f/100.0f;
-                                setVolumeRT(value);
+                                setVolumeRT(value, true);
                             }
 
                             if (MIDI_IS_CONTROL_BALANCE(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_BALANCE) != 0)
@@ -3530,8 +3635,8 @@ public:
                                     right = 1.0f;
                                 }
 
-                                setBalanceLeftRT(left);
-                                setBalanceRightRT(right);
+                                setBalanceLeftRT(left, true);
+                                setBalanceRightRT(right, true);
                             }
                         }
 #endif
@@ -3565,7 +3670,7 @@ public:
                                     value = std::rint(value);
                             }
 
-                            setParameterValueRT(k, value);
+                            setParameterValueRT(k, value, true);
                         }
 
                         if ((pData->options & PLUGIN_OPTION_SEND_CONTROL_CHANGES) != 0 && ctrlEvent.param < MAX_MIDI_CONTROL)
@@ -3627,7 +3732,7 @@ public:
                                 {
                                     if (pData->midiprog.data[k].bank == nextBankId && pData->midiprog.data[k].program == nextProgramId)
                                     {
-                                        setMidiProgramRT(k);
+                                        setMidiProgramRT(k, true);
                                         break;
                                     }
                                 }
@@ -3745,6 +3850,7 @@ public:
                     if (status == MIDI_STATUS_NOTE_ON)
                     {
                         pData->postponeRtEvent(kPluginPostRtEventNoteOn,
+                                               true,
                                                event.channel,
                                                midiData[1],
                                                midiData[2],
@@ -3753,6 +3859,7 @@ public:
                     else if (status == MIDI_STATUS_NOTE_OFF)
                     {
                         pData->postponeRtEvent(kPluginPostRtEventNoteOff,
+                                               true,
                                                event.channel,
                                                midiData[1],
                                                0, 0.0f);
@@ -4035,6 +4142,7 @@ public:
                 {
                     fParamBuffers[k] = pData->param.ranges[k].def;
                     pData->postponeRtEvent(kPluginPostRtEventParameterChange,
+                                           true,
                                            static_cast<int32_t>(k),
                                            1, 0,
                                            fParamBuffers[k]);
@@ -4307,6 +4415,7 @@ public:
 
             fParamBuffers[k] = sampleRatef;
             pData->postponeRtEvent(kPluginPostRtEventParameterChange,
+                                   true,
                                    static_cast<int32_t>(k),
                                    0,
                                    0,
@@ -4325,6 +4434,7 @@ public:
             {
                 fParamBuffers[k] = isOffline ? pData->param.ranges[k].max : pData->param.ranges[k].min;
                 pData->postponeRtEvent(kPluginPostRtEventParameterChange,
+                                       true,
                                        static_cast<int32_t>(k),
                                        0,
                                        0,
@@ -4721,6 +4831,8 @@ public:
                 pData->hints |= PLUGIN_HAS_EXTENSION_WORKER;
             else if (std::strcmp(extension, LV2_INLINEDISPLAY__interface) == 0)
                 pData->hints |= PLUGIN_HAS_EXTENSION_INLINE_DISPLAY;
+            else if (std::strcmp(extension, LV2_MIDNAM__interface) == 0)
+                pData->hints |= PLUGIN_HAS_EXTENSION_MIDNAM;
             else
                 carla_stdout("Plugin '%s' has non-supported extension: '%s'", fRdfDescriptor->URI, extension);
         }
@@ -4737,7 +4849,14 @@ public:
 
                 carla_stdout("Plugin '%s' uses inline-display but does not set extension data, nasty!", fRdfDescriptor->URI);
                 pData->hints |= PLUGIN_HAS_EXTENSION_INLINE_DISPLAY;
-                break;
+            }
+            else if (std::strcmp(feature.URI, LV2_MIDNAM__update) == 0)
+            {
+                if (pData->hints & PLUGIN_HAS_EXTENSION_MIDNAM)
+                    break;
+
+                carla_stdout("Plugin '%s' uses midnam but does not set extension data, nasty!", fRdfDescriptor->URI);
+                pData->hints |= PLUGIN_HAS_EXTENSION_MIDNAM;
             }
         }
 
@@ -4757,6 +4876,9 @@ public:
 
             if (pData->hints & PLUGIN_HAS_EXTENSION_INLINE_DISPLAY)
                 fExt.inlineDisplay = (const LV2_Inline_Display_Interface*)fDescriptor->extension_data(LV2_INLINEDISPLAY__interface);
+
+            if (pData->hints & PLUGIN_HAS_EXTENSION_MIDNAM)
+                fExt.midnam = (const LV2_Midnam_Interface*)fDescriptor->extension_data(LV2_MIDNAM__interface);
 
             // check if invalid
             if (fExt.options != nullptr && fExt.options->get == nullptr  && fExt.options->set == nullptr)
@@ -4783,6 +4905,9 @@ public:
                     fExt.inlineDisplay = nullptr;
                 }
             }
+
+            if (fExt.midnam != nullptr && fExt.midnam->midnam == nullptr)
+                fExt.midnam = nullptr;
         }
 
         CARLA_SAFE_ASSERT_RETURN(fLatencyIndex == -1,);
@@ -5094,6 +5219,24 @@ public:
 
     // -------------------------------------------------------------------
 
+    void handleMidnamUpdate()
+    {
+        CARLA_SAFE_ASSERT_RETURN(fExt.midnam != nullptr,);
+
+        if (fEventsIn.ctrl == nullptr)
+            return;
+
+        char* const midnam = fExt.midnam->midnam(fHandle);
+        CARLA_SAFE_ASSERT_RETURN(midnam != nullptr,);
+
+        fEventsIn.ctrl->port->setMetaData("http://www.midi.org/dtds/MIDINameDocument10.dtd", midnam, "text/xml");
+
+        if (fExt.midnam->free != nullptr)
+            fExt.midnam->free(midnam);
+    }
+
+    // -------------------------------------------------------------------
+
     void handleExternalUIClosed()
     {
         CARLA_SAFE_ASSERT_RETURN(fUI.type == UI::TYPE_EXTERNAL,);
@@ -5322,7 +5465,7 @@ public:
         {
             if (pData->param.data[i].rindex == rindex)
             {
-                setParameterValueRT(i, paramValue);
+                setParameterValueRT(i, paramValue, true);
                 break;
             }
         }
@@ -5626,6 +5769,10 @@ public:
         inlineDisplay->handle                   = this;
         inlineDisplay->queue_draw               = carla_lv2_inline_display_queue_draw;
 
+        LV2_Midnam* const midnam = new LV2_Midnam;
+        midnam->handle = this;
+        midnam->update = carla_lv2_midnam_update;
+
         // ---------------------------------------------------------------
         // initialize features (part 2)
 
@@ -5696,6 +5843,9 @@ public:
 
         fFeatures[kFeatureIdInlineDisplay]->URI  = LV2_INLINEDISPLAY__queue_draw;
         fFeatures[kFeatureIdInlineDisplay]->data = inlineDisplay;
+
+        fFeatures[kFeatureIdMidnam]->URI  = LV2_MIDNAM__update;
+        fFeatures[kFeatureIdMidnam]->data = midnam;
 
         // ---------------------------------------------------------------
         // initialize plugin
@@ -6277,6 +6427,7 @@ private:
         const LV2_State_Interface* state;
         const LV2_Worker_Interface* worker;
         const LV2_Inline_Display_Interface* inlineDisplay;
+        const LV2_Midnam_Interface* midnam;
         const LV2_Programs_Interface* programs;
         const LV2UI_Idle_Interface* uiidle;
         const LV2UI_Show_Interface* uishow;
@@ -6288,6 +6439,7 @@ private:
               state(nullptr),
               worker(nullptr),
               inlineDisplay(nullptr),
+              midnam(nullptr),
               programs(nullptr),
               uiidle(nullptr),
               uishow(nullptr),
@@ -6803,6 +6955,17 @@ private:
         // carla_debug("carla_lv2_inline_display_queue_draw(%p)", handle);
 
         ((CarlaPluginLV2*)handle)->handleInlineDisplayQueueRedraw();
+    }
+
+    // -------------------------------------------------------------------
+    // Midnam Feature
+
+    static void carla_lv2_midnam_update(LV2_Midnam_Handle handle)
+    {
+        CARLA_SAFE_ASSERT_RETURN(handle != nullptr,);
+        carla_stdout("carla_lv2_midnam_update(%p)", handle);
+
+        ((CarlaPluginLV2*)handle)->handleMidnamUpdate();
     }
 
     // -------------------------------------------------------------------

@@ -255,6 +255,9 @@ static void carla_engine_init_common(CarlaEngine* const engine)
     engine->setOption(CB::ENGINE_OPTION_AUDIO_SAMPLE_RATE,     static_cast<int>(gStandalone.engineOptions.audioSampleRate),  nullptr);
     engine->setOption(CB::ENGINE_OPTION_AUDIO_TRIPLE_BUFFER,   gStandalone.engineOptions.audioTripleBuffer   ? 1 : 0,        nullptr);
 
+    if (gStandalone.engineOptions.audioDriver != nullptr)
+        engine->setOption(CB::ENGINE_OPTION_AUDIO_DRIVER,      0, gStandalone.engineOptions.audioDriver);
+
     if (gStandalone.engineOptions.audioDevice != nullptr)
         engine->setOption(CB::ENGINE_OPTION_AUDIO_DEVICE,      0, gStandalone.engineOptions.audioDevice);
 
@@ -498,6 +501,7 @@ const CarlaRuntimeEngineInfo* carla_get_runtime_engine_info()
     return &retInfo;
 }
 
+#ifndef BUILD_BRIDGE
 const CarlaRuntimeEngineDriverDeviceInfo* carla_get_runtime_engine_driver_device_info()
 {
     static CarlaRuntimeEngineDriverDeviceInfo retInfo;
@@ -510,8 +514,27 @@ const CarlaRuntimeEngineDriverDeviceInfo* carla_get_runtime_engine_driver_device
     retInfo.sampleRate = 0.0;
     retInfo.sampleRates = nullptr;
 
-    CARLA_SAFE_ASSERT_RETURN(gStandalone.engine != nullptr, &retInfo);
-    const char* const audioDriver = gStandalone.engine->getCurrentDriverName();
+    const char* audioDriver;
+    const char* audioDevice;
+
+    if (CarlaEngine* const engine = gStandalone.engine)
+    {
+        audioDriver = engine->getCurrentDriverName();
+        audioDevice = engine->getOptions().audioDevice;
+
+        retInfo.bufferSize = engine->getBufferSize();
+        retInfo.sampleRate = engine->getSampleRate();
+    }
+    else
+    {
+        audioDriver = gStandalone.engineOptions.audioDriver;
+        audioDevice = gStandalone.engineOptions.audioDevice;
+
+        retInfo.bufferSize = gStandalone.engineOptions.audioBufferSize;
+        retInfo.sampleRate = gStandalone.engineOptions.audioSampleRate;
+    }
+    CARLA_SAFE_ASSERT_RETURN(audioDriver != nullptr, &retInfo);
+    CARLA_SAFE_ASSERT_RETURN(audioDevice != nullptr, &retInfo);
 
     uint index = 0;
     uint count = CarlaEngine::getDriverCount();
@@ -525,17 +548,12 @@ const CarlaRuntimeEngineDriverDeviceInfo* carla_get_runtime_engine_driver_device
     }
     CARLA_SAFE_ASSERT_RETURN(index != count, &retInfo);
 
-    const EngineOptions& options(gStandalone.engine->getOptions());
-    const char* const audioDevice = options.audioDevice;
-
     const EngineDriverDeviceInfo* const devInfo = CarlaEngine::getDriverDeviceInfo(index, audioDevice);
     CARLA_SAFE_ASSERT_RETURN(devInfo != nullptr, &retInfo);
 
     retInfo.name        = audioDevice;
     retInfo.hints       = devInfo->hints;
-    retInfo.bufferSize  = gStandalone.engine->getBufferSize();
     retInfo.bufferSizes = devInfo->bufferSizes;
-    retInfo.sampleRate  = gStandalone.engine->getSampleRate();
     retInfo.sampleRates = devInfo->sampleRates;
 
     return &retInfo;
@@ -556,6 +574,7 @@ bool carla_show_engine_device_control_panel()
 
     return gStandalone.engine->showDeviceControlPanel();
 }
+#endif
 
 void carla_clear_engine_xruns()
 {
@@ -674,6 +693,15 @@ void carla_set_engine_option(EngineOption option, int value, const char* valueSt
     case CB::ENGINE_OPTION_AUDIO_TRIPLE_BUFFER:
         CARLA_SAFE_ASSERT_RETURN(value == 0 || value == 1,);
         gStandalone.engineOptions.audioTripleBuffer = (value != 0);
+        break;
+
+    case CB::ENGINE_OPTION_AUDIO_DRIVER:
+        CARLA_SAFE_ASSERT_RETURN(valueStr != nullptr,);
+
+        if (gStandalone.engineOptions.audioDriver != nullptr)
+            delete[] gStandalone.engineOptions.audioDriver;
+
+        gStandalone.engineOptions.audioDriver = carla_strdup_safe(valueStr);
         break;
 
     case CB::ENGINE_OPTION_AUDIO_DEVICE:
@@ -1162,6 +1190,7 @@ const CarlaPluginInfo* carla_get_plugin_info(uint pluginId)
     carla_debug("carla_get_plugin_info(%i)", pluginId);
 
     char strBuf[STR_MAX+1];
+    carla_zeroChars(strBuf, STR_MAX+1);
 
     retInfo.type     = plugin->getType();
     retInfo.category = plugin->getCategory();
@@ -1174,17 +1203,12 @@ const CarlaPluginInfo* carla_get_plugin_info(uint pluginId)
     retInfo.optionsAvailable = plugin->getOptionsAvailable();
     retInfo.optionsEnabled   = plugin->getOptionsEnabled();
 
-    carla_zeroChars(strBuf, STR_MAX+1);
-    plugin->getLabel(strBuf);
-    retInfo.label = carla_strdup_safe(strBuf);
-
-    carla_zeroChars(strBuf, STR_MAX+1);
-    plugin->getMaker(strBuf);
-    retInfo.maker = carla_strdup_safe(strBuf);
-
-    carla_zeroChars(strBuf, STR_MAX+1);
-    plugin->getCopyright(strBuf);
-    retInfo.copyright = carla_strdup_safe(strBuf);
+    if (plugin->getLabel(strBuf))
+        retInfo.label = carla_strdup_safe(strBuf);
+    if (plugin->getMaker(strBuf))
+        retInfo.maker = carla_strdup_safe(strBuf);
+    if (plugin->getCopyright(strBuf))
+        retInfo.copyright = carla_strdup_safe(strBuf);
 
     checkStringPtr(retInfo.filename);
     checkStringPtr(retInfo.name);
@@ -1272,6 +1296,18 @@ const CarlaParameterInfo* carla_get_parameter_info(uint pluginId, uint32_t param
         retInfo.unit = gNullCharPtr;
     }
 
+    if (retInfo.comment != gNullCharPtr)
+    {
+        delete[] retInfo.comment;
+        retInfo.comment = gNullCharPtr;
+    }
+
+    if (retInfo.groupName != gNullCharPtr)
+    {
+        delete[] retInfo.groupName;
+        retInfo.groupName = gNullCharPtr;
+    }
+
     CARLA_SAFE_ASSERT_RETURN(gStandalone.engine != nullptr, &retInfo);
 
     CarlaPlugin* const plugin(gStandalone.engine->getPlugin(pluginId));
@@ -1280,24 +1316,45 @@ const CarlaParameterInfo* carla_get_parameter_info(uint pluginId, uint32_t param
     carla_debug("carla_get_parameter_info(%i, %i)", pluginId, parameterId);
 
     char strBuf[STR_MAX+1];
+    carla_zeroChars(strBuf, STR_MAX+1);
 
     retInfo.scalePointCount = plugin->getParameterScalePointCount(parameterId);
 
-    carla_zeroChars(strBuf, STR_MAX+1);
-    plugin->getParameterName(parameterId, strBuf);
-    retInfo.name = carla_strdup_safe(strBuf);
+    if (plugin->getParameterName(parameterId, strBuf))
+    {
+        retInfo.name = carla_strdup_safe(strBuf);
+        carla_zeroChars(strBuf, STR_MAX+1);
+    }
 
-    carla_zeroChars(strBuf, STR_MAX+1);
-    plugin->getParameterSymbol(parameterId, strBuf);
-    retInfo.symbol = carla_strdup_safe(strBuf);
+    if (plugin->getParameterSymbol(parameterId, strBuf))
+    {
+        retInfo.symbol = carla_strdup_safe(strBuf);
+        carla_zeroChars(strBuf, STR_MAX+1);
+    }
 
-    carla_zeroChars(strBuf, STR_MAX+1);
-    plugin->getParameterUnit(parameterId, strBuf);
-    retInfo.unit = carla_strdup_safe(strBuf);
+    if (plugin->getParameterUnit(parameterId, strBuf))
+    {
+        retInfo.unit = carla_strdup_safe(strBuf);
+        carla_zeroChars(strBuf, STR_MAX+1);
+    }
+
+    if (plugin->getParameterComment(parameterId, strBuf))
+    {
+        retInfo.comment = carla_strdup_safe(strBuf);
+        carla_zeroChars(strBuf, STR_MAX+1);
+    }
+
+    if (plugin->getParameterGroupName(parameterId, strBuf))
+    {
+        retInfo.groupName = carla_strdup_safe(strBuf);
+        carla_zeroChars(strBuf, STR_MAX+1);
+    }
 
     checkStringPtr(retInfo.name);
     checkStringPtr(retInfo.symbol);
     checkStringPtr(retInfo.unit);
+    checkStringPtr(retInfo.comment);
+    checkStringPtr(retInfo.groupName);
 
     return &retInfo;
 }
@@ -1330,8 +1387,8 @@ const CarlaScalePointInfo* carla_get_parameter_scalepoint_info(uint pluginId, ui
     retInfo.value = plugin->getParameterScalePointValue(parameterId, scalePointId);
 
     carla_zeroChars(strBuf, STR_MAX+1);
-    plugin->getParameterScalePointLabel(parameterId, scalePointId, strBuf);
-    retInfo.label = carla_strdup_safe(strBuf);
+    if (plugin->getParameterScalePointLabel(parameterId, scalePointId, strBuf))
+        retInfo.label = carla_strdup_safe(strBuf);
 
     checkStringPtr(retInfo.label);
 
@@ -1595,7 +1652,9 @@ const char* carla_get_parameter_text(uint pluginId, uint32_t parameterId)
     static char textBuf[STR_MAX+1];
     carla_zeroChars(textBuf, STR_MAX+1);
 
-    plugin->getParameterText(parameterId, textBuf);
+    if (! plugin->getParameterText(parameterId, textBuf))
+        textBuf[0] = '\0';
+
     return textBuf;
 }
 
@@ -1612,7 +1671,9 @@ const char* carla_get_program_name(uint pluginId, uint32_t programId)
     static char programName[STR_MAX+1];
     carla_zeroChars(programName, STR_MAX+1);
 
-    plugin->getProgramName(programId, programName);
+    if (! plugin->getProgramName(programId, programName))
+        programName[0] = '\0';
+
     return programName;
 }
 
@@ -1629,7 +1690,9 @@ const char* carla_get_midi_program_name(uint pluginId, uint32_t midiProgramId)
     static char midiProgramName[STR_MAX+1];
     carla_zeroChars(midiProgramName, STR_MAX+1);
 
-    plugin->getMidiProgramName(midiProgramId, midiProgramName);
+    if (! plugin->getMidiProgramName(midiProgramId, midiProgramName))
+        midiProgramName[0] = '\0';
+
     return midiProgramName;
 }
 
@@ -1644,7 +1707,9 @@ const char* carla_get_real_plugin_name(uint pluginId)
     static char realPluginName[STR_MAX+1];
     carla_zeroChars(realPluginName, STR_MAX+1);
 
-    plugin->getRealName(realPluginName);
+    if (! plugin->getRealName(realPluginName))
+        realPluginName[0] = '\0';
+
     return realPluginName;
 }
 

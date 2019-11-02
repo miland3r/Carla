@@ -431,10 +431,11 @@ bool CarlaEngine::addPlugin(const BinaryType btype, const PluginType ptype,
     CARLA_SAFE_ASSERT_RETURN_ERR(btype != BINARY_NONE, "Invalid plugin binary mode");
     CARLA_SAFE_ASSERT_RETURN_ERR(ptype != PLUGIN_NONE, "Invalid plugin type");
     CARLA_SAFE_ASSERT_RETURN_ERR((filename != nullptr && filename[0] != '\0') || (label != nullptr && label[0] != '\0'), "Invalid plugin filename and label");
-    carla_debug("CarlaEngine::addPlugin(%i:%s, %i:%s, \"%s\", \"%s\", \"%s\", " P_INT64 ", %p, %u)", btype, BinaryType2Str(btype), ptype, PluginType2Str(ptype), filename, name, label, uniqueId, extra, options);
+    carla_debug("CarlaEngine::addPlugin(%i:%s, %i:%s, \"%s\", \"%s\", \"%s\", " P_INT64 ", %p, %u)",
+                btype, BinaryType2Str(btype), ptype, PluginType2Str(ptype), filename, name, label, uniqueId, extra, options);
 
 #ifndef CARLA_OS_WIN
-    if (ptype != PLUGIN_JACK && filename != nullptr && filename[0] != '\0') {
+    if (ptype != PLUGIN_JACK && ptype != PLUGIN_LV2 && filename != nullptr && filename[0] != '\0') {
         CARLA_SAFE_ASSERT_RETURN_ERR(filename[0] == CARLA_OS_SEP || filename[0] == '.' || filename[0] == '~', "Invalid plugin filename");
     }
 #endif
@@ -838,7 +839,9 @@ bool CarlaEngine::clonePlugin(const uint id)
 
     char label[STR_MAX+1];
     carla_zeroChars(label, STR_MAX+1);
-    plugin->getLabel(label);
+
+    if (! plugin->getLabel(label))
+        label[0] = '\0';
 
     const uint pluginCountBefore(pData->curPluginCount);
 
@@ -1603,6 +1606,7 @@ void CarlaEngine::setOption(const EngineOption option, const int value, const ch
         {
         case ENGINE_OPTION_PROCESS_MODE:
         case ENGINE_OPTION_AUDIO_TRIPLE_BUFFER:
+        case ENGINE_OPTION_AUDIO_DRIVER:
         case ENGINE_OPTION_AUDIO_DEVICE:
             return carla_stderr("CarlaEngine::setOption(%i:%s, %i, \"%s\") - Cannot set this option while engine is running!",
                                 option, EngineOption2Str(option), value, valueStr);
@@ -1693,6 +1697,15 @@ void CarlaEngine::setOption(const EngineOption option, const int value, const ch
     case ENGINE_OPTION_AUDIO_TRIPLE_BUFFER:
         CARLA_SAFE_ASSERT_RETURN(value == 0 || value == 1,);
         pData->options.audioTripleBuffer = (value != 0);
+        break;
+
+    case ENGINE_OPTION_AUDIO_DRIVER:
+        CARLA_SAFE_ASSERT_RETURN(valueStr != nullptr,);
+
+        if (pData->options.audioDriver != nullptr)
+            delete[] pData->options.audioDriver;
+
+        pData->options.audioDriver = carla_strdup_safe(valueStr);
         break;
 
     case ENGINE_OPTION_AUDIO_DEVICE:
@@ -2083,6 +2096,7 @@ void CarlaEngine::saveProjectInternal(water::MemoryOutputStream& outStream) cons
     }
 
     char strBuf[STR_MAX+1];
+    carla_zeroChars(strBuf, STR_MAX+1);
 
     for (uint i=0; i < pData->curPluginCount; ++i)
     {
@@ -2095,10 +2109,7 @@ void CarlaEngine::saveProjectInternal(water::MemoryOutputStream& outStream) cons
 
             outPlugin << "\n";
 
-            strBuf[0] = '\0';
-            plugin->getRealName(strBuf);
-
-            if (strBuf[0] != '\0')
+            if (plugin->getRealName(strBuf))
                 outPlugin << " <!-- " << xmlSafeString(strBuf, true) << " -->\n";
 
             outPlugin << " <Plugin>\n";

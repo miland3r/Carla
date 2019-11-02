@@ -183,6 +183,16 @@ typedef struct _CarlaParameterInfo {
     const char* unit;
 
     /*!
+     * Parameter comment / documentation.
+     */
+    const char* comment;
+
+    /*!
+     * Parameter group name, prefixed by a unique symbol and ":".
+     */
+    const char* groupName;
+
+    /*!
      * Number of scale points.
      * @see CarlaScalePointInfo
      */
@@ -422,6 +432,7 @@ CARLA_EXPORT bool carla_is_engine_running();
  */
 CARLA_EXPORT const CarlaRuntimeEngineInfo* carla_get_runtime_engine_info();
 
+#ifndef BUILD_BRIDGE
 /*!
  * Get information about the currently running engine driver device.
  */
@@ -439,6 +450,7 @@ CARLA_EXPORT bool carla_set_engine_buffer_size_and_sample_rate(uint bufferSize, 
  * @see ENGINE_DRIVER_DEVICE_HAS_CONTROL_PANEL
  */
 CARLA_EXPORT bool carla_show_engine_device_control_panel();
+#endif
 
 /*!
  * Clear the xrun count on the engine, so that the next time carla_get_runtime_engine_info() is called, it returns 0.

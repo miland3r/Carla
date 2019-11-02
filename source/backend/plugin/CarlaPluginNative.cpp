@@ -478,64 +478,64 @@ public:
         return 0.0f;
     }
 
-    void getLabel(char* const strBuf) const noexcept override
+    bool getLabel(char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr,);
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr, false);
 
         if (fDescriptor->label != nullptr)
         {
             std::strncpy(strBuf, fDescriptor->label, STR_MAX);
-            return;
+            return true;
         }
 
-        CarlaPlugin::getLabel(strBuf);
+        return CarlaPlugin::getLabel(strBuf);
     }
 
-    void getMaker(char* const strBuf) const noexcept override
+    bool getMaker(char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr,);
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr, false);
 
         if (fDescriptor->maker != nullptr)
         {
             std::strncpy(strBuf, fDescriptor->maker, STR_MAX);
-            return;
+            return true;
         }
 
-        CarlaPlugin::getMaker(strBuf);
+        return CarlaPlugin::getMaker(strBuf);
     }
 
-    void getCopyright(char* const strBuf) const noexcept override
+    bool getCopyright(char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr,);
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr, false);
 
         if (fDescriptor->copyright != nullptr)
         {
             std::strncpy(strBuf, fDescriptor->copyright, STR_MAX);
-            return;
+            return true;
         }
 
-        CarlaPlugin::getCopyright(strBuf);
+        return CarlaPlugin::getCopyright(strBuf);
     }
 
-    void getRealName(char* const strBuf) const noexcept override
+    bool getRealName(char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr,);
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr, false);
 
         if (fDescriptor->name != nullptr)
         {
             std::strncpy(strBuf, fDescriptor->name, STR_MAX);
-            return;
+            return true;
         }
 
-        CarlaPlugin::getRealName(strBuf);
+        return CarlaPlugin::getRealName(strBuf);
     }
 
-    void getParameterName(const uint32_t parameterId, char* const strBuf) const noexcept override
+    bool getParameterName(const uint32_t parameterId, char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr,);
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor->get_parameter_info != nullptr,);
-        CARLA_SAFE_ASSERT_RETURN(fHandle != nullptr,);
-        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count,);
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor->get_parameter_info != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(fHandle != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, false);
 
         // FIXME - try
         if (const NativeParameter* const param = fDescriptor->get_parameter_info(fHandle, parameterId))
@@ -543,7 +543,7 @@ public:
             if (param->name != nullptr)
             {
                 std::strncpy(strBuf, param->name, STR_MAX);
-                return;
+                return true;
             }
 
             carla_safe_assert("param->name != nullptr", __FILE__, __LINE__);
@@ -551,15 +551,15 @@ public:
         }
 
         carla_safe_assert("const Parameter* const param = fDescriptor->get_parameter_info(fHandle, parameterId)", __FILE__, __LINE__);
-        CarlaPlugin::getParameterName(parameterId, strBuf);
+        return CarlaPlugin::getParameterName(parameterId, strBuf);
     }
 
-    void getParameterUnit(const uint32_t parameterId, char* const strBuf) const noexcept override
+    bool getParameterUnit(const uint32_t parameterId, char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr,);
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor->get_parameter_info != nullptr,);
-        CARLA_SAFE_ASSERT_RETURN(fHandle != nullptr,);
-        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count,);
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor->get_parameter_info != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(fHandle != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, false);
 
         // FIXME - try
         if (const NativeParameter* const param = fDescriptor->get_parameter_info(fHandle, parameterId))
@@ -567,34 +567,34 @@ public:
             if (param->unit != nullptr)
             {
                 std::strncpy(strBuf, param->unit, STR_MAX);
-                return;
+                return true;
             }
 
             return CarlaPlugin::getParameterUnit(parameterId, strBuf);
         }
 
         carla_safe_assert("const Parameter* const param = fDescriptor->get_parameter_info(fHandle, parameterId)", __FILE__, __LINE__);
-        CarlaPlugin::getParameterUnit(parameterId, strBuf);
+        return CarlaPlugin::getParameterUnit(parameterId, strBuf);
     }
 
-    void getParameterScalePointLabel(const uint32_t parameterId, const uint32_t scalePointId, char* const strBuf) const noexcept override
+    bool getParameterScalePointLabel(const uint32_t parameterId, const uint32_t scalePointId, char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr,);
-        CARLA_SAFE_ASSERT_RETURN(fDescriptor->get_parameter_info != nullptr,);
-        CARLA_SAFE_ASSERT_RETURN(fHandle != nullptr,);
-        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count,);
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor->get_parameter_info != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(fHandle != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, false);
 
         // FIXME - try
         if (const NativeParameter* const param = fDescriptor->get_parameter_info(fHandle, parameterId))
         {
-            CARLA_SAFE_ASSERT_RETURN(scalePointId < param->scalePointCount,);
+            CARLA_SAFE_ASSERT_RETURN(scalePointId < param->scalePointCount, false);
 
             const NativeParameterScalePoint* scalePoint(&param->scalePoints[scalePointId]);
 
             if (scalePoint->label != nullptr)
             {
                 std::strncpy(strBuf, scalePoint->label, STR_MAX);
-                return;
+                return true;
             }
 
             carla_safe_assert("scalePoint->label != nullptr", __FILE__, __LINE__);
@@ -602,7 +602,7 @@ public:
         }
 
         carla_safe_assert("const Parameter* const param = fDescriptor->get_parameter_info(fHandle, parameterId)", __FILE__, __LINE__);
-        CarlaPlugin::getParameterScalePointLabel(parameterId, scalePointId, strBuf);
+        return CarlaPlugin::getParameterScalePointLabel(parameterId, scalePointId, strBuf);
     }
 
     // -------------------------------------------------------------------
@@ -688,7 +688,7 @@ public:
         CarlaPlugin::setParameterValue(parameterId, fixedValue, sendGui, sendOsc, sendCallback);
     }
 
-    void setParameterValueRT(const uint32_t parameterId, const float value) noexcept override
+    void setParameterValueRT(const uint32_t parameterId, const float value, const bool sendCallbackLater) noexcept override
     {
         CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr,);
         CARLA_SAFE_ASSERT_RETURN(fDescriptor->set_parameter_value != nullptr,);
@@ -703,7 +703,7 @@ public:
         if (fHandle2 != nullptr)
             fDescriptor->set_parameter_value(fHandle2, parameterId, fixedValue);
 
-        CarlaPlugin::setParameterValueRT(parameterId, fixedValue);
+        CarlaPlugin::setParameterValueRT(parameterId, fixedValue, sendCallbackLater);
     }
 
     void setCustomData(const char* const type, const char* const key, const char* const value, const bool sendGui) override
@@ -826,7 +826,7 @@ public:
     }
 
     // FIXME: this is never used
-    void setMidiProgramRT(const uint32_t index) noexcept override
+    void setMidiProgramRT(const uint32_t index, const bool sendCallbackLater) noexcept override
     {
         CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr,);
         CARLA_SAFE_ASSERT_RETURN(fHandle != nullptr,);
@@ -834,7 +834,7 @@ public:
 
         // TODO, put into check below
         if ((pData->hints & PLUGIN_IS_SYNTH) != 0 && (pData->ctrlChannel < 0 || pData->ctrlChannel >= MAX_MIDI_CHANNELS))
-           return CarlaPlugin::setMidiProgramRT(index);
+           return CarlaPlugin::setMidiProgramRT(index, sendCallbackLater);
 
         const uint8_t  channel = uint8_t((pData->ctrlChannel >= 0 && pData->ctrlChannel < MAX_MIDI_CHANNELS) ? pData->ctrlChannel : 0);
         const uint32_t bank    = pData->midiprog.data[index].bank;
@@ -853,7 +853,7 @@ public:
 
         fCurMidiProgs[channel] = static_cast<int32_t>(index);
 
-        CarlaPlugin::setMidiProgramRT(index);
+        CarlaPlugin::setMidiProgramRT(index, sendCallbackLater);
     }
 
     // -------------------------------------------------------------------
@@ -1816,13 +1816,13 @@ public:
                             if (MIDI_IS_CONTROL_BREATH_CONTROLLER(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_DRYWET) > 0)
                             {
                                 value = ctrlEvent.value;
-                                setDryWetRT(value);
+                                setDryWetRT(value, true);
                             }
 
                             if (MIDI_IS_CONTROL_CHANNEL_VOLUME(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_VOLUME) > 0)
                             {
                                 value = ctrlEvent.value*127.0f/100.0f;
-                                setVolumeRT(value);
+                                setVolumeRT(value, true);
                             }
 
                             if (MIDI_IS_CONTROL_BALANCE(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_BALANCE) > 0)
@@ -1846,8 +1846,8 @@ public:
                                     right = 1.0f;
                                 }
 
-                                setBalanceLeftRT(left);
-                                setBalanceRightRT(right);
+                                setBalanceLeftRT(left, true);
+                                setBalanceRightRT(right, true);
                             }
                         }
 #endif
@@ -1880,7 +1880,7 @@ public:
                                     value = std::rint(value);
                             }
 
-                            setParameterValueRT(k, value);
+                            setParameterValueRT(k, value, true);
                         }
 
                         if ((pData->options & PLUGIN_OPTION_SEND_CONTROL_CHANGES) != 0 && ctrlEvent.param < MAX_MIDI_CONTROL)
@@ -1944,6 +1944,7 @@ public:
                                         if (event.channel == pData->ctrlChannel)
                                         {
                                             pData->postponeRtEvent(kPluginPostRtEventMidiProgramChange,
+                                                                   true,
                                                                    static_cast<int32_t>(k),
                                                                    0, 0, 0.0f);
                                         }
@@ -2055,6 +2056,7 @@ public:
                     if (status == MIDI_STATUS_NOTE_ON)
                     {
                         pData->postponeRtEvent(kPluginPostRtEventNoteOn,
+                                               true,
                                                event.channel,
                                                midiEvent.data[1],
                                                midiEvent.data[2],
@@ -2063,6 +2065,7 @@ public:
                     else if (status == MIDI_STATUS_NOTE_OFF)
                     {
                         pData->postponeRtEvent(kPluginPostRtEventNoteOff,
+                                               true,
                                                event.channel,
                                                midiEvent.data[1],
                                                0, 0.0f);

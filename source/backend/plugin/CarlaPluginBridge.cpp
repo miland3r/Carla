@@ -530,37 +530,42 @@ public:
         return fParams[parameterId].value;
     }
 
-    void getLabel(char* const strBuf) const noexcept override
+    bool getLabel(char* const strBuf) const noexcept override
     {
         std::strncpy(strBuf, fInfo.label, STR_MAX);
+        return true;
     }
 
-    void getMaker(char* const strBuf) const noexcept override
+    bool getMaker(char* const strBuf) const noexcept override
     {
         std::strncpy(strBuf, fInfo.maker, STR_MAX);
+        return true;
     }
 
-    void getCopyright(char* const strBuf) const noexcept override
+    bool getCopyright(char* const strBuf) const noexcept override
     {
         std::strncpy(strBuf, fInfo.copyright, STR_MAX);
+        return true;
     }
 
-    void getRealName(char* const strBuf) const noexcept override
+    bool getRealName(char* const strBuf) const noexcept override
     {
         std::strncpy(strBuf, fInfo.name, STR_MAX);
+        return true;
     }
 
-    void getParameterName(const uint32_t parameterId, char* const strBuf) const noexcept override
+    bool getParameterName(const uint32_t parameterId, char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, nullStrBuf(strBuf));
+        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, false);
 
         std::strncpy(strBuf, fParams[parameterId].name.buffer(), STR_MAX);
+        return true;
     }
 
-    void getParameterText(const uint32_t parameterId, char* const strBuf) noexcept override
+    bool getParameterText(const uint32_t parameterId, char* const strBuf) noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, nullStrBuf(strBuf));
-        CARLA_SAFE_ASSERT_RETURN(! fReceivingParamText.isCurrentlyWaitingData(), nullStrBuf(strBuf));
+        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, false);
+        CARLA_SAFE_ASSERT_RETURN(! fReceivingParamText.isCurrentlyWaitingData(), false);
 
         const int32_t parameterIdi = static_cast<int32_t>(parameterId);
         fReceivingParamText.setTargetData(parameterIdi, strBuf);
@@ -573,22 +578,27 @@ public:
             fShmNonRtClientControl.commitWrite();
         }
 
-        if (! waitForParameterText())
-            std::snprintf(strBuf, STR_MAX, "%f", static_cast<double>(fParams[parameterId].value));
+        if (waitForParameterText())
+            return true;
+
+        std::snprintf(strBuf, STR_MAX, "%f", static_cast<double>(fParams[parameterId].value));
+        return false;
     }
 
-    void getParameterSymbol(const uint32_t parameterId, char* const strBuf) const noexcept override
+    bool getParameterSymbol(const uint32_t parameterId, char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, nullStrBuf(strBuf));
+        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, false);
 
         std::strncpy(strBuf, fParams[parameterId].symbol.buffer(), STR_MAX);
+        return true;
     }
 
-    void getParameterUnit(const uint32_t parameterId, char* const strBuf) const noexcept override
+    bool getParameterUnit(const uint32_t parameterId, char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, nullStrBuf(strBuf));
+        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, false);
 
         std::strncpy(strBuf, fParams[parameterId].unit.buffer(), STR_MAX);
+        return true;
     }
 
     // -------------------------------------------------------------------
@@ -771,6 +781,21 @@ public:
         CarlaPlugin::setProgram(index, sendGui, sendOsc, sendCallback, doingInit);
     }
 
+    void setProgramRT(const uint32_t index, const bool sendCallbackLater) noexcept override
+    {
+        CARLA_SAFE_ASSERT_RETURN(index < pData->prog.count,);
+
+        {
+            const CarlaMutexLocker _cml(fShmNonRtClientControl.mutex);
+
+            fShmNonRtClientControl.writeOpcode(kPluginBridgeNonRtClientSetProgram);
+            fShmNonRtClientControl.writeInt(static_cast<int32_t>(index));
+            fShmNonRtClientControl.commitWrite();
+        }
+
+        CarlaPlugin::setProgramRT(index, sendCallbackLater);
+    }
+
     void setMidiProgram(const int32_t index, const bool sendGui, const bool sendOsc, const bool sendCallback, const bool doingInit) noexcept override
     {
         CARLA_SAFE_ASSERT_RETURN(index >= -1 && index < static_cast<int32_t>(pData->midiprog.count),);
@@ -787,7 +812,7 @@ public:
         CarlaPlugin::setMidiProgram(index, sendGui, sendOsc, sendCallback, doingInit);
     }
 
-    void setMidiProgramRT(const uint32_t uindex) noexcept override
+    void setMidiProgramRT(const uint32_t uindex, const bool sendCallbackLater) noexcept override
     {
         CARLA_SAFE_ASSERT_RETURN(uindex < pData->midiprog.count,);
 
@@ -799,7 +824,7 @@ public:
             fShmNonRtClientControl.commitWrite();
         }
 
-        CarlaPlugin::setMidiProgramRT(uindex);
+        CarlaPlugin::setMidiProgramRT(uindex, sendCallbackLater);
     }
 
     void setCustomData(const char* const type, const char* const key, const char* const value, const bool sendGui) override
@@ -1234,13 +1259,13 @@ public:
                             if (MIDI_IS_CONTROL_BREATH_CONTROLLER(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_DRYWET) != 0)
                             {
                                 value = ctrlEvent.value;
-                                setDryWetRT(value);
+                                setDryWetRT(value, true);
                             }
 
                             if (MIDI_IS_CONTROL_CHANNEL_VOLUME(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_VOLUME) != 0)
                             {
                                 value = ctrlEvent.value*127.0f/100.0f;
-                                setVolumeRT(value);
+                                setVolumeRT(value, true);
                             }
 
                             if (MIDI_IS_CONTROL_BALANCE(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_BALANCE) != 0)
@@ -1264,8 +1289,8 @@ public:
                                     right = 1.0f;
                                 }
 
-                                setBalanceLeftRT(left);
-                                setBalanceRightRT(right);
+                                setBalanceLeftRT(left, true);
+                                setBalanceRightRT(right, true);
                             }
                         }
 #endif
@@ -1389,6 +1414,7 @@ public:
                     if (status == MIDI_STATUS_NOTE_ON)
                     {
                         pData->postponeRtEvent(kPluginPostRtEventNoteOn,
+                                               true,
                                                event.channel,
                                                midiData[1],
                                                midiData[2],
@@ -1397,6 +1423,7 @@ public:
                     else if (status == MIDI_STATUS_NOTE_OFF)
                     {
                         pData->postponeRtEvent(kPluginPostRtEventNoteOff,
+                                               true,
                                                event.channel,
                                                midiData[1],
                                                0, 0.0f);

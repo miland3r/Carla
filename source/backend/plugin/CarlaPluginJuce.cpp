@@ -26,7 +26,6 @@
 #if defined(__GNUC__) && (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6))
 # pragma GCC diagnostic push
 # pragma GCC diagnostic ignored "-Wcast-qual"
-# pragma GCC diagnostic ignored "-Wclass-memaccess"
 # pragma GCC diagnostic ignored "-Wconversion"
 # pragma GCC diagnostic ignored "-Wdouble-promotion"
 # pragma GCC diagnostic ignored "-Weffc++"
@@ -35,6 +34,9 @@
 # pragma GCC diagnostic ignored "-Wsign-conversion"
 # pragma GCC diagnostic ignored "-Wundef"
 # pragma GCC diagnostic ignored "-Wzero-as-null-pointer-constant"
+# if __GNUC__ > 7
+#  pragma GCC diagnostic ignored "-Wclass-memaccess"
+# endif
 #endif
 
 #include "AppConfig.h"
@@ -199,51 +201,58 @@ public:
         return fInstance->getParameter(static_cast<int>(parameterId));
     }
 
-    void getLabel(char* const strBuf) const noexcept override
+    bool getLabel(char* const strBuf) const noexcept override
     {
         if (fDesc.pluginFormatName == "AU" || fDesc.pluginFormatName == "AudioUnit")
             std::strncpy(strBuf, fDesc.fileOrIdentifier.toRawUTF8(), STR_MAX);
         else
             std::strncpy(strBuf, fDesc.name.toRawUTF8(), STR_MAX);
+
+        return true;
     }
 
-    void getMaker(char* const strBuf) const noexcept override
+    bool getMaker(char* const strBuf) const noexcept override
     {
         std::strncpy(strBuf, fDesc.manufacturerName.toRawUTF8(), STR_MAX);
+        return true;
     }
 
-    void getCopyright(char* const strBuf) const noexcept override
+    bool getCopyright(char* const strBuf) const noexcept override
     {
-        getMaker(strBuf);
+        return getMaker(strBuf);
     }
 
-    void getRealName(char* const strBuf) const noexcept override
+    bool getRealName(char* const strBuf) const noexcept override
     {
         std::strncpy(strBuf, fDesc.descriptiveName.toRawUTF8(), STR_MAX);
+        return true;
     }
 
-    void getParameterName(const uint32_t parameterId, char* const strBuf) const noexcept override
+    bool getParameterName(const uint32_t parameterId, char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count,);
-        CARLA_SAFE_ASSERT_RETURN(fInstance != nullptr,);
+        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, false);
+        CARLA_SAFE_ASSERT_RETURN(fInstance != nullptr, false);
 
         std::strncpy(strBuf, fInstance->getParameterName(static_cast<int>(parameterId), STR_MAX).toRawUTF8(), STR_MAX);
+        return true;
     }
 
-    void getParameterText(const uint32_t parameterId, char* const strBuf) noexcept override
+    bool getParameterText(const uint32_t parameterId, char* const strBuf) noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count,);
-        CARLA_SAFE_ASSERT_RETURN(fInstance != nullptr,);
+        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, false);
+        CARLA_SAFE_ASSERT_RETURN(fInstance != nullptr, false);
 
         std::strncpy(strBuf, fInstance->getParameterText(static_cast<int>(parameterId), STR_MAX).toRawUTF8(), STR_MAX);
+        return true;
     }
 
-    void getParameterUnit(const uint32_t parameterId, char* const strBuf) const noexcept override
+    bool getParameterUnit(const uint32_t parameterId, char* const strBuf) const noexcept override
     {
-        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count,);
-        CARLA_SAFE_ASSERT_RETURN(fInstance != nullptr,);
+        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, false);
+        CARLA_SAFE_ASSERT_RETURN(fInstance != nullptr, false);
 
         std::strncpy(strBuf, fInstance->getParameterLabel(static_cast<int>(parameterId)).toRawUTF8(), STR_MAX);
+        return true;
     }
 
     // -------------------------------------------------------------------
@@ -275,20 +284,26 @@ public:
         CARLA_SAFE_ASSERT_RETURN(fInstance != nullptr,);
 
         const float fixedValue(pData->param.getFixedValue(parameterId, value));
-        fInstance->setParameter(static_cast<int>(parameterId), value);
+
+        try {
+            fInstance->setParameter(static_cast<int>(parameterId), value);
+        } CARLA_SAFE_EXCEPTION("setParameter");
 
         CarlaPlugin::setParameterValue(parameterId, fixedValue, sendGui, sendOsc, sendCallback);
     }
 
-    void setParameterValueRT(const uint32_t parameterId, const float value) noexcept override
+    void setParameterValueRT(const uint32_t parameterId, const float value, const bool sendCallbackLater) noexcept override
     {
         CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count,);
         CARLA_SAFE_ASSERT_RETURN(fInstance != nullptr,);
 
         const float fixedValue(pData->param.getFixedValue(parameterId, value));
-        fInstance->setParameter(static_cast<int>(parameterId), value);
 
-        CarlaPlugin::setParameterValueRT(parameterId, fixedValue);
+        try {
+            fInstance->setParameter(static_cast<int>(parameterId), value);
+        } CARLA_SAFE_EXCEPTION("setParameter");
+
+        CarlaPlugin::setParameterValueRT(parameterId, fixedValue, sendCallbackLater);
     }
 
     void setChunkData(const void* const data, const std::size_t dataSize) override
@@ -345,6 +360,18 @@ public:
         }
 
         CarlaPlugin::setProgram(index, sendGui, sendOsc, sendCallback, doingInit);
+    }
+
+    void setProgramRT(const uint32_t index, const bool sendCallbackLater) noexcept override
+    {
+        CARLA_SAFE_ASSERT_RETURN(fInstance != nullptr,);
+        CARLA_SAFE_ASSERT_RETURN(index < pData->prog.count,);
+
+        try {
+            fInstance->setCurrentProgram(static_cast<int32_t>(index));
+        } CARLA_SAFE_EXCEPTION("setCurrentProgram");
+
+        CarlaPlugin::setProgramRT(index, sendCallbackLater);
     }
 
     // -------------------------------------------------------------------
@@ -812,13 +839,13 @@ public:
                             if (MIDI_IS_CONTROL_BREATH_CONTROLLER(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_DRYWET) != 0)
                             {
                                 value = ctrlEvent.value;
-                                setDryWetRT(value);
+                                setDryWetRT(value, true);
                             }
 
                             if (MIDI_IS_CONTROL_CHANNEL_VOLUME(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_VOLUME) != 0)
                             {
                                 value = ctrlEvent.value*127.0f/100.0f;
-                                setVolumeRT(value);
+                                setVolumeRT(value, true);
                             }
 
                             if (MIDI_IS_CONTROL_BALANCE(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_BALANCE) != 0)
@@ -842,8 +869,8 @@ public:
                                     right = 1.0f;
                                 }
 
-                                setBalanceLeftRT(left);
-                                setBalanceRightRT(right);
+                                setBalanceLeftRT(left, true);
+                                setBalanceRightRT(right, true);
                             }
                         }
 #endif
@@ -877,7 +904,7 @@ public:
                                     value = std::rint(value);
                             }
 
-                            setParameterValueRT(k, value);
+                            setParameterValueRT(k, value, true);
                         }
 
                         if ((pData->options & PLUGIN_OPTION_SEND_CONTROL_CHANGES) != 0 && ctrlEvent.param < MAX_MIDI_CONTROL)
@@ -913,7 +940,7 @@ public:
                         {
                             if (ctrlEvent.param < pData->prog.count)
                             {
-                                setProgramRT(ctrlEvent.param);
+                                setProgramRT(ctrlEvent.param, true);
                             }
                         }
                         else if ((pData->options & PLUGIN_OPTION_SEND_PROGRAM_CHANGES) != 0)
@@ -990,6 +1017,7 @@ public:
                     if (status == MIDI_STATUS_NOTE_ON)
                     {
                         pData->postponeRtEvent(kPluginPostRtEventNoteOn,
+                                               true,
                                                event.channel,
                                                midiData[1],
                                                midiData[2],
@@ -998,6 +1026,7 @@ public:
                     else if (status == MIDI_STATUS_NOTE_OFF)
                     {
                         pData->postponeRtEvent(kPluginPostRtEventNoteOff,
+                                               true,
                                                event.channel,
                                                midiData[1],
                                                0, 0.0f);
@@ -1220,8 +1249,8 @@ public:
             return false;
         }
 
-        // AU and VST3 require label
-        if (std::strcmp(format, "AU") == 0 || std::strcmp(format, "VST3") == 0)
+        // AU requires label
+        if (std::strcmp(format, "AU") == 0)
         {
             if (label == nullptr || label[0] == '\0')
             {
