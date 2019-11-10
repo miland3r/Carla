@@ -1219,6 +1219,20 @@ public:
 
         return jackbridge_cpu_load(fClient);
     }
+
+    void callback(const bool sendHost, const bool sendOsc,
+                  const EngineCallbackOpcode action, const uint pluginId,
+                  const int value1, const int value2, const int value3,
+                  const float valuef, const char* const valueStr) noexcept override
+    {
+        if (action == ENGINE_CALLBACK_PROJECT_LOAD_FINISHED && fTimebaseMaster)
+        {
+            // project finished loading, need to set bpm here, so we force an update of timebase master
+            transportRelocate(pData->timeInfo.frame);
+        }
+
+        CarlaEngine::callback(sendHost, sendOsc, action, pluginId, value1, value2, value3, valuef, valueStr);
+    }
 #endif
 
     bool setBufferSizeAndSampleRate(const uint bufferSize, const double sampleRate) override
