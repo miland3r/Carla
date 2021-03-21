@@ -1,6 +1,6 @@
 ﻿/*
  * Carla Plugin Host
- * Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -54,12 +54,12 @@ CARLA_BACKEND_START_NAMESPACE
 /*!
  * Maximum default number of loadable plugins.
  */
-static const uint MAX_DEFAULT_PLUGINS = 99;
+static const uint MAX_DEFAULT_PLUGINS = 512;
 
 /*!
  * Maximum number of loadable plugins in rack mode.
  */
-static const uint MAX_RACK_PLUGINS = 16;
+static const uint MAX_RACK_PLUGINS = 64;
 
 /*!
  * Maximum number of loadable plugins in patchbay mode.
@@ -188,6 +188,13 @@ static const uint PLUGIN_USES_MULTI_PROGS = 0x400;
  */
 static const uint PLUGIN_HAS_INLINE_DISPLAY = 0x800;
 
+/*!
+ * Plugin has its own custom UI which can be embed into another Window.
+ * @see CarlaPlugin::embedCustomUI() and carla_embed_custom_ui()
+ * @note This is very experimental and subject to change at this point
+ */
+static const uint PLUGIN_HAS_CUSTOM_EMBED_UI = 0x1000;
+
 /** @} */
 
 /* ------------------------------------------------------------------------------------------------------------
@@ -197,6 +204,7 @@ static const uint PLUGIN_HAS_INLINE_DISPLAY = 0x800;
  * @defgroup PluginOptions Plugin Options
  *
  * Various plugin options.
+ * @note Do not modify these values, as they are saved as-is in project files.
  * @see CarlaPlugin::getOptionsAvailable(), CarlaPlugin::getOptionsEnabled(), carla_get_plugin_info() and carla_set_option()
  * @{
  */
@@ -251,6 +259,19 @@ static const uint PLUGIN_OPTION_SEND_ALL_SOUND_OFF = 0x100;
  * @note: This option conflicts with PLUGIN_OPTION_MAP_PROGRAM_CHANGES and cannot be used at the same time.
  */
 static const uint PLUGIN_OPTION_SEND_PROGRAM_CHANGES = 0x200;
+
+/*!
+ * Skip sending MIDI note events.
+ * This if off-by-default as a way to keep backwards compatibility.
+ * We always want notes enabled by default, not the contrary.
+ */
+static const uint PLUGIN_OPTION_SKIP_SENDING_NOTES = 0x400;
+
+/*!
+ * Special flag to indicate that plugin options are not yet set.
+ * This flag exists because 0x0 as an option value is a valid one, so we need something else to indicate "null-ness".
+ */
+static const uint PLUGIN_OPTIONS_NULL = 0x10000;
 
 /** @} */
 
@@ -314,6 +335,36 @@ static const uint PARAMETER_USES_SCALEPOINTS = 0x200;
  * @see CarlaPlugin::getParameterText() and carla_get_parameter_text()
  */
 static const uint PARAMETER_USES_CUSTOM_TEXT = 0x400;
+
+/*!
+ * Parameter can be turned into a CV control.
+ */
+static const uint PARAMETER_CAN_BE_CV_CONTROLLED = 0x800;
+
+/*!
+ * Parameter should not be saved as part of the project/session.
+ * @note only valid for parameter inputs.
+ */
+static const uint PARAMETER_IS_NOT_SAVED = 0x1000;
+
+/** @} */
+
+/* ------------------------------------------------------------------------------------------------------------
+ * Mapped Parameter Flags */
+
+/*!
+ * @defgroup MappedParameterFlags Mapped Parameter Flags
+ *
+ * Various flags for parameter mappings.
+ * @see ParameterData::mappedFlags
+ * @{
+ */
+
+/*!
+ * Parameter mapping uses delta value instead of full scale.
+ * Only relevant for MIDI CC mappings.
+ */
+static const uint PARAMETER_MAPPING_MIDI_DELTA = 0x001;
 
 /** @} */
 
@@ -489,6 +540,30 @@ typedef enum {
 } BinaryType;
 
 /* ------------------------------------------------------------------------------------------------------------
+ * File Type */
+
+/*!
+ * File type.
+ */
+typedef enum {
+    /*!
+     * Null file type.
+     */
+    FILE_NONE = 0,
+
+    /*!
+     * Audio file.
+     */
+    FILE_AUDIO = 1,
+
+    /*!
+     * MIDI file.
+     */
+    FILE_MIDI = 2
+
+} FileType;
+
+/* ------------------------------------------------------------------------------------------------------------
  * Plugin Type */
 
 /*!
@@ -539,19 +614,29 @@ typedef enum {
     PLUGIN_AU = 7,
 
     /*!
-     * SF2 file (SoundFont).
+     * DLS file.
      */
-    PLUGIN_SF2 = 8,
+    PLUGIN_DLS = 8,
+
+    /*!
+     * GIG file.
+     */
+    PLUGIN_GIG = 9,
+
+    /*!
+     * SF2/3 file (SoundFont).
+     */
+    PLUGIN_SF2 = 10,
 
     /*!
      * SFZ file.
      */
-    PLUGIN_SFZ = 9,
+    PLUGIN_SFZ = 11,
 
     /*!
      * JACK application.
      */
-    PLUGIN_JACK = 10
+    PLUGIN_JACK = 12
 
 } PluginType;
 
@@ -703,6 +788,42 @@ typedef enum {
 } InternalParameterIndex;
 
 /* ------------------------------------------------------------------------------------------------------------
+ * Special Mapped Control Index */
+
+/*!
+ * Specially designated mapped control indexes.
+ * Values between 0 and 119 (0x77) are reserved for MIDI CC, which uses direct values.
+ * @see ParameterData::mappedControlIndex
+ */
+typedef enum {
+    /*!
+     * Unused control index, meaning no mapping is enabled.
+     */
+    CONTROL_INDEX_NONE = -1,
+
+    /*!
+     * CV control index, meaning the parameter is exposed as CV port.
+     */
+    CONTROL_INDEX_CV = 130,
+
+    /*!
+     * Special value to indicate MIDI pitchbend.
+     */
+    CONTROL_INDEX_MIDI_PITCHBEND = 131,
+
+    /*!
+     * Special value to indicate MIDI learn.
+     */
+    CONTROL_INDEX_MIDI_LEARN = 132,
+
+    /*!
+     * Highest index allowed for mappings.
+     */
+    CONTROL_INDEX_MAX_ALLOWED = CONTROL_INDEX_MIDI_LEARN
+
+} SpecialMappedControlIndex;
+
+/* ------------------------------------------------------------------------------------------------------------
  * Engine Callback Opcode */
 
 /*!
@@ -762,12 +883,12 @@ typedef enum {
 
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
     /*!
-     * A parameter's MIDI CC has changed.
+     * A parameter's mapped control index has changed.
      * @a pluginId Plugin Id
      * @a value1   Parameter index
-     * @a value2   New MIDI CC
+     * @a value2   New control index
      */
-    ENGINE_CALLBACK_PARAMETER_MIDI_CC_CHANGED = 7,
+    ENGINE_CALLBACK_PARAMETER_MAPPED_CONTROL_INDEX_CHANGED = 7,
 
     /*!
      * A parameter's MIDI channel has changed.
@@ -1058,6 +1179,32 @@ typedef enum {
      */
     ENGINE_CALLBACK_PATCHBAY_PORT_GROUP_CHANGED = 45,
 
+    /*!
+     * A parameter's mapped range has changed.
+     * @a pluginId Plugin Id
+     * @a value1   Parameter index
+     * @a valueStr New mapped range as "%f:%f" syntax
+     */
+    ENGINE_CALLBACK_PARAMETER_MAPPED_RANGE_CHANGED = 46,
+
+    /*!
+     * A patchbay client position has changed.
+     * @a pluginId Client Id
+     * @a value1   X position 1
+     * @a value2   Y position 1
+     * @a value3   X position 2
+     * @a valuef   Y position 2
+     */
+    ENGINE_CALLBACK_PATCHBAY_CLIENT_POSITION_CHANGED = 47,
+
+    /*!
+     * A plugin embed UI has been resized.
+     * @a pluginId Plugin Id to resize
+     * @a value1   New width
+     * @a value2   New height
+     */
+    ENGINE_CALLBACK_EMBED_UI_RESIZED = 48
+
 } EngineCallbackOpcode;
 
 /* ------------------------------------------------------------------------------------------------------------
@@ -1111,7 +1258,7 @@ typedef enum {
     /*!
      * Hide-optional-gui message.
      */
-    NSM_CALLBACK_HIDE_OPTIONAL_GUI = 7,
+    NSM_CALLBACK_HIDE_OPTIONAL_GUI = 7
 
 } NsmCallbackOpcode;
 
@@ -1176,45 +1323,50 @@ typedef enum {
     ENGINE_OPTION_MAX_PARAMETERS = 7,
 
     /*!
+     * Reset Xrun counter after project load.
+     */
+    ENGINE_OPTION_RESET_XRUNS = 8,
+
+    /*!
      * Timeout value for how much to wait for UI bridges to respond, in milliseconds.
      * Default is 4000 (4 seconds).
      */
-    ENGINE_OPTION_UI_BRIDGES_TIMEOUT = 8,
+    ENGINE_OPTION_UI_BRIDGES_TIMEOUT = 9,
 
     /*!
      * Audio buffer size.
      * Default is 512.
      */
-    ENGINE_OPTION_AUDIO_BUFFER_SIZE = 9,
+    ENGINE_OPTION_AUDIO_BUFFER_SIZE = 10,
 
     /*!
      * Audio sample rate.
      * Default is 44100.
      */
-    ENGINE_OPTION_AUDIO_SAMPLE_RATE = 10,
+    ENGINE_OPTION_AUDIO_SAMPLE_RATE = 11,
 
     /*!
      * Wherever to use 3 audio periods instead of the default 2.
      * Default is false.
      */
-    ENGINE_OPTION_AUDIO_TRIPLE_BUFFER = 11,
+    ENGINE_OPTION_AUDIO_TRIPLE_BUFFER = 12,
 
     /*!
      * Audio driver.
      * Default depends on platform.
      */
-    ENGINE_OPTION_AUDIO_DRIVER = 12,
+    ENGINE_OPTION_AUDIO_DRIVER = 13,
 
     /*!
      * Audio device (within a driver).
      * Default unset.
      */
-    ENGINE_OPTION_AUDIO_DEVICE = 13,
+    ENGINE_OPTION_AUDIO_DEVICE = 14,
 
     /*!
      * Wherever to enable OSC support in the engine.
      */
-    ENGINE_OPTION_OSC_ENABLED = 14,
+    ENGINE_OPTION_OSC_ENABLED = 15,
 
     /*!
      * The network TCP port to use for OSC.
@@ -1222,7 +1374,7 @@ typedef enum {
      * A value of < 0 means to not enable the TCP port for OSC.
      * @note Valid ports begin at 1024 and end at 32767 (inclusive)
      */
-    ENGINE_OPTION_OSC_PORT_TCP = 15,
+    ENGINE_OPTION_OSC_PORT_TCP = 16,
 
     /*!
      * The network UDP port to use for OSC.
@@ -1231,81 +1383,104 @@ typedef enum {
      * @note Disabling this option prevents DSSI UIs from working!
      * @note Valid ports begin at 1024 and end at 32767 (inclusive)
      */
-    ENGINE_OPTION_OSC_PORT_UDP = 16,
+    ENGINE_OPTION_OSC_PORT_UDP = 17,
+
+    /*!
+     * Set path used for a specific file type.
+     * Uses value as the file format, valueStr as actual path.
+     */
+    ENGINE_OPTION_FILE_PATH = 18,
 
     /*!
      * Set path used for a specific plugin type.
      * Uses value as the plugin format, valueStr as actual path.
      * @see PluginType
      */
-    ENGINE_OPTION_PLUGIN_PATH = 17,
+    ENGINE_OPTION_PLUGIN_PATH = 19,
 
     /*!
      * Set path to the binary files.
      * Default unset.
      * @note Must be set for plugin and UI bridges to work
      */
-    ENGINE_OPTION_PATH_BINARIES = 18,
+    ENGINE_OPTION_PATH_BINARIES = 20,
 
     /*!
      * Set path to the resource files.
      * Default unset.
      * @note Must be set for some internal plugins to work
      */
-    ENGINE_OPTION_PATH_RESOURCES = 19,
+    ENGINE_OPTION_PATH_RESOURCES = 21,
 
     /*!
      * Prevent bad plugin and UI behaviour.
      * @note: Linux only
      */
-    ENGINE_OPTION_PREVENT_BAD_BEHAVIOUR = 20,
+    ENGINE_OPTION_PREVENT_BAD_BEHAVIOUR = 22,
 
     /*!
-     * Set UI scaling used in frontend, so backend can do the same for plugin UIs.
+     * Set background color used in the frontend, so backend can do the same for plugin UIs.
      */
-    ENGINE_OPTION_FRONTEND_UI_SCALE = 21,
+    ENGINE_OPTION_FRONTEND_BACKGROUND_COLOR = 23,
+
+    /*!
+     * Set foreground color used in the frontend, so backend can do the same for plugin UIs.
+     */
+    ENGINE_OPTION_FRONTEND_FOREGROUND_COLOR = 24,
+
+    /*!
+     * Set UI scaling used in the frontend, so backend can do the same for plugin UIs.
+     */
+    ENGINE_OPTION_FRONTEND_UI_SCALE = 25,
 
     /*!
      * Set frontend winId, used to define as parent window for plugin UIs.
      */
-    ENGINE_OPTION_FRONTEND_WIN_ID = 22,
+    ENGINE_OPTION_FRONTEND_WIN_ID = 26,
 
 #if !defined(BUILD_BRIDGE_ALTERNATIVE_ARCH) && !defined(CARLA_OS_WIN)
     /*!
      * Set path to wine executable.
      */
-    ENGINE_OPTION_WINE_EXECUTABLE = 23,
+    ENGINE_OPTION_WINE_EXECUTABLE = 27,
 
     /*!
      * Enable automatic wineprefix detection.
      */
-    ENGINE_OPTION_WINE_AUTO_PREFIX = 24,
+    ENGINE_OPTION_WINE_AUTO_PREFIX = 28,
 
     /*!
      * Fallback wineprefix to use if automatic detection fails or is disabled, and WINEPREFIX is not set.
      */
-    ENGINE_OPTION_WINE_FALLBACK_PREFIX = 25,
+    ENGINE_OPTION_WINE_FALLBACK_PREFIX = 29,
 
     /*!
      * Enable realtime priority for Wine application and server threads.
      */
-    ENGINE_OPTION_WINE_RT_PRIO_ENABLED = 26,
+    ENGINE_OPTION_WINE_RT_PRIO_ENABLED = 30,
 
     /*!
      * Base realtime priority for Wine threads.
      */
-    ENGINE_OPTION_WINE_BASE_RT_PRIO = 27,
+    ENGINE_OPTION_WINE_BASE_RT_PRIO = 31,
 
     /*!
      * Wine server realtime priority.
      */
-    ENGINE_OPTION_WINE_SERVER_RT_PRIO = 28,
+    ENGINE_OPTION_WINE_SERVER_RT_PRIO = 32,
 #endif
 
     /*!
      * Capture console output into debug callbacks.
      */
-    ENGINE_OPTION_DEBUG_CONSOLE_OUTPUT = 29
+    ENGINE_OPTION_DEBUG_CONSOLE_OUTPUT = 33,
+
+    /*!
+     * A prefix to give to all plugin clients created by Carla.
+     * Mostly useful for JACK multi-client mode.
+     * @note MUST include at least one "." (dot).
+     */
+    ENGINE_OPTION_CLIENT_NAME_PREFIX = 34
 
 } EngineOption;
 
@@ -1498,17 +1673,32 @@ typedef struct {
     int32_t rindex;
 
     /*!
-     * Currently mapped MIDI CC.
-     * A value lower than 0 means invalid or unused.
-     * Maximum allowed value is 119 (0x77).
-     */
-    int16_t midiCC;
-
-    /*!
      * Currently mapped MIDI channel.
      * Counts from 0 to 15.
      */
     uint8_t midiChannel;
+
+    /*!
+     * Currently mapped index.
+     * @see SpecialMappedControlIndex
+     */
+    int16_t mappedControlIndex;
+
+    /*!
+     * Minimum value that this parameter maps to.
+     */
+    float mappedMinimum;
+
+    /*!
+     * Maximum value that this parameter maps to.
+     */
+    float mappedMaximum;
+
+    /*!
+     * Flags related to the current mapping of this parameter.
+     * @see MappedParameterFlags
+     */
+    uint mappedFlags;
 
 } ParameterData;
 
@@ -1733,6 +1923,7 @@ typedef struct {
 /* Forward declarations of commonly used Carla classes */
 class CarlaEngine;
 class CarlaEngineClient;
+class CarlaEngineCVSourcePorts;
 class CarlaPlugin;
 /* End namespace */
 CARLA_BACKEND_END_NAMESPACE

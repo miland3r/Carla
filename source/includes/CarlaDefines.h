@@ -1,6 +1,6 @@
 /*
  * Carla common defines
- * Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -32,8 +32,8 @@
 #endif
 
 /* Set Version */
-#define CARLA_VERSION_HEX    0x020090
-#define CARLA_VERSION_STRING "2.0.90 (2.1-alpha2)"
+#define CARLA_VERSION_HEX    0x020296
+#define CARLA_VERSION_STRING "2.3.0-RC2"
 
 /* Check OS */
 #if defined(WIN64) || defined(_WIN64) || defined(__WIN64__)
@@ -175,6 +175,15 @@
 #define CARLA_SAFE_ASSERT_CONTINUE(cond)      if (! (cond)) { carla_safe_assert(#cond, __FILE__, __LINE__); continue; }
 #define CARLA_SAFE_ASSERT_RETURN(cond, ret)   if (! (cond)) { carla_safe_assert(#cond, __FILE__, __LINE__); return ret; }
 
+#define CARLA_CUSTOM_SAFE_ASSERT(msg, cond)             if (! (cond)) carla_custom_safe_assert(msg, #cond, __FILE__, __LINE__);
+#define CARLA_CUSTOM_SAFE_ASSERT_BREAK(msg, cond)       if (! (cond)) { carla_custom_safe_assert(msg, #cond, __FILE__, __LINE__); break; }
+#define CARLA_CUSTOM_SAFE_ASSERT_CONTINUE(msg, cond)    if (! (cond)) { carla_custom_safe_assert(msg, #cond, __FILE__, __LINE__); continue; }
+#define CARLA_CUSTOM_SAFE_ASSERT_RETURN(msg, cond, ret) if (! (cond)) { carla_custom_safe_assert(msg, #cond, __FILE__, __LINE__); return ret; }
+
+#define CARLA_CUSTOM_SAFE_ASSERT_ONCE_BREAK(msg, cond)       if (! (cond)) { static bool _p; if (!_p) { _p = true; carla_custom_safe_assert(msg, #cond, __FILE__, __LINE__); } break; }
+#define CARLA_CUSTOM_SAFE_ASSERT_ONCE_CONTINUE(msg, cond)    if (! (cond)) { static bool _p; if (!_p) { _p = true; carla_custom_safe_assert(msg, #cond, __FILE__, __LINE__); } continue; }
+#define CARLA_CUSTOM_SAFE_ASSERT_ONCE_RETURN(msg, cond, ret) if (! (cond)) { static bool _p; if (!_p) { _p = true; carla_custom_safe_assert(msg, #cond, __FILE__, __LINE__); } return ret; }
+
 #define CARLA_SAFE_ASSERT_INT_BREAK(cond, value)       if (! (cond)) { carla_safe_assert_int(#cond, __FILE__, __LINE__, static_cast<int>(value); break; }
 #define CARLA_SAFE_ASSERT_INT_CONTINUE(cond, value)    if (! (cond)) { carla_safe_assert_int(#cond, __FILE__, __LINE__, static_cast<int>(value)); continue; }
 #define CARLA_SAFE_ASSERT_INT_RETURN(cond, value, ret) if (! (cond)) { carla_safe_assert_int(#cond, __FILE__, __LINE__, static_cast<int>(value)); return ret; }
@@ -191,11 +200,21 @@
 #define CARLA_SAFE_ASSERT_UINT2_CONTINUE(cond, v1, v2)    if (! (cond)) { carla_safe_assert_uint2(#cond, __FILE__, __LINE__, static_cast<uint>(v1), static_cast<uint>(v2)); continue; }
 #define CARLA_SAFE_ASSERT_UINT2_RETURN(cond, v1, v2, ret) if (! (cond)) { carla_safe_assert_uint2(#cond, __FILE__, __LINE__, static_cast<uint>(v1), static_cast<uint>(v2)); return ret; }
 
+#if defined(__GNUC__) && defined(CARLA_PROPER_CPP11_SUPPORT) && ! defined(__clang__)
+# define CARLA_CATCH_UNWIND catch (abi::__forced_unwind&) { throw; }
+# if __GNUC__ >= 6
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wterminate"
+# endif
+#else
+# define CARLA_CATCH_UNWIND
+#endif
+
 /* Define CARLA_SAFE_EXCEPTION */
-#define CARLA_SAFE_EXCEPTION(msg)             catch(...) { carla_safe_exception(msg, __FILE__, __LINE__); }
-#define CARLA_SAFE_EXCEPTION_BREAK(msg)       catch(...) { carla_safe_exception(msg, __FILE__, __LINE__); break; }
-#define CARLA_SAFE_EXCEPTION_CONTINUE(msg)    catch(...) { carla_safe_exception(msg, __FILE__, __LINE__); continue; }
-#define CARLA_SAFE_EXCEPTION_RETURN(msg, ret) catch(...) { carla_safe_exception(msg, __FILE__, __LINE__); return ret; }
+#define CARLA_SAFE_EXCEPTION(msg)             CARLA_CATCH_UNWIND catch(...) { carla_safe_exception(msg, __FILE__, __LINE__); }
+#define CARLA_SAFE_EXCEPTION_BREAK(msg)       CARLA_CATCH_UNWIND catch(...) { carla_safe_exception(msg, __FILE__, __LINE__); break; }
+#define CARLA_SAFE_EXCEPTION_CONTINUE(msg)    CARLA_CATCH_UNWIND catch(...) { carla_safe_exception(msg, __FILE__, __LINE__); continue; }
+#define CARLA_SAFE_EXCEPTION_RETURN(msg, ret) CARLA_CATCH_UNWIND catch(...) { carla_safe_exception(msg, __FILE__, __LINE__); return ret; }
 
 /* Define CARLA_DECLARE_NON_COPY_CLASS */
 #ifdef CARLA_PROPER_CPP11_SUPPORT

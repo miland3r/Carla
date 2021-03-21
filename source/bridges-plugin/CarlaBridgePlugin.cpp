@@ -1,6 +1,6 @@
 ﻿/*
  * Carla Bridge Plugin
- * Copyright (C) 2012-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2012-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -23,6 +23,7 @@
 #include "CarlaHost.h"
 
 #include "CarlaBackendUtils.hpp"
+#include "CarlaJuceUtils.hpp"
 #include "CarlaMainLoop.hpp"
 #include "CarlaMIDI.h"
 
@@ -67,6 +68,7 @@
 #include "jackbridge/JackBridge.hpp"
 
 #include "water/files/File.h"
+#include "water/misc/Time.h"
 
 using CarlaBackend::CarlaEngine;
 using CarlaBackend::EngineCallbackOpcode;
@@ -83,7 +85,7 @@ static bool gIsInitiated = false;
 static volatile bool gCloseNow = false;
 static volatile bool gSaveNow  = false;
 
-#if defined(CARLA_OS_LINUX)
+#if defined(CARLA_OS_UNIX)
 static void closeSignalHandler(int) noexcept
 {
     gCloseNow = true;
@@ -106,7 +108,7 @@ static BOOL WINAPI winSignalHandler(DWORD dwCtrlType) noexcept
 
 static void initSignalHandler()
 {
-#if defined(CARLA_OS_LINUX)
+#if defined(CARLA_OS_UNIX)
     struct sigaction sig;
     carla_zeroStruct(sig);
 
@@ -128,10 +130,11 @@ static void initSignalHandler()
 // -------------------------------------------------------------------------
 
 static String gProjectFilename;
+static CarlaHostHandle gHostHandle;
 
 static void gIdle()
 {
-    carla_engine_idle();
+    carla_engine_idle(gHostHandle);
 
     if (gSaveNow)
     {
@@ -139,8 +142,8 @@ static void gIdle()
 
         if (gProjectFilename.isNotEmpty())
         {
-            if (! carla_save_plugin_state(0, gProjectFilename.toRawUTF8()))
-                carla_stderr("Plugin preset save failed, error was:\n%s", carla_get_last_error());
+            if (! carla_save_plugin_state(gHostHandle, 0, gProjectFilename.toRawUTF8()))
+                carla_stderr("Plugin preset save failed, error was:\n%s", carla_get_last_error(gHostHandle));
         }
     }
 }
@@ -209,11 +212,12 @@ public:
         carla_debug("CarlaBridgePlugin::CarlaBridgePlugin(%s, \"%s\", %s, %s, %s, %s)",
                     bool2str(useBridge), clientName, audioPoolBaseName, rtClientBaseName, nonRtClientBaseName, nonRtServerBaseName);
 
-        carla_set_engine_callback(callback, this);
+        carla_set_engine_callback(gHostHandle, callback, this);
 
         if (useBridge)
         {
-            carla_engine_init_bridge(audioPoolBaseName,
+            carla_engine_init_bridge(gHostHandle,
+                                     audioPoolBaseName,
                                      rtClientBaseName,
                                      nonRtClientBaseName,
                                      nonRtServerBaseName,
@@ -221,22 +225,22 @@ public:
         }
         else if (std::getenv("CARLA_BRIDGE_DUMMY") != nullptr)
         {
-            carla_engine_init("Dummy", clientName);
+            carla_engine_init(gHostHandle, "Dummy", clientName);
         }
         else
         {
-            carla_engine_init("JACK", clientName);
+            carla_engine_init(gHostHandle, "JACK", clientName);
         }
 
-        fEngine = carla_get_engine();
+        fEngine = carla_get_engine_from_handle(gHostHandle);
     }
 
     ~CarlaBridgePlugin()
     {
         carla_debug("CarlaBridgePlugin::~CarlaBridgePlugin()");
 
-        if (! fUsingExec)
-            carla_engine_close();
+        if (fEngine != nullptr && ! fUsingExec)
+            carla_engine_close(gHostHandle);
     }
 
     bool isOk() const noexcept
@@ -251,9 +255,11 @@ public:
         fUsingBridge = useBridge;
         fUsingExec   = true;
 
-        if (! useBridge)
+        const bool testing = std::getenv("CARLA_BRIDGE_TESTING") != nullptr;
+
+        if (! useBridge && ! testing)
         {
-            const CarlaPluginInfo* const pInfo(carla_get_plugin_info(0));
+            const CarlaPluginInfo* const pInfo = carla_get_plugin_info(gHostHandle, 0);
             CARLA_SAFE_ASSERT_RETURN(pInfo != nullptr,);
 
             gProjectFilename  = CharPointer_UTF8(pInfo->name);
@@ -264,10 +270,10 @@ public:
 
             if (File(gProjectFilename).existsAsFile())
             {
-                if (carla_load_plugin_state(0, gProjectFilename.toRawUTF8()))
+                if (carla_load_plugin_state(gHostHandle, 0, gProjectFilename.toRawUTF8()))
                     carla_stdout("Plugin state loaded successfully");
                 else
-                    carla_stderr("Plugin state load failed, error was:\n%s", carla_get_last_error());
+                    carla_stderr("Plugin state load failed, error was:\n%s", carla_get_last_error(gHostHandle));
             }
             else
             {
@@ -286,6 +292,14 @@ public:
         juce::JUCEApplicationBase::createInstance = &juce_CreateApplication;
         juce::JUCEApplicationBase::main(JUCE_MAIN_FUNCTION_ARGS);
 #else
+        int64_t timeToEnd = 0;
+
+        if (testing)
+        {
+            timeToEnd = water::Time::currentTimeMillis() + 5 * 1000;
+            fEngine->transportPlay();
+        }
+
         for (; runMainLoopOnce() && ! gCloseNow;)
         {
             gIdle();
@@ -295,10 +309,12 @@ public:
 # else
             carla_msleep(5);
 # endif
+            if (testing && timeToEnd - water::Time::currentTimeMillis() < 0)
+                break;
         }
 #endif
 
-        carla_engine_close();
+        carla_engine_close(gHostHandle);
     }
 
     // ---------------------------------------------------------------------
@@ -329,7 +345,7 @@ protected:
     }
 
 private:
-    const CarlaEngine* fEngine;
+    CarlaEngine* fEngine;
 
 #ifdef USING_JUCE
     const juce::ScopedJuceInitialiser_GUI fJuceInitialiser;
@@ -377,7 +393,7 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-#if defined(CARLA_OS_WIN) && ! defined(BUILDING_CARLA_FOR_WINDOWS)
+#if defined(CARLA_OS_WIN) && defined(BUILDING_CARLA_FOR_WINE)
     // ---------------------------------------------------------------------
     // Test if bridge is working
 
@@ -564,6 +580,8 @@ int main(int argc, char* argv[])
     // ---------------------------------------------------------------------
     // Initialize OS features
 
+    const bool testing = std::getenv("CARLA_BRIDGE_TESTING") != nullptr;
+
 #ifdef CARLA_OS_WIN
     OleInitialize(nullptr);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -595,7 +613,7 @@ int main(int argc, char* argv[])
 
         if (sparam.sched_priority > 0)
         {
-            if (sched_setscheduler(0, SCHED_RR|SCHED_RESET_ON_FORK, &sparam) < 0)
+            if (sched_setscheduler(0, SCHED_RR|SCHED_RESET_ON_FORK, &sparam) < 0 && ! testing)
             {
                 CarlaString error(std::strerror(errno));
                 carla_stderr("Failed to set high priority, error %i: %s", errno, error.buffer());
@@ -605,7 +623,7 @@ int main(int argc, char* argv[])
 #endif
 
 #ifdef CARLA_OS_WIN
-    if (! SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS))
+    if (! SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS) && ! testing)
         carla_stderr("Failed to set high priority.");
 #endif
 
@@ -620,35 +638,46 @@ int main(int argc, char* argv[])
     int ret;
 
     {
+        gHostHandle = carla_standalone_host_init();
+
         CarlaBridgePlugin bridge(useBridge, clientName,
                                  audioPoolBaseName, rtClientBaseName, nonRtClientBaseName, nonRtServerBaseName);
 
         if (! bridge.isOk())
         {
-            carla_stderr("Failed to init engine, error was:\n%s", carla_get_last_error());
+            carla_stderr("Failed to init engine, error was:\n%s", carla_get_last_error(gHostHandle));
             return 1;
         }
 
         // -----------------------------------------------------------------
         // Init plugin
 
-        if (carla_add_plugin(btype, itype, file.getFullPathName().toRawUTF8(), name, label, uniqueId, extraStuff, 0x0))
+        if (carla_add_plugin(gHostHandle,
+                             btype, itype,
+                             file.getFullPathName().toRawUTF8(), name, label, uniqueId, extraStuff, 0x0))
         {
             ret = 0;
 
             if (! useBridge)
             {
-                carla_set_active(0, true);
-                carla_set_option(0, CarlaBackend::PLUGIN_OPTION_SEND_CONTROL_CHANGES, true);
+                carla_set_active(gHostHandle, 0, true);
 
-                if (const CarlaPluginInfo* const pluginInfo = carla_get_plugin_info(0))
+                if (const CarlaPluginInfo* const pluginInfo = carla_get_plugin_info(gHostHandle, 0))
                 {
-                    if (pluginInfo->hints & CarlaBackend::PLUGIN_HAS_CUSTOM_UI)
+                    if (itype == CarlaBackend::PLUGIN_INTERNAL && (std::strcmp(label, "audiofile") == 0 || std::strcmp(label, "midifile") == 0))
+                    {
+                        if (file.exists())
+                            carla_set_custom_data(gHostHandle, 0,
+                                                  CarlaBackend::CUSTOM_DATA_TYPE_STRING,
+                                                  "file", file.getFullPathName().toRawUTF8());
+                    }
+                    else if (pluginInfo->hints & CarlaBackend::PLUGIN_HAS_CUSTOM_UI)
                     {
 #ifdef HAVE_X11
                         if (std::getenv("DISPLAY") != nullptr)
 #endif
-                            carla_show_custom_ui(0, true);
+                            if (! testing)
+                                carla_show_custom_ui(gHostHandle, 0, true);
                     }
                 }
             }
@@ -659,7 +688,7 @@ int main(int argc, char* argv[])
         {
             ret = 1;
 
-            const char* const lastError(carla_get_last_error());
+            const char* const lastError(carla_get_last_error(gHostHandle));
             carla_stderr("Plugin failed to load, error was:\n%s", lastError);
 
             if (useBridge)

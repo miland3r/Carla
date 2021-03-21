@@ -1,6 +1,6 @@
 /*
  * Carla binary utils
- * Copyright (C) 2014-2018 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2014-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -19,11 +19,11 @@
 #define CARLA_BINARY_UTILS_HPP_INCLUDED
 
 #include "CarlaBackend.h"
-#include "CarlaUtils.hpp"
+#include "CarlaScopeUtils.hpp"
 
 #include "water/files/FileInputStream.h"
 
-#ifdef HAVE_LIBMAGIC
+#if defined(HAVE_LIBMAGIC) && ! defined(BUILD_BRIDGE_ALTERNATIVE_ARCH)
 # include <magic.h>
 # ifdef CARLA_OS_MAC
 #  include "CarlaMacUtils.hpp"
@@ -32,7 +32,7 @@
 
 CARLA_BACKEND_START_NAMESPACE
 
-#ifdef HAVE_LIBMAGIC
+#if defined(HAVE_LIBMAGIC) && ! defined(BUILD_BRIDGE_ALTERNATIVE_ARCH)
 // --------------------------------------------------------------------------------------------------------------------
 
 class CarlaMagic
@@ -80,7 +80,7 @@ BinaryType getBinaryTypeFromFile(const char* const filename)
     if (filename == nullptr || filename[0] == '\0')
         return BINARY_NATIVE;
 
-#ifdef HAVE_LIBMAGIC
+#if defined(HAVE_LIBMAGIC) && ! defined(BUILD_BRIDGE_ALTERNATIVE_ARCH)
     static const CarlaMagic magic;
 
     const char* const output(magic.getFileDescription(filename));
@@ -112,9 +112,11 @@ BinaryType getBinaryTypeFromFile(const char* const filename)
             // We just assume what architectures are more important, and check for them first
             if (std::strstr(output, "x86_64") != nullptr)
                 return BINARY_POSIX64;
-            if (std::strstr(output, "i386"))
+            if (std::strstr(output, "arm64") != nullptr)
+                return BINARY_POSIX64;
+            if (std::strstr(output, "i386") != nullptr)
                 return BINARY_POSIX32;
-            if (std::strstr(output, "ppc"))
+            if (std::strstr(output, "ppc") != nullptr)
                 return BINARY_OTHER;
         }
 
@@ -128,7 +130,7 @@ BinaryType getBinaryTypeFromFile(const char* const filename)
     using water::File;
     using water::FileInputStream;
 
-    ScopedPointer<FileInputStream> stream(File(filename).createInputStream());
+    CarlaScopedPointer<FileInputStream> stream(File(filename).createInputStream());
     CARLA_SAFE_ASSERT_RETURN(stream != nullptr && ! stream->failedToOpen(), BINARY_NATIVE);
 
     // ----------------------------------------------------------------------------------------------------------------

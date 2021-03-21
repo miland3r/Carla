@@ -2,7 +2,7 @@
   ==============================================================================
 
    This file is part of the JUCE library.
-   Copyright (c) 2017 - ROLI Ltd.
+   Copyright (c) 2020 - Raw Material Software Limited
 
    JUCE is an open source library subject to commercial or open-source
    licensing.
@@ -30,6 +30,8 @@ namespace juce
     process-level.
 
     @see Thread, JUCEApplicationBase
+
+    @tags{Core}
 */
 class JUCE_API  Process
 {
@@ -71,7 +73,7 @@ public:
     */
     static void JUCE_CALLTYPE makeForegroundProcess();
 
-    /** Hides the application (on an OS that supports this, e.g. OSX) */
+    /** Hides the application (on an OS that supports this, e.g. OSX, iOS, Android) */
     static void JUCE_CALLTYPE hide();
 
     //==============================================================================
@@ -131,7 +133,7 @@ public:
     static void JUCE_CALLTYPE setCurrentModuleInstanceHandle (void* newHandle) noexcept;
    #endif
 
-   #if JUCE_MAC || DOXYGEN
+   #if (JUCE_MAC && JUCE_MODULE_AVAILABLE_juce_gui_basics) || DOXYGEN
     //==============================================================================
     /** OSX ONLY - Shows or hides the OSX dock icon for this app. */
     static void setDockIconVisible (bool isVisible);

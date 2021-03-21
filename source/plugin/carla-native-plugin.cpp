@@ -1,6 +1,6 @@
 /*
  * Carla Plugin Host
- * Copyright (C) 2011-2018 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -16,13 +16,49 @@
  */
 
 #include "CarlaNativePlugin.h"
+#include "CarlaHostImpl.hpp"
 
 #include "CarlaEngine.hpp"
 #include "CarlaString.hpp"
 
 #include "water/files/File.h"
 
+// --------------------------------------------------------------------------------------------------------------------
+// Expose info functions as needed
+
+#ifndef CARLA_PLUGIN_EXPORT
+# include "utils/Information.cpp"
+#endif
+
+// --------------------------------------------------------------------------------------------------------------------
+
 CARLA_BACKEND_USE_NAMESPACE
+
+// --------------------------------------------------------------------------------------------------------------------
+
+CarlaHostHandle carla_create_native_plugin_host_handle(const NativePluginDescriptor* desc, NativePluginHandle handle)
+{
+    CarlaEngine* const engine = carla_get_native_plugin_engine(desc, handle);
+    CARLA_SAFE_ASSERT_RETURN(engine, nullptr);
+
+    CarlaHostHandleImpl* hosthandle;
+
+    try {
+        hosthandle = new CarlaHostHandleImpl();
+    } CARLA_SAFE_EXCEPTION_RETURN("carla_create_native_plugin_host_handle()", nullptr);
+
+    hosthandle->engine = engine;
+    hosthandle->isPlugin = true;
+    return hosthandle;
+}
+
+void carla_host_handle_free(CarlaHostHandle handle)
+{
+    CARLA_SAFE_ASSERT_RETURN(handle != nullptr,);
+    CARLA_SAFE_ASSERT_RETURN(handle->isPlugin,);
+
+    delete (CarlaHostHandleImpl*)handle;
+}
 
 // --------------------------------------------------------------------------------------------------------------------
 
@@ -38,6 +74,8 @@ CarlaEngine* carla_get_native_plugin_engine(const NativePluginDescriptor* desc, 
 
 // --------------------------------------------------------------------------------------------------------------------
 
+// testing purposes only
+#if 0
 static uint32_t get_buffer_size(NativeHostHandle)
 {
     return 128;
@@ -103,5 +141,6 @@ int main()
     rack->cleanup(handle);
     return 0;
 }
+#endif
 
 // --------------------------------------------------------------------------------------------------------------------

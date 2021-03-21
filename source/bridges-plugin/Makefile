@@ -12,6 +12,8 @@ include $(CWD)/Makefile.mk
 ifeq ($(TESTBUILD),true)
 ifeq ($(USING_JUCE),true)
 BUILD_CXX_FLAGS += -Wno-undef
+# FIXME
+BUILD_CXX_FLAGS += -Wno-deprecated-declarations
 endif
 endif
 
@@ -42,12 +44,12 @@ LIBS_native   = $(MODULEDIR)/jackbridge.a
 LIBS_arm32    = $(MODULEDIR)/jackbridge.arm32.a
 LIBS_posix32  = $(MODULEDIR)/jackbridge.posix32.a
 LIBS_posix64  = $(MODULEDIR)/jackbridge.posix64.a
-ifeq ($(BUILDING_FOR_WINDOWS),true)
-LIBS_win32    = $(MODULEDIR)/jackbridge.win32.a
-LIBS_win64    = $(MODULEDIR)/jackbridge.win64.a
-else
+ifeq ($(BUILDING_FOR_WINE),true)
 LIBS_win32    = $(MODULEDIR)/jackbridge.win32e.a
 LIBS_win64    = $(MODULEDIR)/jackbridge.win64e.a
+else
+LIBS_win32    = $(MODULEDIR)/jackbridge.win32.a
+LIBS_win64    = $(MODULEDIR)/jackbridge.win64.a
 endif
 LINK_FLAGS   += $(JACKBRIDGE_LIBS)
 
@@ -125,7 +127,7 @@ LIBS_win32   += $(MODULEDIR)/juce_gui_basics.win32.a
 LIBS_win64   += $(MODULEDIR)/juce_gui_basics.win64.a
 LINK_FLAGS   += $(JUCE_GUI_BASICS_LIBS)
 
-ifeq ($(MACOS),true)
+ifeq ($(USING_JUCE_GUI_EXTRA),true)
 LIBS_native  += $(MODULEDIR)/juce_gui_extra.a
 LIBS_posix32 += $(MODULEDIR)/juce_gui_extra.posix32.a
 LIBS_posix64 += $(MODULEDIR)/juce_gui_extra.posix64.a
@@ -155,13 +157,14 @@ NATIVE_LINK_FLAGS  += $(MAGIC_LIBS)
 LIBS_native        += $(MODULEDIR)/audio_decoder.a
 LIBS_native        += $(MODULEDIR)/native-plugins.a
 LIBS_native        += $(MODULEDIR)/sfzero.a
+LIBS_native        += $(MODULEDIR)/zita-resampler.a
 
 ifeq ($(HAVE_DGL),true)
 LIBS_native        += $(MODULEDIR)/dgl.a
 endif
 
 ifeq ($(WIN32),true)
-EXTRA_LINK_FLAGS   += -lole32 -mwindows
+EXTRA_LINK_FLAGS   += -lole32 -lssp -mwindows
 endif
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -185,8 +188,7 @@ OBJS_native = \
 	$(OBJDIR)/CarlaPluginInternal.cpp.o \
 	$(OBJDIR)/CarlaPluginJack.cpp.o \
 	$(OBJDIR)/CarlaPluginNative.cpp.o \
-	$(OBJDIR)/CarlaPluginLADSPA.cpp.o \
-	$(OBJDIR)/CarlaPluginDSSI.cpp.o \
+	$(OBJDIR)/CarlaPluginLADSPADSSI.cpp.o \
 	$(OBJDIR)/CarlaPluginLV2.cpp.o \
 	$(OBJDIR)/CarlaPluginVST2.cpp.o \
 	$(OBJDIR)/CarlaPluginVST3.cpp.o \
@@ -212,8 +214,7 @@ OBJS_arch = \
 	$(OBJDIR)/CarlaPlugin.cpp.arch.o \
 	$(OBJDIR)/CarlaPluginBridge.cpp.arch.o \
 	$(OBJDIR)/CarlaPluginInternal.cpp.arch.o \
-	$(OBJDIR)/CarlaPluginLADSPA.cpp.arch.o \
-	$(OBJDIR)/CarlaPluginDSSI.cpp.arch.o \
+	$(OBJDIR)/CarlaPluginLADSPADSSI.cpp.arch.o \
 	$(OBJDIR)/CarlaPluginLV2.cpp.arch.o \
 	$(OBJDIR)/CarlaPluginVST2.cpp.arch.o \
 	$(OBJDIR)/CarlaPluginVST3.cpp.arch.o \

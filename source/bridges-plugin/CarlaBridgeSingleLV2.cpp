@@ -1,6 +1,6 @@
 /*
  * Carla LV2 Single Plugin
- * Copyright (C) 2017-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2017-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -66,8 +66,7 @@ public:
                          const char* const bundlePath,
                          const LV2_Feature* const* const features)
         : Lv2PluginBaseClass<EngineTimeInfo>(sampleRate, features),
-          fPlugin(nullptr),
-          fUiName()
+          fPlugin(nullptr)
 #ifdef USING_JUCE
         , fJuceInitialiser()
 #endif
@@ -118,7 +117,7 @@ public:
         CARLA_SAFE_ASSERT_RETURN(pData->curPluginCount == 1,)
 
         fPlugin = pData->plugins[0].plugin;
-        CARLA_SAFE_ASSERT_RETURN(fPlugin != nullptr,);
+        CARLA_SAFE_ASSERT_RETURN(fPlugin.get() != nullptr,);
         CARLA_SAFE_ASSERT_RETURN(fPlugin->isEnabled(),);
 
         fPorts.hasUI        = false;
@@ -142,15 +141,16 @@ public:
 
     ~CarlaEngineSingleLV2()
     {
-        if (fPlugin != nullptr && fIsActive)
+        if (fPlugin.get() != nullptr && fIsActive)
             fPlugin->setActive(false, false, false);
 
+        fPlugin.reset();
         close();
     }
 
     bool hasPlugin() noexcept
     {
-        return fPlugin != nullptr;
+        return fPlugin.get() != nullptr;
     }
 
     // ----------------------------------------------------------------------------------------------------------------
@@ -310,8 +310,6 @@ public:
         fUI.controller = controller;
         fUI.host = nullptr;
 
-        fUiName.clear();
-
         const LV2_URID_Map* uridMap = nullptr;
 
         // ------------------------------------------------------------------------------------------------------------
@@ -332,13 +330,15 @@ public:
 
         if (fUI.host != nullptr)
         {
-            fUiName = fUI.host->plugin_human_id;
+            fPlugin->setCustomUITitle(fUI.host->plugin_human_id);
             *widget = (LV2_External_UI_Widget_Compat*)this;
             return true;
         }
 
         // ------------------------------------------------------------------------------------------------------------
         // no external-ui support, use showInterface
+
+        const char* uiTitle = nullptr;
 
         for (int i=0; features[i] != nullptr; ++i)
         {
@@ -350,7 +350,7 @@ public:
                 {
                     if (options[j].key == uridMap->map(uridMap->handle, LV2_UI__windowTitle))
                     {
-                        fUiName = (const char*)options[j].value;
+                        uiTitle = (const char*)options[j].value;
                         break;
                     }
                 }
@@ -358,9 +358,10 @@ public:
             }
         }
 
-        if (fUiName.isEmpty())
-            fUiName = fPlugin->getName();
+        if (uiTitle == nullptr)
+            uiTitle = fPlugin->getName();
 
+        fPlugin->setCustomUITitle(uiTitle);
         *widget = nullptr;
         return true;
     }
@@ -496,8 +497,7 @@ protected:
     // ----------------------------------------------------------------------------------------------------------------
 
 private:
-    CarlaPlugin* fPlugin;
-    CarlaString fUiName;
+    CarlaPluginPtr fPlugin;
 
 #ifdef USING_JUCE
     juce::SharedResourcePointer<juce::ScopedJuceInitialiser_GUI> fJuceInitialiser;

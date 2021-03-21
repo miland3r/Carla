@@ -31,14 +31,18 @@ typedef const char* LV2_URI;
 typedef uint32_t LV2_Property;
 #define LV2UI_INVALID_PORT_INDEX ((uint32_t)-1)
 
+// Parameter FLAGS
+#define LV2_PARAMETER_FLAG_INPUT         0x1
+#define LV2_PARAMETER_FLAG_OUTPUT        0x2
+
 // Parameter Types
-#define LV2_PARAMETER_BOOL              1
-#define LV2_PARAMETER_INT               2
-#define LV2_PARAMETER_LONG              3
-#define LV2_PARAMETER_FLOAT             4
-#define LV2_PARAMETER_DOUBLE            5
-#define LV2_PARAMETER_PATH              6
-#define LV2_PARAMETER_STRING            7
+#define LV2_PARAMETER_TYPE_BOOL          1
+#define LV2_PARAMETER_TYPE_INT           2
+#define LV2_PARAMETER_TYPE_LONG          3
+#define LV2_PARAMETER_TYPE_FLOAT         4
+#define LV2_PARAMETER_TYPE_DOUBLE        5
+#define LV2_PARAMETER_TYPE_PATH          6
+#define LV2_PARAMETER_TYPE_STRING        7
 
 // Port Midi Map Types
 #define LV2_PORT_MIDI_MAP_CC             1
@@ -494,7 +498,7 @@ struct LV2_RDF_PortGroup {
 struct LV2_RDF_Parameter {
     LV2_URI URI;
     LV2_Property Type;
-    bool Input;
+    LV2_Property Flags;
     const char* Label;
     const char* Comment;
     const char* GroupURI;
@@ -506,7 +510,7 @@ struct LV2_RDF_Parameter {
     LV2_RDF_Parameter() noexcept
         : URI(nullptr),
           Type(0),
-          Input(true),
+          Flags(0x0),
           Label(nullptr),
           Comment(nullptr),
           GroupURI(nullptr),
@@ -536,6 +540,30 @@ struct LV2_RDF_Parameter {
             delete[] GroupURI;
             GroupURI = nullptr;
         }
+    }
+
+    void copyAndReplace(LV2_RDF_Parameter& other) noexcept
+    {
+        URI = other.URI;
+        Type = other.Type;
+        Flags = other.Flags;
+        Label = other.Label;
+        Comment = other.Comment;
+        GroupURI = other.GroupURI;
+        MidiMap = other.MidiMap;
+        Points = other.Points;
+        Unit.Hints = other.Unit.Hints;
+        Unit.Name = other.Unit.Name;
+        Unit.Render = other.Unit.Render;
+        Unit.Symbol = other.Unit.Symbol;
+        Unit.Unit = other.Unit.Unit;
+        other.URI = nullptr;
+        other.Label = nullptr;
+        other.Comment = nullptr;
+        other.GroupURI = nullptr;
+        other.Unit.Name = nullptr;
+        other.Unit.Render = nullptr;
+        other.Unit.Symbol = nullptr;
     }
 
     CARLA_DECLARE_NON_COPY_STRUCT(LV2_RDF_Parameter)

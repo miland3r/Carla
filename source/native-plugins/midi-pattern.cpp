@@ -1,6 +1,6 @@
 /*
  * Carla Native Plugins
- * Copyright (C) 2012-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2012-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -19,6 +19,7 @@
 #include "RtLinkedList.hpp"
 
 #include "midi-base.hpp"
+#include "midi-queue.hpp"
 
 // matches UI side
 #define TICKS_PER_BEAT 48
@@ -42,10 +43,14 @@ public:
           fNeedsAllNotesOff(false),
           fWasPlayingBefore(false),
           fTimeSigNum(4),
+          fLastPosition(0.0f),
+          fLastFrame(0),
           fTicksPerFrame(0.0),
           fMaxTicks(0.0),
           fMidiOut(this),
-          fTimeInfo()
+          fTimeInfo(),
+          fMidiQueue(),
+          fMidiQueueRT()
     {
         carla_zeroStruct(fTimeInfo);
 
@@ -200,7 +205,7 @@ protected:
     // -------------------------------------------------------------------
     // Plugin process calls
 
-    void process(const float**, float**, const uint32_t frames,
+    void process(const float* const*, float**, const uint32_t frames,
                  const NativeMidiEvent* /*midiEvents*/, uint32_t /*midiEventCount*/) override
     {
         if (const NativeTimeInfo* const timeInfo = getTimeInfo())
@@ -208,6 +213,8 @@ protected:
 
         if (fWasPlayingBefore != fTimeInfo.playing)
         {
+            fLastFrame = 0;
+            fLastPosition = 0.0f;
             fNeedsAllNotesOff = true;
             fWasPlayingBefore = fTimeInfo.playing;
         }
@@ -233,6 +240,20 @@ protected:
             fNeedsAllNotesOff = false;
         }
 
+        if (fMidiQueue.isNotEmpty() && fMidiQueueRT.tryToCopyDataFrom(fMidiQueue))
+        {
+            uint8_t d1, d2, d3;
+            NativeMidiEvent ev = { 0, 0, 3, { 0, 0, 0, 0 } };
+
+            while (fMidiQueueRT.get(d1, d2, d3))
+            {
+                ev.data[0] = d1;
+                ev.data[1] = d2;
+                ev.data[2] = d3;
+                NativePluginAndUiClass::writeMidiEvent(&ev);
+            }
+        }
+
         if (fTimeInfo.playing)
         {
             if (! fTimeInfo.bbt.valid)
@@ -240,18 +261,21 @@ protected:
 
             fTicksPerFrame = TICKS_PER_BEAT / (60.0 / fTimeInfo.bbt.beatsPerMinute * getSampleRate());
 
-            /* */ double playPos = fTicksPerFrame*static_cast<double>(fTimeInfo.frame);
-            const double endPos  = playPos + fTicksPerFrame*static_cast<double>(frames);
+            double playPos;
 
-            const double loopedEndPos = std::fmod(endPos, fMaxTicks);
-
-            /*
-            for (uint32_t i=0; i<midiEventCount; ++i)
+            if (fLastFrame + frames == fTimeInfo.frame)
             {
-                uint32_t pos = static_cast<uint32_t>(std::fmod(fTicksPerFrame * static_cast<double>(fTimeInfo.frame + midiEvents[i].time), fMaxTicks));
-                fMidiOut.addRaw(pos, midiEvents[i].data, midiEvents[i].size);
+                // continuous playback
+                playPos = static_cast<double>(fLastPosition) + fTicksPerFrame * static_cast<double>(frames);
             }
-            */
+            else
+            {
+                // non-continuous, reset playPos
+                playPos = fTicksPerFrame * static_cast<double>(fTimeInfo.frame);
+            }
+
+            const double endPos       = playPos + fTicksPerFrame * static_cast<double>(frames);
+            const double loopedEndPos = std::fmod(endPos, fMaxTicks);
 
             for (; playPos < endPos; playPos += fMaxTicks)
             {
@@ -259,14 +283,20 @@ protected:
 
                 if (loopedEndPos >= loopedPlayPos)
                 {
-                    fMidiOut.play(loopedPlayPos, loopedEndPos-loopedPlayPos);
+                    if (! fMidiOut.play(loopedPlayPos, loopedEndPos-loopedPlayPos))
+                        fNeedsAllNotesOff = true;
                 }
                 else
                 {
-                    fMidiOut.play(loopedPlayPos, fMaxTicks-loopedPlayPos);
-                    fMidiOut.play(0.0, loopedEndPos);
+                    const double diff = fMaxTicks - loopedPlayPos;
+
+                    if (! (fMidiOut.play(loopedPlayPos, diff) && fMidiOut.play(0.0, loopedEndPos, diff)))
+                        fNeedsAllNotesOff = true;
                 }
             }
+
+            fLastFrame = fTimeInfo.frame;
+            fLastPosition = static_cast<float>(playPos);
         }
     }
 
@@ -295,8 +325,7 @@ protected:
             const double beatsPerMinute = fTimeInfo.bbt.valid ? fTimeInfo.bbt.beatsPerMinute : 120.0;
 
             const double ticksPerBeat  = TICKS_PER_BEAT;
-            const double ticksPerFrame = ticksPerBeat / (60.0 / beatsPerMinute * getSampleRate());
-            const double fullTicks     = static_cast<double>(ticksPerFrame * static_cast<long double>(fTimeInfo.frame));
+            const double fullTicks     = fLastPosition;
             const double fullBeats     = fullTicks / ticksPerBeat;
 
             const uint32_t tick = static_cast<uint32_t>(std::floor(std::fmod(fullTicks, ticksPerBeat)));
@@ -312,7 +341,7 @@ protected:
 
             {
                 const CarlaScopedLocale csl;
-                std::snprintf(strBuf, 0xff, "%f\n", beatsPerMinute);
+                std::snprintf(strBuf, 0xff, "%.12g\n", beatsPerMinute);
             }
 
             CARLA_SAFE_ASSERT_RETURN(writeMessage(strBuf),);
@@ -353,7 +382,8 @@ protected:
         midiEvent.size    = event->size;
 
 #ifdef DEBUG
-        carla_stdout("Playing at %f :: %03X:%03i:%03i",
+        carla_stdout("Playing at %f|%u :: %03X:%03i:%03i",
+                     midiEvent.time,
                      static_cast<double>(midiEvent.time)*fTicksPerFrame,
                      midiEvent.data[0], midiEvent.data[1], midiEvent.data[2]);
 #endif
@@ -376,6 +406,22 @@ protected:
             return true;
         }
 
+        if (std::strcmp(msg, "midi-note") == 0)
+        {
+            uint8_t note;
+            bool on;
+            CARLA_SAFE_ASSERT_RETURN(readNextLineAsByte(note), true);
+            CARLA_SAFE_ASSERT_RETURN(readNextLineAsBool(on), true);
+
+            const uint8_t status   = on ? MIDI_STATUS_NOTE_ON : MIDI_STATUS_NOTE_OFF;
+            const uint8_t velocity = on ? 100 : 0;
+
+            const CarlaMutexLocker cml(fMidiQueue.getMutex());
+
+            fMidiQueue.put(status, note, velocity);
+            return true;
+        }
+
         if (std::strcmp(msg, "midievent-add") == 0)
         {
             uint64_t time;
@@ -393,8 +439,7 @@ protected:
                 data[i] = dvalue;
             }
 
-            fMidiOut.addRaw(time /* * TICKS_PER_BEAT */, data, size);
-
+            fMidiOut.addRaw(time, data, size);
             return true;
         }
 
@@ -415,8 +460,7 @@ protected:
                 data[i] = dvalue;
             }
 
-            fMidiOut.removeRaw(time /* * TICKS_PER_BEAT */, data, size);
-
+            fMidiOut.removeRaw(time, data, size);
             return true;
         }
 
@@ -430,11 +474,16 @@ private:
     bool fWasPlayingBefore;
     int  fTimeSigNum;
 
+    float    fLastPosition;
+    uint64_t fLastFrame;
+
     double fTicksPerFrame;
     double fMaxTicks;
 
     MidiPattern    fMidiOut;
     NativeTimeInfo fTimeInfo;
+
+    MIDIEventQueue<32> fMidiQueue, fMidiQueueRT;
 
     float fParameters[kParameterCount];
 
@@ -444,7 +493,7 @@ private:
         carla_zeroChars(strBuf, 0xff);
 
         const CarlaMutexLocker cml1(getPipeLock());
-        const CarlaMutexLocker cml2(fMidiOut.getLock());
+        const CarlaMutexLocker cml2(fMidiOut.getWriteMutex());
 
         writeMessage("midi-clear-all\n", 15);
 

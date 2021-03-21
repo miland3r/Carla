@@ -17,6 +17,7 @@ endif
 # ---------------------------------------------------------------------------------------------------------------------
 
 BINDIR    := $(CWD)/../bin
+DATADIR   := $(CWD)/../data
 
 ifeq ($(DEBUG),true)
 OBJDIR    := $(CWD)/../build/plugin/Debug
@@ -24,6 +25,10 @@ MODULEDIR := $(CWD)/../build/modules/Debug
 else
 OBJDIR    := $(CWD)/../build/plugin/Release
 MODULEDIR := $(CWD)/../build/modules/Release
+endif
+
+ifeq ($(NEEDS_WINE),true)
+EXE_WRAPPER ?= wine
 endif
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -57,6 +62,7 @@ LIBS += $(MODULEDIR)/water.a
 LIBS += $(MODULEDIR)/audio_decoder.a
 LIBS += $(MODULEDIR)/native-plugins.a
 LIBS += $(MODULEDIR)/sfzero.a
+LIBS += $(MODULEDIR)/zita-resampler.a
 
 ifeq ($(HAVE_DGL),true)
 LIBS += $(MODULEDIR)/dgl.a
@@ -74,7 +80,7 @@ LIBS += $(MODULEDIR)/juce_data_structures.a
 LIBS += $(MODULEDIR)/juce_events.a
 LIBS += $(MODULEDIR)/juce_graphics.a
 LIBS += $(MODULEDIR)/juce_gui_basics.a
-ifeq ($(MACOS),true)
+ifeq ($(USING_JUCE_GUI_EXTRA),true)
 LIBS += $(MODULEDIR)/juce_gui_extra.a
 endif
 endif
@@ -103,7 +109,7 @@ LINK_FLAGS += $(JUCE_DATA_STRUCTURES_LIBS)
 LINK_FLAGS += $(JUCE_EVENTS_LIBS)
 LINK_FLAGS += $(JUCE_GRAPHICS_LIBS)
 LINK_FLAGS += $(JUCE_GUI_BASICS_LIBS)
-ifeq ($(MACOS),true)
+ifeq ($(USING_JUCE_GUI_EXTRA),true)
 LINK_FLAGS += $(JUCE_GUI_EXTRA_LIBS)
 endif
 endif
@@ -111,14 +117,37 @@ endif
 ifeq ($(MACOS),true)
 SYMBOLS_NATIVE  = -Wl,-exported_symbol,_carla_get_native_rack_plugin
 SYMBOLS_NATIVE += -Wl,-exported_symbol,_carla_get_native_patchbay_plugin
-SYMBOLS_NATIVE += -Wl,-exported_symbol,_carla_get_library_filename
-SYMBOLS_NATIVE += -Wl,-exported_symbol,_carla_get_library_folder
+SYMBOLS_NATIVE += -Wl,-exported_symbol,_carla_get_native_patchbay16_plugin
+SYMBOLS_NATIVE += -Wl,-exported_symbol,_carla_get_native_patchbay32_plugin
+SYMBOLS_NATIVE += -Wl,-exported_symbol,_carla_get_native_patchbay64_plugin
+SYMBOLS_NATIVE += -Wl,-exported_symbol,_carla_get_native_patchbay_cv_plugin
+SYMBOLS_NATIVE += -Wl,-exported_symbol,_carla_create_native_plugin_host_handle
+SYMBOLS_NATIVE += -Wl,-exported_symbol,_carla_host_handle_free
+SYMBOLS_NATIVE += -Wl,-exported_symbol,_carla_get_native_plugin_engine
 SYMBOLS_LV2     = -Wl,-exported_symbol,_lv2_descriptor
 ifeq ($(HAVE_PYQT),true)
 SYMBOLS_LV2    += -Wl,-exported_symbol,_lv2ui_descriptor
 SYMBOLS_LV2_UI  = -Wl,-exported_symbol,_lv2ui_descriptor
 endif
 SYMBOLS_VST     = -Wl,-exported_symbol,_VSTPluginMain
+else ifeq ($(WIN32),true)
+SYMBOLS_NATIVE  = symbols/carla-native-plugin.def
+SYMBOLS_VST     = symbols/carla-vst.def
+ifeq ($(HAVE_PYQT),true)
+SYMBOLS_LV2     = symbols/carla-lv2_dsp+ui.def
+SYMBOLS_LV2_UI  = symbols/carla-lv2_ui.def
+else
+SYMBOLS_LV2     = symbols/carla-lv2_dsp.def
+endif
+else
+SYMBOLS_NATIVE = -Wl,--version-script=symbols/carla-native-plugin.version
+SYMBOLS_VST    = -Wl,--version-script=symbols/carla-vst.version
+ifeq ($(HAVE_PYQT),true)
+SYMBOLS_LV2     = -Wl,--version-script=symbols/carla-lv2_dsp+ui.version
+SYMBOLS_LV2_UI  = -Wl,--version-script=symbols/carla-lv2_ui.version
+else
+SYMBOLS_LV2     = -Wl,--version-script=symbols/carla-lv2_dsp.version
+endif
 endif
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -138,8 +167,11 @@ WINE_LINK_FLAGS += -Wl,-rpath,/usr/lib/carla
 # ---------------------------------------------------------------------------------------------------------------------
 
 TARGETS = \
-	$(BINDIR)/carla-native-plugin$(APP_EXT) \
+	$(BINDIR)/libcarla_host-plugin$(LIB_EXT) \
 	$(BINDIR)/libcarla_native-plugin$(LIB_EXT)
+
+# sometimes needed for testing:
+#	$(BINDIR)/carla-native-plugin$(APP_EXT)
 
 TARGETS += \
 	$(BINDIR)/carla.lv2/carla$(LIB_EXT)
@@ -149,12 +181,13 @@ TARGETS += \
 	$(BINDIR)/carla.lv2/carla-ui$(LIB_EXT)
 endif
 
-ifneq ($(CROSS_COMPILING),true)
+ifeq ($(CAN_GENERATE_LV2_TTL),true)
 TARGETS += \
 	$(BINDIR)/carla.lv2/manifest.ttl
 endif
 
 ifneq ($(HAIKU),true)
+ifeq ($(HAVE_DGL),true)
 ifeq ($(HAVE_PYQT),true)
 TARGETS += \
 	$(BINDIR)/CarlaRack$(LIB_EXT) \
@@ -166,6 +199,7 @@ TARGETS += \
 	$(BINDIR)/CarlaPatchbayFX$(LIB_EXT) \
 	$(BINDIR)/CarlaVstShell$(LIB_EXT) \
 	$(BINDIR)/CarlaVstFxShell$(LIB_EXT)
+endif
 endif
 endif
 
@@ -181,13 +215,42 @@ endif
 
 # ---------------------------------------------------------------------------------------------------------------------
 
+BUNDLES = audiogain files miditools
+
+bundles: \
+	$(BINDIR)/carla-audiogain.lv2/manifest.ttl \
+	$(BINDIR)/carla-audiogain.lv2/carla$(LIB_EXT) \
+	$(BINDIR)/carla-files.lv2/manifest.ttl \
+	$(BINDIR)/carla-files.lv2/carla$(LIB_EXT) \
+	$(BINDIR)/carla-miditools.lv2/manifest.ttl \
+	$(BINDIR)/carla-miditools.lv2/carla$(LIB_EXT)
+
+BUNDLE_LIBS += $(MODULEDIR)/water.files.a
+BUNDLE_LIBS += $(WATER_LIBS)
+
+BUNDLE_FILES_LIBS += $(MODULEDIR)/audio_decoder.a
+BUNDLE_FILES_LIBS += $(MODULEDIR)/water.a
+BUNDLE_FILES_LIBS += $(MODULEDIR)/zita-resampler.a
+BUNDLE_FILES_LIBS += $(AUDIO_DECODER_LIBS)
+BUNDLE_FILES_LIBS += $(WATER_LIBS)
+
+# ---------------------------------------------------------------------------------------------------------------------
+
 clean:
 	rm -f $(OBJDIR)/*.o $(TARGETS)
 	rm -f $(BINDIR)/carla.lv2/*.*
 	rm -f $(BINDIR)/carla-lv2-export$(APP_EXT)
+	rm -rf $(BINDIR)/carla-*.lv2
 
 debug:
 	$(MAKE) DEBUG=true
+
+# ---------------------------------------------------------------------------------------------------------------------
+
+$(BINDIR)/libcarla_host-plugin$(LIB_EXT): $(OBJDIR)/carla-host-plugin.cpp.o $(LIBS)
+	-@mkdir -p $(BINDIR)
+	@echo "Linking libcarla-host-plugin$(LIB_EXT)"
+	@$(CXX) $< $(LIBS_START) $(LIBS) $(LIBS_END) $(SHARED) $(NATIVE_LINK_FLAGS) -o $@
 
 # ---------------------------------------------------------------------------------------------------------------------
 
@@ -212,6 +275,27 @@ $(BINDIR)/carla.lv2/carla-ui$(LIB_EXT): $(OBJDIR)/carla-lv2-ui.cpp.o $(LIBS_ui)
 	-@mkdir -p $(BINDIR)/carla.lv2
 	@echo "Linking carla.lv2/carla-ui$(LIB_EXT)"
 	@$(CXX) $< $(LIBS_START) $(LIBS_ui) $(LIBS_END) $(SHARED) $(SYMBOLS_LV2_UI) $(NATIVE_LINK_FLAGS) -o $@
+
+# ---------------------------------------------------------------------------------------------------------------------
+
+$(BINDIR)/carla-%.lv2/manifest.ttl: $(DATADIR)/lv2-bundles/%/*.ttl
+	-@mkdir -p $(shell dirname $@)
+	@cp -v $^ $(shell dirname $@)
+
+$(BINDIR)/carla-audiogain.lv2/carla$(LIB_EXT): $(OBJDIR)/carla-lv2-bundles.cpp.audiogain.o $(MODULEDIR)/native-plugins_audiogain.a
+	-@mkdir -p $(BINDIR)/carla-audiogain.lv2
+	@echo "Linking carla-audiogain.lv2/carla$(LIB_EXT)"
+	@$(CXX) $^ $(SHARED) $(SYMBOLS_LV2) $(BUNDLE_LIBS) $(LINK_FLAGS) -ldl -o $@
+
+$(BINDIR)/carla-files.lv2/carla$(LIB_EXT): $(OBJDIR)/carla-lv2-bundles.cpp.files.o $(MODULEDIR)/native-plugins_files.a
+	-@mkdir -p $(BINDIR)/carla-files.lv2
+	@echo "Linking carla-files.lv2/carla$(LIB_EXT)"
+	@$(CXX) $^ $(SHARED) $(SYMBOLS_LV2) $(BUNDLE_FILES_LIBS) $(LINK_FLAGS) -o $@
+
+$(BINDIR)/carla-miditools.lv2/carla$(LIB_EXT): $(OBJDIR)/carla-lv2-bundles.cpp.miditools.o $(MODULEDIR)/native-plugins_miditools.a
+	-@mkdir -p $(BINDIR)/carla-miditools.lv2
+	@echo "Linking carla-miditools.lv2/carla$(LIB_EXT)"
+	@$(CXX) $^ $(SHARED) $(SYMBOLS_LV2) $(BUNDLE_LIBS) $(LINK_FLAGS) -o $@
 
 # ---------------------------------------------------------------------------------------------------------------------
 
@@ -263,30 +347,30 @@ $(BINDIR)/CarlaVstFxShell$(LIB_EXT): $(OBJDIR)/carla-vst.cpp.shellfx.o $(OBJDIR)
 	@$(CXX) $^ $(LIBS_START) $(LIBS) $(LIBS_END) $(SHARED) $(SYMBOLS_VST) $(NATIVE_LINK_FLAGS) -o $@
 
 ifeq ($(WIN32),true)
-$(BINDIR)/CarlaVstShellBridged.dll: $(OBJDIR)/carla-vst-export-bridged.cpp.synth.o carla-vst-export.def
+$(BINDIR)/CarlaVstShellBridged.dll: $(OBJDIR)/carla-vst-export-bridged.cpp.synth.o
 	-@mkdir -p $(BINDIR)
 	@echo "Linking CarlaVstShellBridged.dll"
-	@$(CXX) $^ $(SHARED) $(LINK_FLAGS) -o $@
+	@$(CXX) $^ $(SHARED) $(SYMBOLS_VST) $(LINK_FLAGS) -o $@
 
-$(BINDIR)/CarlaVstFxShellBridged.dll: $(OBJDIR)/carla-vst-export-bridged.cpp.fx.o carla-vst-export.def
+$(BINDIR)/CarlaVstFxShellBridged.dll: $(OBJDIR)/carla-vst-export-bridged.cpp.fx.o
 	-@mkdir -p $(BINDIR)
 	@echo "Linking CarlaVstFxShellBridged.dll"
-	@$(CXX) $^ $(SHARED) $(LINK_FLAGS) -o $@
+	@$(CXX) $^ $(SHARED) $(SYMBOLS_VST) $(LINK_FLAGS) -o $@
 else
-$(BINDIR)/CarlaVstShellBridged.dll.so: $(OBJDIR)/carla-vst.cpp.shell.o $(OBJDIR)/carla-vst-export.cpp.dll.o carla-vst-export.def
+$(BINDIR)/CarlaVstShellBridged.dll.so: $(OBJDIR)/carla-vst.cpp.shell.o $(OBJDIR)/carla-vst-export.cpp.dll.o
 	-@mkdir -p $(BINDIR)
 	@echo "Linking CarlaVstShellBridged.dll.so"
-	@$(WINECC) $^ $(LIBS_START) $(LIBS_wine) $(LIBS_END) $(SHARED) $(WINE_LINK_FLAGS) -o $@
+	@$(WINECC) $^ $(LIBS_START) $(LIBS_wine) $(LIBS_END) $(SHARED) $(SYMBOLS_VST) $(WINE_LINK_FLAGS) -o $@
 
-$(BINDIR)/CarlaVstFxShellBridged.dll.so: $(OBJDIR)/carla-vst.cpp.shellfx.o $(OBJDIR)/carla-vst-export.cpp.dll.o carla-vst-export.def
+$(BINDIR)/CarlaVstFxShellBridged.dll.so: $(OBJDIR)/carla-vst.cpp.shellfx.o $(OBJDIR)/carla-vst-export.cpp.dll.o
 	-@mkdir -p $(BINDIR)
 	@echo "Linking CarlaVstFxShellBridged.dll.so"
-	@$(WINECC) $^ $(LIBS_START) $(LIBS_wine) $(LIBS_END) $(SHARED) $(WINE_LINK_FLAGS) -o $@
+	@$(WINECC) $^ $(LIBS_START) $(LIBS_wine) $(LIBS_END) $(SHARED) $(SYMBOLS_VST) $(WINE_LINK_FLAGS) -o $@
 endif
 
 # ---------------------------------------------------------------------------------------------------------------------
 
-$(OBJDIR)/carla-native-plugin.cpp.o: carla-native-plugin.cpp
+$(OBJDIR)/carla-%-plugin.cpp.o: carla-%-plugin.cpp
 	-@mkdir -p $(OBJDIR)
 	@echo "Compiling $<"
 	@$(CXX) $< $(BUILD_CXX_FLAGS) -c -o $@
@@ -302,6 +386,23 @@ $(OBJDIR)/carla-lv2-ui.cpp.o: carla-lv2-ui.cpp
 	-@mkdir -p $(OBJDIR)
 	@echo "Compiling $<"
 	@$(CXX) $< $(BUILD_CXX_FLAGS) -c -o $@
+
+# ---------------------------------------------------------------------------------------------------------------------
+
+$(OBJDIR)/carla-lv2-bundles.cpp.audiogain.o: carla-lv2-bundles.cpp
+	-@mkdir -p $(OBJDIR)
+	@echo "Compiling $< (audiogain)"
+	@$(CXX) $< $(BUILD_CXX_FLAGS) -DCARLA_BUNDLE_TYPE=1 -c -o $@
+
+$(OBJDIR)/carla-lv2-bundles.cpp.files.o: carla-lv2-bundles.cpp
+	-@mkdir -p $(OBJDIR)
+	@echo "Compiling $< (files)"
+	@$(CXX) $< $(BUILD_CXX_FLAGS) -DCARLA_BUNDLE_TYPE=2 -c -o $@
+
+$(OBJDIR)/carla-lv2-bundles.cpp.miditools.o: carla-lv2-bundles.cpp
+	-@mkdir -p $(OBJDIR)
+	@echo "Compiling $< (miditools)"
+	@$(CXX) $< $(BUILD_CXX_FLAGS) -DCARLA_BUNDLE_TYPE=3 -c -o $@
 
 # ---------------------------------------------------------------------------------------------------------------------
 
@@ -350,22 +451,22 @@ $(OBJDIR)/carla-vst.cpp.shellfx.o: carla-vst.cpp
 	@echo "Compiling $< (VstShell)"
 	@$(CXX) $< $(BUILD_CXX_FLAGS) -DCARLA_VST_SHELL -DCARLA_PLUGIN_SYNTH=0 -c -o $@
 
-$(OBJDIR)/carla-vst-export-bridged.cpp.fx.o: carla-vst-export-bridged.cpp
+$(OBJDIR)/carla-vst-export-bridged.cpp.fx.o: carla-vst-export-bridged.cpp $(LIBS)
 	-@mkdir -p $(OBJDIR)
 	@echo "Compiling $<"
 	@$(CXX) $< $(BUILD_CXX_FLAGS) -DCARLA_PLUGIN_SYNTH=0 -c -o $@
 
-$(OBJDIR)/carla-vst-export-bridged.cpp.synth.o: carla-vst-export-bridged.cpp
+$(OBJDIR)/carla-vst-export-bridged.cpp.synth.o: carla-vst-export-bridged.cpp $(LIBS)
 	-@mkdir -p $(OBJDIR)
 	@echo "Compiling $<"
 	@$(CXX) $< $(BUILD_CXX_FLAGS) -DCARLA_PLUGIN_SYNTH=1 -c -o $@
 
-$(OBJDIR)/carla-vst-export.cpp.o: carla-vst-export.cpp
+$(OBJDIR)/carla-vst-export.cpp.o: carla-vst-export.cpp $(LIBS)
 	-@mkdir -p $(OBJDIR)
 	@echo "Compiling $<"
 	@$(CXX) $< $(BUILD_CXX_FLAGS) -c -o $@
 
-$(OBJDIR)/carla-vst-export.cpp.dll.o: carla-vst-export.cpp
+$(OBJDIR)/carla-vst-export.cpp.dll.o: carla-vst-export.cpp $(LIBS)
 	-@mkdir -p $(OBJDIR)
 	@echo "Compiling $< (Wine)"
 	@$(WINECC) $< $(BUILD_CXX_FLAGS) -c -o $@
@@ -378,11 +479,7 @@ $(BINDIR)/carla.lv2/manifest.ttl: $(OBJDIR)/carla-lv2-export.cpp.o $(BINDIR)/car
 	@$(CXX) $< $(LIBS_START) $(LIBS) $(LIBS_END) $(NATIVE_LINK_FLAGS) -o $(BINDIR)/carla-lv2-export$(APP_EXT)
 
 	@echo "Generating LV2 ttl data"
-ifeq ($(BUILDING_FOR_WINDOWS),true)
-	@cd $(BINDIR) && wine ./carla-lv2-export$(APP_EXT)
-else
-	@cd $(BINDIR) && ./carla-lv2-export$(APP_EXT)
-endif
+	@cd $(BINDIR) && $(EXE_WRAPPER) ./carla-lv2-export$(APP_EXT)
 	@cd $(BINDIR)/carla.lv2 && ln -sf ../*bridge-* ../carla-discovery-* .
 
 $(BINDIR)/carla-lv2-export$(APP_EXT): $(OBJDIR)/carla-lv2-export.cpp.o
@@ -397,8 +494,12 @@ $(OBJDIR)/carla-lv2-export.cpp.o: carla-lv2-export.cpp
 
 # ---------------------------------------------------------------------------------------------------------------------
 
+-include $(OBJDIR)/carla-host-plugin.cpp.d
 -include $(OBJDIR)/carla-native-plugin.cpp.d
 -include $(OBJDIR)/carla-lv2.cpp.d
+-include $(OBJDIR)/carla-lv2-bundles.cpp.audiogain.d
+-include $(OBJDIR)/carla-lv2-bundles.cpp.files.d
+-include $(OBJDIR)/carla-lv2-bundles.cpp.miditools.d
 -include $(OBJDIR)/carla-lv2-export.cpp.d
 -include $(OBJDIR)/carla-vst.cpp.patchbay-fx.d
 -include $(OBJDIR)/carla-vst.cpp.patchbay-syn.d

@@ -1,6 +1,6 @@
 /*
  * Carla Plugin
- * Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -20,6 +20,7 @@
 
 #include "CarlaLibCounter.hpp"
 #include "CarlaMathUtils.hpp"
+#include "CarlaMIDI.h"
 
 CARLA_BACKEND_START_NAMESPACE
 
@@ -142,12 +143,20 @@ void PluginCVData::initBuffers() const noexcept
 
 PluginEventData::PluginEventData() noexcept
     : portIn(nullptr),
-      portOut(nullptr) {}
+      portOut(nullptr)
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+    , cvSourcePorts(nullptr)
+#endif
+    {
+    }
 
 PluginEventData::~PluginEventData() noexcept
 {
     CARLA_SAFE_ASSERT(portIn == nullptr);
     CARLA_SAFE_ASSERT(portOut == nullptr);
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+    CARLA_SAFE_ASSERT(cvSourcePorts == nullptr);
+#endif
 }
 
 void PluginEventData::clear() noexcept
@@ -163,6 +172,14 @@ void PluginEventData::clear() noexcept
         delete portOut;
         portOut = nullptr;
     }
+
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+    if (cvSourcePorts != nullptr)
+    {
+        cvSourcePorts->cleanup();
+        cvSourcePorts = nullptr;
+    }
+#endif
 }
 
 void PluginEventData::initBuffers() const noexcept
@@ -206,7 +223,9 @@ void PluginParameterData::createNew(const uint32_t newCount, const bool withSpec
     {
         data[i].index  = PARAMETER_NULL;
         data[i].rindex = PARAMETER_NULL;
-        data[i].midiCC = -1;
+        data[i].mappedControlIndex = CONTROL_INDEX_NONE;
+        data[i].mappedMinimum = -1.0f;
+        data[i].mappedMaximum = 1.0f;
     }
 
     ranges = new ParameterRanges[newCount];
@@ -264,6 +283,119 @@ float PluginParameterData::getFixedValue(const uint32_t parameterId, float value
 
     // normal mode
     return paramRanges.getFixedValue(value);
+}
+
+// copied from ParameterRanges::getUnnormalizedValue
+static float _getUnnormalizedValue(const float min, const float max, const float value) noexcept
+{
+    if (value <= 0.0f)
+        return min;
+    if (value >= 1.0f)
+        return max;
+
+    return value * (max - min) + min;
+}
+
+// copied from ParameterRanges::getUnnormalizedLogValue
+static float _getUnnormalizedLogValue(const float min, const float max, const float value) noexcept
+{
+    if (value <= 0.0f)
+        return min;
+    if (value >= 1.0f)
+        return max;
+
+    float rmin = min;
+
+    if (std::abs(min) < std::numeric_limits<float>::epsilon())
+        rmin = 0.00001f;
+
+    return rmin * std::pow(max/rmin, value);
+}
+
+float PluginParameterData::getFinalUnnormalizedValue(const uint32_t parameterId,
+                                                     const float normalizedValue) const noexcept
+{
+    float min, max, value;
+
+    if (data[parameterId].mappedControlIndex != CONTROL_INDEX_CV
+        && (data[parameterId].hints & PARAMETER_MAPPED_RANGES_SET) != 0x0)
+    {
+        min = data[parameterId].mappedMinimum;
+        max = data[parameterId].mappedMaximum;
+    }
+    else
+    {
+        min = ranges[parameterId].min;
+        max = ranges[parameterId].max;
+    }
+
+    if (data[parameterId].hints & PARAMETER_IS_BOOLEAN)
+    {
+        value = (normalizedValue < 0.5f) ? min : max;
+    }
+    else
+    {
+        if (data[parameterId].hints & PARAMETER_IS_LOGARITHMIC)
+            value = _getUnnormalizedLogValue(min, max, normalizedValue);
+        else
+            value = _getUnnormalizedValue(min, max, normalizedValue);
+
+        if (data[parameterId].hints & PARAMETER_IS_INTEGER)
+            value = std::rint(value);
+    }
+
+    return value;
+}
+
+float PluginParameterData::getFinalValueWithMidiDelta(const uint32_t parameterId,
+                                                      float value, int8_t delta) const noexcept
+{
+    if (delta < 0)
+        return value;
+    if (data[parameterId].mappedControlIndex <= 0 || data[parameterId].mappedControlIndex >= MAX_MIDI_CONTROL)
+        return value;
+
+    float min, max;
+
+    if ((data[parameterId].hints & PARAMETER_MAPPED_RANGES_SET) != 0x0)
+    {
+        min = data[parameterId].mappedMinimum;
+        max = data[parameterId].mappedMaximum;
+    }
+    else
+    {
+        min = ranges[parameterId].min;
+        max = ranges[parameterId].max;
+    }
+
+    if (data[parameterId].hints & PARAMETER_IS_BOOLEAN)
+    {
+        value = delta > 63 ? min : max;
+    }
+    else
+    {
+        if (data[parameterId].hints & PARAMETER_IS_INTEGER)
+        {
+            if (delta > 63)
+                value += delta - 128.0f;
+            else
+                value += delta;
+        }
+        else
+        {
+            if (delta > 63)
+                delta = static_cast<int8_t>(delta - 128);
+
+            value += (max - min) * (static_cast<float>(delta) / 127.0f);
+        }
+
+        if (value < min)
+            value = min;
+        else if (value > max)
+            value = max;
+    }
+
+    return value;
 }
 
 // -----------------------------------------------------------------------
@@ -501,27 +633,27 @@ void CarlaPlugin::ProtectedData::Latency::recreateBuffers(const uint32_t newChan
 // ProtectedData::PostRtEvents
 
 CarlaPlugin::ProtectedData::PostRtEvents::PostRtEvents() noexcept
-    : dataPool(128, 128),
-      dataPendingRT(dataPool),
+    : dataPool(512, 512),
       data(dataPool),
+      dataPendingRT(dataPool),
       dataMutex(),
       dataPendingMutex() {}
 
 CarlaPlugin::ProtectedData::PostRtEvents::~PostRtEvents() noexcept
 {
     dataMutex.lock();
-    data.clear();
-    dataMutex.unlock();
-
     dataPendingMutex.lock();
+
+    data.clear();
     dataPendingRT.clear();
+
+    dataMutex.unlock();
     dataPendingMutex.unlock();
 }
 
 void CarlaPlugin::ProtectedData::PostRtEvents::appendRT(const PluginPostRtEvent& e) noexcept
 {
-    CARLA_SAFE_ASSERT_INT2_RETURN(dataPendingMutex.tryLock(), e.type, e.value1,);
-
+    CARLA_SAFE_ASSERT_INT_RETURN(dataPendingMutex.tryLock(), e.type,);
     dataPendingRT.append(e);
     dataPendingMutex.unlock();
 }
@@ -530,21 +662,11 @@ void CarlaPlugin::ProtectedData::PostRtEvents::trySplice() noexcept
 {
     const CarlaMutexTryLocker cmtl(dataPendingMutex);
 
-    if (cmtl.wasLocked() && dataPendingRT.count() > 0 && dataMutex.tryLock())
+    if (cmtl.wasLocked() && dataPendingRT.isNotEmpty() && dataMutex.tryLock())
     {
         dataPendingRT.moveTo(data, true);
         dataMutex.unlock();
     }
-}
-
-void CarlaPlugin::ProtectedData::PostRtEvents::clearData() noexcept
-{
-    const bool tryLockOk(dataMutex.tryLock());
-    CARLA_SAFE_ASSERT(! tryLockOk);
-    data.clear();
-
-    if (tryLockOk)
-        dataMutex.unlock();
 }
 
 // -----------------------------------------------------------------------
@@ -604,6 +726,7 @@ CarlaPlugin::ProtectedData::ProtectedData(CarlaEngine* const eng, const uint idx
       ctrlChannel(0),
       extraHints(0x0),
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+      midiLearnParameterIndex(-1),
       transientTryCounter(0),
       transientFirstTry(true),
 #endif
@@ -622,6 +745,7 @@ CarlaPlugin::ProtectedData::ProtectedData(CarlaEngine* const eng, const uint idx
       masterMutex(),
       singleMutex(),
       stateSave(),
+      uiTitle(),
       extNotes(),
       latency(),
       postRtEvents(),
@@ -652,7 +776,7 @@ CarlaPlugin::ProtectedData::~ProtectedData() noexcept
         {
             // must not happen
             carla_safe_assert("client->isActive()", __FILE__, __LINE__);
-            client->deactivate();
+            client->deactivate(true);
         }
 
         clearBuffers();
@@ -749,16 +873,66 @@ void CarlaPlugin::ProtectedData::postponeRtEvent(const PluginPostRtEvent& rtEven
     postRtEvents.appendRT(rtEvent);
 }
 
-void CarlaPlugin::ProtectedData::postponeRtEvent(const PluginPostRtEventType type,
-                                                 const bool sendCallbackLater,
-                                                 const int32_t value1,
-                                                 const int32_t value2,
-                                                 const int32_t value3,
-                                                 const float valuef) noexcept
+void CarlaPlugin::ProtectedData::postponeParameterChangeRtEvent(const bool sendCallbackLater,
+                                                                const int32_t index,
+                                                                const float value) noexcept
 {
-    CARLA_SAFE_ASSERT_RETURN(type != kPluginPostRtEventNull,);
+    PluginPostRtEvent rtEvent = { kPluginPostRtEventParameterChange, sendCallbackLater, {} };
+    rtEvent.parameter.index = index;
+    rtEvent.parameter.value = value;
 
-    PluginPostRtEvent rtEvent = { type, sendCallbackLater, value1, value2, value3, valuef };
+    postRtEvents.appendRT(rtEvent);
+}
+
+void CarlaPlugin::ProtectedData::postponeProgramChangeRtEvent(const bool sendCallbackLater,
+                                                              const uint32_t index) noexcept
+{
+    PluginPostRtEvent rtEvent = { kPluginPostRtEventProgramChange, sendCallbackLater, {} };
+    rtEvent.program.index = index;
+
+    postRtEvents.appendRT(rtEvent);
+}
+
+void CarlaPlugin::ProtectedData::postponeMidiProgramChangeRtEvent(const bool sendCallbackLater,
+                                                                  const uint32_t index) noexcept
+{
+    PluginPostRtEvent rtEvent = { kPluginPostRtEventMidiProgramChange, sendCallbackLater, {} };
+    rtEvent.program.index = index;
+
+    postRtEvents.appendRT(rtEvent);
+}
+
+void CarlaPlugin::ProtectedData::postponeNoteOnRtEvent(const bool sendCallbackLater,
+                                                       const uint8_t channel,
+                                                       const uint8_t note,
+                                                       const uint8_t velocity) noexcept
+{
+    PluginPostRtEvent rtEvent = { kPluginPostRtEventNoteOn, sendCallbackLater, {} };
+    rtEvent.note.channel = channel;
+    rtEvent.note.note = note;
+    rtEvent.note.velocity = velocity;
+
+    postRtEvents.appendRT(rtEvent);
+}
+void CarlaPlugin::ProtectedData::postponeNoteOffRtEvent(const bool sendCallbackLater,
+                                                        const uint8_t channel,
+                                                        const uint8_t note) noexcept
+{
+    PluginPostRtEvent rtEvent = { kPluginPostRtEventNoteOff, sendCallbackLater, {} };
+    rtEvent.note.channel = channel;
+    rtEvent.note.note = note;
+
+    postRtEvents.appendRT(rtEvent);
+}
+void CarlaPlugin::ProtectedData::postponeMidiLearnRtEvent(const bool sendCallbackLater,
+                                                          const uint32_t parameter,
+                                                          const uint8_t cc,
+                                                          const uint8_t channel) noexcept
+{
+    PluginPostRtEvent rtEvent = { kPluginPostRtEventMidiLearn, sendCallbackLater, {} };
+    rtEvent.midiLearn.parameter = parameter;
+    rtEvent.midiLearn.cc = cc;
+    rtEvent.midiLearn.channel = channel;
 
     postRtEvents.appendRT(rtEvent);
 }

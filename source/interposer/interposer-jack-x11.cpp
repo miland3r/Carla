@@ -1,6 +1,6 @@
 /*
  * Carla Interposer for JACK Applications X11 control
- * Copyright (C) 2014-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2014-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -19,7 +19,10 @@
 #include "CarlaUtils.hpp"
 
 #include <dlfcn.h>
-#include <X11/Xlib.h>
+
+#ifdef HAVE_X11
+# include <X11/Xlib.h>
+#endif
 
 // --------------------------------------------------------------------------------------------------------------------
 
@@ -60,12 +63,6 @@ struct ScopedLibOpen {
 };
 
 // --------------------------------------------------------------------------------------------------------------------
-// Function typedefs
-
-typedef int (*XWindowFunc)(Display*, Window);
-typedef int (*XNextEventFunc)(Display*, XEvent*);
-
-// --------------------------------------------------------------------------------------------------------------------
 // Current state
 
 typedef enum {
@@ -75,8 +72,17 @@ typedef enum {
     WindowMapSubwindows
 } WindowMappingType;
 
+typedef enum {
+    WindowUnmapNone,
+    WindowUnmapNormal,
+    WindowUnmapDestroy
+} WindowUnmappingType;
+
+#ifdef HAVE_X11
 static Display* gCurrentlyMappedDisplay = nullptr;
 static Window gCurrentlyMappedWindow = 0;
+static bool gSupportsOptionalGui = true;
+#endif
 static CarlaInterposedCallback gInterposedCallback = nullptr;
 static uint gInterposedSessionManager = LIBJACK_SESSION_MANAGER_NONE;
 static uint gInterposedHints = 0x0;
@@ -84,8 +90,15 @@ static WindowMappingType gCurrentWindowType = WindowMapNone;
 static bool gCurrentWindowMapped = false;
 static bool gCurrentWindowVisible = false;
 
+#ifdef HAVE_X11
 // --------------------------------------------------------------------------------------------------------------------
-// Calling the real functions
+// Function typedefs
+
+typedef int (*XWindowFunc)(Display*, Window);
+typedef int (*XNextEventFunc)(Display*, XEvent*);
+
+// --------------------------------------------------------------------------------------------------------------------
+// Calling the real X11 functions
 
 static int real_XMapWindow(Display* display, Window window)
 {
@@ -119,6 +132,14 @@ static int real_XUnmapWindow(Display* display, Window window)
     return func(display, window);
 }
 
+static int real_XDestroyWindow(Display* display, Window window)
+{
+    static const XWindowFunc func = (XWindowFunc)::dlsym(RTLD_NEXT, "XDestroyWindow");
+    CARLA_SAFE_ASSERT_RETURN(func != nullptr, 0);
+
+    return func(display, window);
+}
+
 static int real_XNextEvent(Display* display, XEvent* event)
 {
     static const XNextEventFunc func = (XNextEventFunc)::dlsym(RTLD_NEXT, "XNextEvent");
@@ -137,6 +158,8 @@ static int carlaWindowMap(Display* const display, const Window window, const Win
     for (;;)
     {
         if (slo.winId < 0)
+            break;
+        if ((gInterposedHints & LIBJACK_FLAG_CONTROL_WINDOW) == 0x0)
             break;
 
         Atom atom;
@@ -210,6 +233,8 @@ static int carlaWindowMap(Display* const display, const Window window, const Win
             // ignore requests against the current mapped window
             if (gCurrentlyMappedWindow == window)
                 return 0;
+            if (gInterposedSessionManager != LIBJACK_SESSION_MANAGER_NSM || ! gSupportsOptionalGui)
+                return 0;
 
             // we already have a mapped window, with carla visible button on, should be a dialog of sorts..
             if (gCurrentWindowMapped && gCurrentWindowVisible)
@@ -255,6 +280,10 @@ static int carlaWindowMap(Display* const display, const Window window, const Win
 
         gCurrentWindowMapped = false;
         carla_stdout("JACK application window found and captured");
+
+        if (gInterposedSessionManager == LIBJACK_SESSION_MANAGER_NSM && gSupportsOptionalGui)
+            break;
+
         return 0;
     }
 
@@ -262,12 +291,43 @@ static int carlaWindowMap(Display* const display, const Window window, const Win
 
     switch (fallbackFnType)
     {
-    case 1:
+    case WindowMapNormal:
         return real_XMapWindow(display, window);
-    case 2:
+    case WindowMapRaised:
         return real_XMapRaised(display, window);
-    case 3:
+    case WindowMapSubwindows:
         return real_XMapSubwindows(display, window);
+    default:
+        return 0;
+    }
+}
+
+static int carlaWindowUnmap(Display* const display, const Window window, const WindowUnmappingType fallbackFnType)
+{
+    if (gCurrentlyMappedWindow == window)
+    {
+        carla_stdout("NOTICE: now hiding previous window");
+
+        gCurrentlyMappedDisplay = nullptr;
+        gCurrentlyMappedWindow  = 0;
+        gCurrentWindowType      = WindowMapNone;
+        gCurrentWindowMapped    = false;
+        gCurrentWindowVisible   = false;
+
+        if (gInterposedCallback != nullptr)
+            gInterposedCallback(LIBJACK_INTERPOSER_CALLBACK_UI_HIDE, nullptr);
+    }
+    else
+    {
+        carla_debug("carlaWindowUnmap(%p, %lu, %i) - not captured", display, window, fallbackFnType);
+    }
+
+    switch (fallbackFnType)
+    {
+    case WindowUnmapNormal:
+        return real_XUnmapWindow(display, window);
+    case WindowUnmapDestroy:
+        return real_XDestroyWindow(display, window);
     default:
         return 0;
     }
@@ -301,26 +361,25 @@ CARLA_EXPORT
 int XUnmapWindow(Display* display, Window window)
 {
     carla_debug("XUnmapWindow(%p, %lu)", display, window);
+    return carlaWindowUnmap(display, window, WindowUnmapNormal);
+}
 
-    if (gCurrentlyMappedWindow == window)
-    {
-        gCurrentlyMappedDisplay = nullptr;
-        gCurrentlyMappedWindow  = 0;
-        gCurrentWindowType      = WindowMapNone;
-        gCurrentWindowMapped    = false;
-        gCurrentWindowVisible   = false;
-
-        if (gInterposedCallback != nullptr)
-            gInterposedCallback(LIBJACK_INTERPOSER_CALLBACK_UI_HIDE, nullptr);
-    }
-
-    return real_XUnmapWindow(display, window);
+CARLA_EXPORT
+int XDestroyWindow(Display* display, Window window)
+{
+    carla_debug("XDestroyWindow(%p, %lu)", display, window);
+    return carlaWindowUnmap(display, window, WindowUnmapDestroy);
 }
 
 CARLA_EXPORT
 int XNextEvent(Display* display, XEvent* event)
 {
     const int ret = real_XNextEvent(display, event);
+
+    if ((gInterposedHints & LIBJACK_FLAG_CONTROL_WINDOW) == 0x0)
+        return ret;
+    if (gInterposedSessionManager == LIBJACK_SESSION_MANAGER_NSM && gSupportsOptionalGui)
+        return ret;
 
     if (ret != 0)
         return ret;
@@ -350,6 +409,8 @@ int XNextEvent(Display* display, XEvent* event)
     return real_XUnmapWindow(display, gCurrentlyMappedWindow);
 }
 
+#endif // HAVE_X11
+
 // --------------------------------------------------------------------------------------------------------------------
 // Full control helper
 
@@ -370,16 +431,22 @@ int jack_carla_interposed_action(uint action, uint value, void* ptr)
         return 1;
 
     case LIBJACK_INTERPOSER_ACTION_SHOW_HIDE_GUI:
+#ifdef HAVE_X11
+        gSupportsOptionalGui = false;
+#endif
         // show gui
         if (value != 0)
         {
+#ifdef HAVE_X11
             gCurrentWindowVisible = true;
             if (gCurrentlyMappedDisplay == nullptr || gCurrentlyMappedWindow == 0)
+#endif
             {
                 carla_stdout("NOTICE: Interposer show-gui request ignored");
                 return 0;
             }
 
+#ifdef HAVE_X11
             gCurrentWindowMapped = true;
 
             switch (gCurrentWindowType)
@@ -393,19 +460,24 @@ int jack_carla_interposed_action(uint action, uint value, void* ptr)
             default:
                 return 0;
             }
+#endif
         }
         // hide gui
         else
         {
+#ifdef HAVE_X11
             gCurrentWindowVisible = false;
             if (gCurrentlyMappedDisplay == nullptr || gCurrentlyMappedWindow == 0)
+#endif
             {
                 carla_stdout("NOTICE: Interposer hide-gui request ignored");
                 return 0;
             }
 
+#ifdef HAVE_X11
             gCurrentWindowMapped = false;
             return real_XUnmapWindow(gCurrentlyMappedDisplay, gCurrentlyMappedWindow);
+#endif
         }
         break;
 
@@ -413,8 +485,10 @@ int jack_carla_interposed_action(uint action, uint value, void* ptr)
         gCurrentWindowType      = WindowMapNone;
         gCurrentWindowMapped    = false;
         gCurrentWindowVisible   = false;
+#ifdef HAVE_X11
         gCurrentlyMappedDisplay = nullptr;
         gCurrentlyMappedWindow  = 0;
+#endif
         return 0;
     }
 

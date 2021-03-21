@@ -34,10 +34,8 @@ struct adinfo {
 	int     bit_rate;
 	int     bit_depth;
 	char *  meta_data;
+	int     can_seek;
 };
-
-/* global init function - register codecs */
-void ad_init();
 
 /* --- public API --- */
 
@@ -69,6 +67,13 @@ int64_t ad_seek  (void *sf, int64_t pos);
  * @return the number of read samples.
  */
 ssize_t ad_read  (void *sf, float* out, size_t len);
+
+/** get the current playing bit_rate
+ *
+ * @param sf decoder handle
+ * @return the bitrate in kbps or -1 on error.
+ */
+int ad_get_bitrate(void *sf);
 
 /** re-read the file information and meta-data.
  *

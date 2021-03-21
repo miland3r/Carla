@@ -1,6 +1,6 @@
 /*
  * Carla Native Plugins
- * Copyright (C) 2013-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2013-2021 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -12,40 +12,99 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
  * GNU General Public License for more details.
  *
- * For a full copy of the GNU General Public License see the GPL.txt file
+ * For a full copy of the GNU General Public License see the doc/GPL.txt file.
  */
 
-#include "CarlaNative.hpp"
+#include "CarlaNativePrograms.hpp"
 #include "CarlaString.hpp"
 
 #include "audio-base.hpp"
 
-#define PROGRAM_COUNT 16
+static const char* const audiofilesWildcard =
+#ifdef HAVE_SNDFILE
+    "*.aif;*.aifc;*.aiff;*.au;*.bwf;*.flac;*.htk;*.iff;*.mat4;*.mat5;*.oga;*.ogg;"
+    "*.paf;*.pvf;*.pvf5;*.sd2;*.sf;*.snd;*.svx;*.vcc;*.w64;*.wav;*.xi;"
+#endif
+#ifdef HAVE_FFMPEG
+    "*.3g2;*.3gp;*.aac;*.ac3;*.amr;*.ape;*.mp2;*.mp3;*.mpc;*.wma;"
+# ifndef HAVE_SNDFILE
+    "*.flac;*.oga;*.ogg;*.w64;*.wav;"
+# endif
+#else
+    "*.mp3;"
+#endif
+#if !defined(HAVE_SNDFILE) && !defined(HAVE_FFMPEG)
+    ""
+# ifndef BUILDING_FOR_CI
+#  warning sndfile and ffmpeg libraries missing, no audio file support will be available
+# endif
+#endif
+;
 
-class AudioFilePlugin : public NativePluginClass,
-                        public AbstractAudioPlayer
+// -----------------------------------------------------------------------
+
+class AudioFilePlugin : public NativePluginWithMidiPrograms<FileAudio>
 {
 public:
+#ifndef __MOD_DEVICES__
+    typedef enum _PendingInlineDisplay
+# ifdef CARLA_PROPER_CPP11_SUPPORT
+    : uint8_t
+# endif
+    {
+        InlineDisplayNotPending,
+        InlineDisplayNeedRequest,
+        InlineDisplayRequesting
+    } PendingInlineDisplay;
+#endif
+
+    enum Parameters {
+        kParameterLooping,
+        kParameterHostSync,
+        kParameterVolume,
+        kParameterEnabled,
+        kParameterInfoChannels,
+        kParameterInfoBitRate,
+        kParameterInfoBitDepth,
+        kParameterInfoSampleRate,
+        kParameterInfoLength,
+        kParameterInfoPosition,
+        kParameterInfoPoolFill,
+        kParameterCount
+    };
+
     AudioFilePlugin(const NativeHostDescriptor* const host)
-        : NativePluginClass(host),
-          AbstractAudioPlayer(),
+        : NativePluginWithMidiPrograms<FileAudio>(host, fPrograms, 2),
           fLoopMode(true),
+#ifdef __MOD_DEVICES__
+          fHostSync(false),
+#else
+          fHostSync(true),
+#endif
+          fEnabled(true),
           fDoProcess(false),
-          fLastFrame(0),
+          fWasPlayingBefore(false),
+          fNeedsFileRead(false),
+          fEntireFileLoaded(false),
           fMaxFrame(0),
+          fInternalTransportFrame(0),
+          fLastPosition(0.0f),
+          fLastPoolFill(0.0f),
+          fVolume(1.0f),
           fPool(),
-          fThread(this),
-          fInlineDisplay() {}
+          fReader(),
+          fPrograms(hostGetFilePath("audio"), audiofilesWildcard),
+          fPreviewData()
+#ifndef __MOD_DEVICES__
+        , fInlineDisplay()
+#endif
+    {
+    }
 
     ~AudioFilePlugin() override
     {
-        fThread.stopNow();
+        fReader.destroy();
         fPool.destroy();
-    }
-
-    uint64_t getLastFrame() const override
-    {
-        return fLastFrame;
     }
 
 protected:
@@ -54,37 +113,179 @@ protected:
 
     uint32_t getParameterCount() const override
     {
-        return 1;
+        return kParameterCount;
     }
 
     const NativeParameter* getParameterInfo(const uint32_t index) const override
     {
-        if (index != 0)
-            return nullptr;
-
         static NativeParameter param;
 
-        param.name  = "Loop Mode";
-        param.unit  = nullptr;
-        param.hints = static_cast<NativeParameterHints>(NATIVE_PARAMETER_IS_AUTOMABLE|NATIVE_PARAMETER_IS_ENABLED|NATIVE_PARAMETER_IS_BOOLEAN);
-        param.ranges.def = 1.0f;
-        param.ranges.min = 0.0f;
-        param.ranges.max = 1.0f;
-        param.ranges.step = 1.0f;
+        param.scalePointCount  = 0;
+        param.scalePoints      = nullptr;
+        param.unit             = nullptr;
+        param.ranges.step      = 1.0f;
         param.ranges.stepSmall = 1.0f;
         param.ranges.stepLarge = 1.0f;
-        param.scalePointCount = 0;
-        param.scalePoints     = nullptr;
+        param.designation      = NATIVE_PARAMETER_DESIGNATION_NONE;
+
+        switch (index)
+        {
+        case kParameterLooping:
+            param.name  = "Loop Mode";
+            param.hints = static_cast<NativeParameterHints>(NATIVE_PARAMETER_IS_AUTOMABLE|
+                                                            NATIVE_PARAMETER_IS_ENABLED|
+                                                            NATIVE_PARAMETER_IS_BOOLEAN);
+            param.ranges.def = 1.0f;
+            param.ranges.min = 0.0f;
+            param.ranges.max = 1.0f;
+            break;
+        case kParameterHostSync:
+            param.name  = "Host Sync";
+            param.hints = static_cast<NativeParameterHints>(NATIVE_PARAMETER_IS_AUTOMABLE|
+                                                            NATIVE_PARAMETER_IS_ENABLED|
+                                                            NATIVE_PARAMETER_IS_BOOLEAN);
+#ifdef __MOD_DEVICES__
+            param.ranges.def = 0.0f;
+#else
+            param.ranges.def = 1.0f;
+#endif
+            param.ranges.min = 0.0f;
+            param.ranges.max = 1.0f;
+            break;
+        case kParameterVolume:
+            param.name  = "Volume";
+            param.hints = static_cast<NativeParameterHints>(NATIVE_PARAMETER_IS_AUTOMABLE|
+                                                            NATIVE_PARAMETER_IS_ENABLED);
+            param.ranges.def = 100.0f;
+            param.ranges.min = 0.0f;
+            param.ranges.max = 127.0f;
+            param.ranges.stepSmall = 0.5f;
+            param.ranges.stepLarge = 10.0f;
+            param.unit = "%";
+            break;
+        case kParameterEnabled:
+            param.name  = "Enabled";
+            param.hints = static_cast<NativeParameterHints>(NATIVE_PARAMETER_IS_AUTOMABLE|
+                                                            NATIVE_PARAMETER_IS_ENABLED|
+                                                            NATIVE_PARAMETER_IS_BOOLEAN|
+                                                            NATIVE_PARAMETER_USES_DESIGNATION);
+            param.ranges.def = 1.0f;
+            param.ranges.min = 0.0f;
+            param.ranges.max = 1.0f;
+            param.designation = NATIVE_PARAMETER_DESIGNATION_ENABLED;
+            break;
+        case kParameterInfoChannels:
+            param.name  = "Num Channels";
+            param.hints = static_cast<NativeParameterHints>(NATIVE_PARAMETER_IS_AUTOMABLE|
+                                                            NATIVE_PARAMETER_IS_ENABLED|
+                                                            NATIVE_PARAMETER_IS_INTEGER|
+                                                            NATIVE_PARAMETER_IS_OUTPUT);
+            param.ranges.def = 0.0f;
+            param.ranges.min = 0.0f;
+            param.ranges.max = 2.0f;
+            break;
+        case kParameterInfoBitRate:
+            param.name  = "Bit Rate";
+            param.hints = static_cast<NativeParameterHints>(NATIVE_PARAMETER_IS_AUTOMABLE|
+                                                            NATIVE_PARAMETER_IS_ENABLED|
+                                                            NATIVE_PARAMETER_IS_INTEGER|
+                                                            NATIVE_PARAMETER_IS_OUTPUT);
+            param.ranges.def = 0.0f;
+            param.ranges.min = -1.0f;
+            param.ranges.max = 384000.0f * 64.0f * 2.0f;
+            break;
+        case kParameterInfoBitDepth:
+            param.name  = "Bit Depth";
+            param.hints = static_cast<NativeParameterHints>(NATIVE_PARAMETER_IS_AUTOMABLE|
+                                                            NATIVE_PARAMETER_IS_ENABLED|
+                                                            NATIVE_PARAMETER_IS_INTEGER|
+                                                            NATIVE_PARAMETER_IS_OUTPUT);
+            param.ranges.def = 0.0f;
+            param.ranges.min = 0.0f;
+            param.ranges.max = 64.0f;
+            break;
+        case kParameterInfoSampleRate:
+            param.name  = "Sample Rate";
+            param.hints = static_cast<NativeParameterHints>(NATIVE_PARAMETER_IS_AUTOMABLE|
+                                                            NATIVE_PARAMETER_IS_ENABLED|
+                                                            NATIVE_PARAMETER_IS_INTEGER|
+                                                            NATIVE_PARAMETER_IS_OUTPUT);
+            param.ranges.def = 0.0f;
+            param.ranges.min = 0.0f;
+            param.ranges.max = 384000.0f;
+            break;
+        case kParameterInfoLength:
+            param.name  = "Length";
+            param.hints = static_cast<NativeParameterHints>(NATIVE_PARAMETER_IS_AUTOMABLE|
+                                                            NATIVE_PARAMETER_IS_ENABLED|
+                                                            NATIVE_PARAMETER_IS_OUTPUT);
+            param.ranges.def = 0.0f;
+            param.ranges.min = 0.0f;
+            param.ranges.max = (float)INT64_MAX;
+            param.unit = "s";
+            break;
+        case kParameterInfoPosition:
+            param.name  = "Position";
+            param.hints = static_cast<NativeParameterHints>(NATIVE_PARAMETER_IS_AUTOMABLE|
+                                                            NATIVE_PARAMETER_IS_ENABLED|
+                                                            NATIVE_PARAMETER_IS_OUTPUT);
+            param.ranges.def = 0.0f;
+            param.ranges.min = 0.0f;
+            param.ranges.max = 100.0f;
+            param.unit = "%";
+            break;
+        case kParameterInfoPoolFill:
+            param.name  = "Pool Fill";
+            param.hints = static_cast<NativeParameterHints>(NATIVE_PARAMETER_IS_AUTOMABLE|
+                                                            NATIVE_PARAMETER_IS_ENABLED|
+                                                            NATIVE_PARAMETER_IS_OUTPUT);
+            param.ranges.def = 0.0f;
+            param.ranges.min = 0.0f;
+            param.ranges.max = 100.0f;
+            param.unit = "%";
+            break;
+        default:
+            return nullptr;
+        }
 
         return &param;
     }
 
     float getParameterValue(const uint32_t index) const override
     {
-        if (index != 0)
-            return 0.0f;
+        switch (index)
+        {
+        case kParameterLooping:
+            return fLoopMode ? 1.0f : 0.0f;
+        case kParameterHostSync:
+            return fHostSync ? 1.0f : 0.0f;
+        case kParameterEnabled:
+            return fEnabled ? 1.0f : 0.0f;
+        case kParameterVolume:
+            return fVolume * 100.0f;
+        case kParameterInfoPosition:
+            return fLastPosition;
+        case kParameterInfoPoolFill:
+            return fLastPoolFill;
+        case kParameterInfoBitRate:
+            return static_cast<float>(fReader.getCurrentBitRate());
+        }
 
-        return fLoopMode ? 1.0f : 0.0f;
+        const ADInfo nfo = fReader.getFileInfo();
+
+        switch (index)
+        {
+        case kParameterInfoChannels:
+            return static_cast<float>(nfo.channels);
+        case kParameterInfoBitDepth:
+            return static_cast<float>(nfo.bit_depth);
+        case kParameterInfoSampleRate:
+            return static_cast<float>(nfo.sample_rate);
+        case kParameterInfoLength:
+            return static_cast<float>(nfo.length)/1000.0f;
+        default:
+            return 0.0f;
+        }
     }
 
     // -------------------------------------------------------------------
@@ -92,17 +293,40 @@ protected:
 
     void setParameterValue(const uint32_t index, const float value) override
     {
-        if (index != 0)
+        if (index == kParameterVolume)
+        {
+            fVolume = value / 100.0f;
             return;
+        }
 
-        bool b = (value > 0.5f);
+        const bool b = (value > 0.5f);
 
-        if (b == fLoopMode)
-            return;
-
-        fLoopMode = b;
-        fThread.setLoopingMode(b);
-        fThread.setNeedsRead();
+        switch (index)
+        {
+        case kParameterLooping:
+            if (fLoopMode != b)
+            {
+                fLoopMode = b;
+                fReader.setLoopingMode(b);
+            }
+            break;
+        case kParameterHostSync:
+            if (fHostSync != b)
+            {
+                fInternalTransportFrame = 0;
+                fHostSync = b;
+            }
+            break;
+        case kParameterEnabled:
+            if (fEnabled != b)
+            {
+                fInternalTransportFrame = 0;
+                fEnabled = b;
+            }
+            break;
+        default:
+            break;
+        }
     }
 
     void setCustomData(const char* const key, const char* const value) override
@@ -110,71 +334,111 @@ protected:
         if (std::strcmp(key, "file") != 0)
             return;
 
+        invalidateNextFilename();
         loadFilename(value);
     }
 
     // -------------------------------------------------------------------
     // Plugin process calls
 
-    void process(const float**, float** const outBuffer, const uint32_t frames,
-                 const NativeMidiEvent*, uint32_t) override
+    void process2(const float* const*, float** const outBuffer, const uint32_t frames,
+                  const NativeMidiEvent*, uint32_t) override
     {
-        const NativeTimeInfo* const timePos(getTimeInfo());
+        float* const out1 = outBuffer[0];
+        float* const out2 = outBuffer[1];
 
-        float* out1 = outBuffer[0];
-        float* out2 = outBuffer[1];
+        const water::GenericScopedLock<water::SpinLock> gsl(fPool.mutex);
 
         if (! fDoProcess)
         {
-            //carla_stderr("P: no process");
-            fLastFrame = timePos->frame;
+            // carla_stderr("P: no process");
             carla_zeroFloats(out1, frames);
             carla_zeroFloats(out2, frames);
+            fLastPosition = 0.0f;
             return;
+        }
+
+        const bool loopMode = fLoopMode;
+        const float volume = fVolume;
+        bool needsIdleRequest = false;
+        bool playing;
+        uint64_t frame;
+
+        if (fHostSync)
+        {
+            const NativeTimeInfo* const timePos = getTimeInfo();
+            playing = fEnabled && timePos->playing;
+            frame = timePos->frame;
+        }
+        else
+        {
+            playing = fEnabled;
+            frame = fInternalTransportFrame;
+
+            if (playing)
+                fInternalTransportFrame += frames;
         }
 
         // not playing
-        if (! timePos->playing)
+        if (! playing)
         {
-            //carla_stderr("P: not playing");
-            if (timePos->frame == 0 && fLastFrame > 0)
-                fThread.setNeedsRead();
+            // carla_stderr("P: not playing");
+            if (frame == 0 && fWasPlayingBefore)
+                fReader.setNeedsRead(frame);
 
-            fLastFrame = timePos->frame;
             carla_zeroFloats(out1, frames);
             carla_zeroFloats(out2, frames);
+            fWasPlayingBefore = false;
             return;
+        }
+        else
+        {
+            fWasPlayingBefore = true;
         }
 
         // out of reach
-        if ((timePos->frame < fPool.startFrame || timePos->frame >= fMaxFrame) && !fLoopMode)
+        if ((frame < fPool.startFrame || frame >= fMaxFrame) && !loopMode)
         {
-            if (timePos->frame < fPool.startFrame)
-                fThread.setNeedsRead();
+            if (frame < fPool.startFrame)
+            {
+                needsIdleRequest = true;
+                fNeedsFileRead = true;
+                fReader.setNeedsRead(frame);
+            }
 
-            fLastFrame = timePos->frame;
             carla_zeroFloats(out1, frames);
             carla_zeroFloats(out2, frames);
 
+#ifndef __MOD_DEVICES__
             if (fInlineDisplay.writtenValues < 32)
             {
                 fInlineDisplay.lastValuesL[fInlineDisplay.writtenValues] = 0.0f;
                 fInlineDisplay.lastValuesR[fInlineDisplay.writtenValues] = 0.0f;
                 ++fInlineDisplay.writtenValues;
             }
-
-            if (! fInlineDisplay.pending)
+            if (fInlineDisplay.pending == InlineDisplayNotPending)
             {
-                fInlineDisplay.pending = true;
-                hostQueueDrawInlineDisplay();
+                needsIdleRequest = true;
+                fInlineDisplay.pending = InlineDisplayNeedRequest;
             }
+#endif
+
+            if (needsIdleRequest)
+                hostRequestIdle();
+
+            if (frame == 0)
+                fLastPosition = 0.0f;
+            else if (frame >= fMaxFrame)
+                fLastPosition = 100.0f;
+            else
+                fLastPosition = static_cast<float>(frame) / static_cast<float>(fMaxFrame) * 100.0f;
             return;
         }
 
-        if (fThread.isEntireFileLoaded())
+        if (fEntireFileLoaded)
         {
-            // NOTE: timePos->frame is always < fMaxFrame (or looping)
-            uint32_t targetStartFrame = static_cast<uint32_t>(fLoopMode ? timePos->frame % fMaxFrame : timePos->frame);
+            // NOTE: frame is always < fMaxFrame (or looping)
+            uint32_t targetStartFrame = static_cast<uint32_t>(loopMode ? frame % fMaxFrame : frame);
 
             for (uint32_t framesDone=0, framesToDo=frames, remainingFrames; framesDone < frames;)
             {
@@ -192,7 +456,7 @@ protected:
                 framesDone += remainingFrames;
                 framesToDo -= remainingFrames;
 
-                if (! fLoopMode)
+                if (! loopMode)
                 {
                     // not looping, stop here
                     if (framesToDo != 0)
@@ -206,38 +470,70 @@ protected:
                 // reset for next loop
                 targetStartFrame = 0;
             }
+
+            fLastPosition = static_cast<float>(targetStartFrame) / static_cast<float>(fMaxFrame) * 100.0f;
         }
         else
         {
-            // NOTE: timePos->frame is always >= fPool.startFrame
-            const uint64_t poolStartFrame = timePos->frame - fThread.getPoolStartFrame();
+            const bool offline = isOffline();
 
-            if (fThread.tryPutData(fPool, poolStartFrame, frames))
-            {
-                carla_copyFloats(out1, fPool.buffer[0]+poolStartFrame, frames);
-                carla_copyFloats(out2, fPool.buffer[1]+poolStartFrame, frames);
-            }
-            else
+            if (! fReader.tryPutData(fPool, out1, out2, frame, frames, loopMode, offline, needsIdleRequest))
             {
                 carla_zeroFloats(out1, frames);
                 carla_zeroFloats(out2, frames);
             }
+
+            if (needsIdleRequest)
+            {
+                fNeedsFileRead = true;
+
+                if (isOffline())
+                {
+                    needsIdleRequest = false;
+                    fReader.readPoll();
+
+                    if (! fReader.tryPutData(fPool, out1, out2, frame, frames, loopMode, offline, needsIdleRequest))
+                    {
+                        carla_zeroFloats(out1, frames);
+                        carla_zeroFloats(out2, frames);
+                    }
+
+                    if (needsIdleRequest)
+                        fNeedsFileRead = true;
+                }
+            }
+
+            const uint32_t modframe = static_cast<uint32_t>(frame % fMaxFrame);
+            fLastPosition = static_cast<float>(modframe) / static_cast<float>(fMaxFrame) * 100.0f;
+
+            if (modframe > fPool.startFrame)
+                fLastPoolFill = static_cast<float>(modframe - fPool.startFrame) / static_cast<float>(fPool.numFrames) * 100.0f;
+            else
+                fLastPoolFill = 100.0f;
         }
 
+        if (carla_isNotZero(volume-1.0f))
+        {
+            carla_multiply(out1, volume, frames);
+            carla_multiply(out2, volume, frames);
+        }
+
+#ifndef __MOD_DEVICES__
         if (fInlineDisplay.writtenValues < 32)
         {
             fInlineDisplay.lastValuesL[fInlineDisplay.writtenValues] = carla_findMaxNormalizedFloat(out1, frames);
             fInlineDisplay.lastValuesR[fInlineDisplay.writtenValues] = carla_findMaxNormalizedFloat(out2, frames);
             ++fInlineDisplay.writtenValues;
         }
-
-        if (! fInlineDisplay.pending)
+        if (fInlineDisplay.pending == InlineDisplayNotPending)
         {
-            fInlineDisplay.pending = true;
-            hostQueueDrawInlineDisplay();
+            needsIdleRequest = true;
+            fInlineDisplay.pending = InlineDisplayNeedRequest;
         }
+#endif
 
-        fLastFrame = timePos->frame;
+        if (needsIdleRequest)
+            hostRequestIdle();
     }
 
     // -------------------------------------------------------------------
@@ -255,17 +551,47 @@ protected:
     }
 
     // -------------------------------------------------------------------
+    // Plugin state calls
+
+    void setStateFromFile(const char* const filename) override
+    {
+        loadFilename(filename);
+    }
+
+    // -------------------------------------------------------------------
     // Plugin dispatcher calls
 
-    const NativeInlineDisplayImageSurface* renderInlineDisplay(const uint32_t width, const uint32_t height) override
+    void idle() override
     {
-        CARLA_SAFE_ASSERT_RETURN(width > 0 && height > 0, nullptr);
+        NativePluginWithMidiPrograms<FileAudio>::idle();
+
+        if (fNeedsFileRead)
+        {
+            fReader.readPoll();
+            fNeedsFileRead = false;
+        }
+
+#ifndef __MOD_DEVICES__
+        if (fInlineDisplay.pending == InlineDisplayNeedRequest)
+        {
+            fInlineDisplay.pending = InlineDisplayRequesting;
+            hostQueueDrawInlineDisplay();
+        }
+#endif
+    }
+
+#ifndef __MOD_DEVICES__
+    const NativeInlineDisplayImageSurface* renderInlineDisplay(const uint32_t rwidth, const uint32_t height) override
+    {
+        CARLA_SAFE_ASSERT_RETURN(height > 4, nullptr);
+
+        const uint32_t width = rwidth == height ? height * 4 : rwidth;
 
         /* NOTE the code is this function is not optimized, still learning my way through pixels...
          */
         const size_t stride = width * 4;
         const size_t dataSize = stride * height;
-        const uint pxToMove = fInlineDisplay.writtenValues;
+        const uint pxToMove = fDoProcess ? fInlineDisplay.writtenValues : 0;
 
         uchar* data = fInlineDisplay.data;
 
@@ -289,110 +615,126 @@ protected:
         fInlineDisplay.height = static_cast<int>(height);
         fInlineDisplay.stride = static_cast<int>(stride);
 
-        const uint h2 = height / 2;
-
-        // clear current line
-        for (uint w=width-pxToMove; w < width; ++w)
-            for (uint h=0; h < height; ++h)
-                memset(&data[h * stride + w * 4], 0, 4);
-
-        // draw upper/left
-        for (uint i=0; i < pxToMove; ++i)
+        if (pxToMove != 0)
         {
-            const float valueL = fInlineDisplay.lastValuesL[i];
-            const float valueR = fInlineDisplay.lastValuesR[i];
+            const uint h2 = height / 2;
 
-            const uint h2L = static_cast<uint>(valueL * (float)h2);
-            const uint h2R = static_cast<uint>(valueR * (float)h2);
-            const uint w   = width - pxToMove + i;
+            // clear current line
+            for (uint w=width-pxToMove; w < width; ++w)
+                for (uint h=0; h < height; ++h)
+                    memset(&data[h * stride + w * 4], 0, 4);
 
-            for (uint h=0; h < h2L; ++h)
+            // draw upper/left
+            for (uint i=0; i < pxToMove && i < 32; ++i)
             {
-                // -30dB
-                //if (valueL < 0.032f)
-                //    continue;
+                const float valueL = fInlineDisplay.lastValuesL[i];
+                const float valueR = fInlineDisplay.lastValuesR[i];
 
-                data[(h2 - h) * stride + w * 4 + 3] = 160;
+                const uint h2L = static_cast<uint>(valueL * (float)h2);
+                const uint h2R = static_cast<uint>(valueR * (float)h2);
+                const uint w   = width - pxToMove + i;
 
-                // -12dB
-                if (valueL < 0.25f)
+                for (uint h=0; h < h2L; ++h)
                 {
-                    data[(h2 - h) * stride + w * 4 + 1] = 255;
-                }
-                // -3dB
-                else if (valueL < 0.70f)
-                {
-                    data[(h2 - h) * stride + w * 4 + 2] = 255;
-                    data[(h2 - h) * stride + w * 4 + 1] = 255;
-                }
-                else
-                {
-                    data[(h2 - h) * stride + w * 4 + 2] = 255;
-                }
-            }
+                    // -30dB
+                    //if (valueL < 0.032f)
+                    //    continue;
 
-            for (uint h=0; h < h2R; ++h)
-            {
-                // -30dB
-                //if (valueR < 0.032f)
-                //    continue;
+                    data[(h2 - h) * stride + w * 4 + 3] = 160;
 
-                data[(h2 + h) * stride + w * 4 + 3] = 160;
+                    // -12dB
+                    if (valueL < 0.25f)
+                    {
+                        data[(h2 - h) * stride + w * 4 + 1] = 255;
+                    }
+                    // -3dB
+                    else if (valueL < 0.70f)
+                    {
+                        data[(h2 - h) * stride + w * 4 + 2] = 255;
+                        data[(h2 - h) * stride + w * 4 + 1] = 255;
+                    }
+                    else
+                    {
+                        data[(h2 - h) * stride + w * 4 + 2] = 255;
+                    }
+                }
 
-                // -12dB
-                if (valueR < 0.25f)
+                for (uint h=0; h < h2R; ++h)
                 {
-                    data[(h2 + h) * stride + w * 4 + 1] = 255;
-                }
-                // -3dB
-                else if (valueR < 0.70f)
-                {
-                    data[(h2 + h) * stride + w * 4 + 2] = 255;
-                    data[(h2 + h) * stride + w * 4 + 1] = 255;
-                }
-                else
-                {
-                    data[(h2 + h) * stride + w * 4 + 2] = 255;
+                    // -30dB
+                    //if (valueR < 0.032f)
+                    //    continue;
+
+                    data[(h2 + h) * stride + w * 4 + 3] = 160;
+
+                    // -12dB
+                    if (valueR < 0.25f)
+                    {
+                        data[(h2 + h) * stride + w * 4 + 1] = 255;
+                    }
+                    // -3dB
+                    else if (valueR < 0.70f)
+                    {
+                        data[(h2 + h) * stride + w * 4 + 2] = 255;
+                        data[(h2 + h) * stride + w * 4 + 1] = 255;
+                    }
+                    else
+                    {
+                        data[(h2 + h) * stride + w * 4 + 2] = 255;
+                    }
                 }
             }
         }
 
         fInlineDisplay.writtenValues = 0;
-        fInlineDisplay.pending = false;
+        fInlineDisplay.pending = InlineDisplayNotPending;
         return (NativeInlineDisplayImageSurface*)(NativeInlineDisplayImageSurfaceCompat*)&fInlineDisplay;
     }
+#endif
 
     // -------------------------------------------------------------------
 
 private:
     bool fLoopMode;
+    bool fHostSync;
+    bool fEnabled;
     bool fDoProcess;
+    bool fWasPlayingBefore;
+    volatile bool fNeedsFileRead;
 
-    volatile uint64_t fLastFrame;
+    bool fEntireFileLoaded;
     uint32_t fMaxFrame;
+    uint32_t fInternalTransportFrame;
+    float fLastPosition;
+    float fLastPoolFill;
+    float fVolume;
 
     AudioFilePool   fPool;
-    AudioFileThread fThread;
+    AudioFileReader fReader;
 
+    NativeMidiPrograms fPrograms;
+    float fPreviewData[108];
+
+#ifndef __MOD_DEVICES__
     struct InlineDisplay : NativeInlineDisplayImageSurfaceCompat {
         float lastValuesL[32];
         float lastValuesR[32];
+        volatile PendingInlineDisplay pending;
         volatile uint8_t writtenValues;
-        volatile bool pending;
 
         InlineDisplay()
             : NativeInlineDisplayImageSurfaceCompat(),
-#ifdef CARLA_PROPER_CPP11_SUPPORT
+# ifdef CARLA_PROPER_CPP11_SUPPORT
               lastValuesL{0.0f},
               lastValuesR{0.0f},
-#endif
-              writtenValues(0),
-              pending(false)
+# endif
+              pending(InlineDisplayNotPending),
+              writtenValues(0)
         {
-#ifndef CARLA_PROPER_CPP11_SUPPORT
+# ifndef CARLA_PROPER_CPP11_SUPPORT
             carla_zeroFloats(lastValuesL, 32);
             carla_zeroFloats(lastValuesR, 32);
-#endif
+# endif
         }
 
         ~InlineDisplay()
@@ -407,37 +749,49 @@ private:
         CARLA_DECLARE_NON_COPY_STRUCT(InlineDisplay)
         CARLA_PREVENT_HEAP_ALLOCATION
     } fInlineDisplay;
+#endif
 
     void loadFilename(const char* const filename)
     {
         CARLA_ASSERT(filename != nullptr);
         carla_debug("AudioFilePlugin::loadFilename(\"%s\")", filename);
 
-        fThread.stopNow();
+        fDoProcess = false;
+        fLastPoolFill = 0.0f;
+        fInternalTransportFrame = 0;
         fPool.destroy();
+        fReader.destroy();
 
         if (filename == nullptr || *filename == '\0')
         {
-            fDoProcess = false;
             fMaxFrame = 0;
             return;
         }
 
-        if (fThread.loadFilename(filename, static_cast<uint32_t>(getSampleRate())))
-        {
-            fPool.create(fThread.getPoolNumFrames());
-            fMaxFrame = fThread.getMaxFrame();
+        const uint32_t previewDataSize = sizeof(fPreviewData)/sizeof(float);
 
-            if (fThread.isEntireFileLoaded())
-                fThread.putAllData(fPool);
+        if (fReader.loadFilename(filename, static_cast<uint32_t>(getSampleRate()), previewDataSize, fPreviewData))
+        {
+            fEntireFileLoaded = fReader.isEntireFileLoaded();
+            fMaxFrame = fReader.getMaxFrame();
+
+            if (fEntireFileLoaded)
+            {
+                fReader.putAndSwapAllData(fPool);
+                fLastPoolFill = 100.0f;
+            }
             else
-                fThread.startNow();
+            {
+                fReader.createSwapablePool(fPool);
+                fReader.readPoll();
+            }
 
             fDoProcess = true;
+            hostSendPreviewBufferData('f', previewDataSize, fPreviewData);
         }
         else
         {
-            fDoProcess = false;
+            fEntireFileLoaded = false;
             fMaxFrame = 0;
         }
     }
@@ -451,8 +805,11 @@ private:
 static const NativePluginDescriptor audiofileDesc = {
     /* category  */ NATIVE_PLUGIN_CATEGORY_UTILITY,
     /* hints     */ static_cast<NativePluginHints>(NATIVE_PLUGIN_IS_RTSAFE
-                                                  |NATIVE_PLUGIN_HAS_INLINE_DISPLAY
                                                   |NATIVE_PLUGIN_HAS_UI
+#ifndef __MOD_DEVICES__
+                                                  |NATIVE_PLUGIN_HAS_INLINE_DISPLAY
+#endif
+                                                  |NATIVE_PLUGIN_REQUESTS_IDLE
                                                   |NATIVE_PLUGIN_NEEDS_UI_OPEN_SAVE
                                                   |NATIVE_PLUGIN_USES_TIME),
     /* supports  */ NATIVE_PLUGIN_SUPPORTS_NOTHING,

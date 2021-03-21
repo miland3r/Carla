@@ -32,8 +32,6 @@
 #include "../misc/Time.h"
 #include "../text/StringArray.h"
 
-#include "CarlaJuceUtils.hpp"
-
 #ifdef CARLA_OS_WIN
 # include <shlobj.h>
 #else
@@ -100,6 +98,16 @@ File& File::operator= (File&& other) noexcept
     return *this;
 }
 #endif
+
+bool File::isNull() const
+{
+    return fullPath.isEmpty();
+}
+
+bool File::isNotNull() const
+{
+    return fullPath.isNotEmpty();
+}
 
 //==============================================================================
 static String removeEllipsis (const String& path)
@@ -324,8 +332,21 @@ bool File::copyDirectoryTo (const File& newDirectory) const
         findChildFiles (subFiles, File::findFiles, false);
 
         for (int i = 0; i < subFiles.size(); ++i)
-            if (! subFiles.getReference(i).copyFileTo (newDirectory.getChildFile (subFiles.getReference(i).getFileName())))
-                return false;
+        {
+            const File& src (subFiles.getReference(i));
+            const File& dst (newDirectory.getChildFile (src.getFileName()));
+
+            if (src.isSymbolicLink())
+            {
+                if (! src.getLinkedTarget().createSymbolicLink (dst, true))
+                    return false;
+            }
+            else
+            {
+                if (! src.copyFileTo (dst))
+                    return false;
+            }
+        }
 
         subFiles.clear();
         findChildFiles (subFiles, File::findDirectories, false);
@@ -702,7 +723,7 @@ File File::withFileExtension (StringRef newExtension) const
 //==============================================================================
 FileInputStream* File::createInputStream() const
 {
-    ScopedPointer<FileInputStream> fin (new FileInputStream (*this));
+    CarlaScopedPointer<FileInputStream> fin (new FileInputStream (*this));
 
     if (fin->openedOk())
         return fin.release();
@@ -712,7 +733,7 @@ FileInputStream* File::createInputStream() const
 
 FileOutputStream* File::createOutputStream (const size_t bufferSize) const
 {
-    ScopedPointer<FileOutputStream> out (new FileOutputStream (*this, bufferSize));
+    CarlaScopedPointer<FileOutputStream> out (new FileOutputStream (*this, bufferSize));
 
     return out->failedToOpen() ? nullptr
                                : out.release();
@@ -1088,6 +1109,11 @@ File File::getCurrentWorkingDirectory()
     return File (String (dest));
 }
 
+bool File::setAsCurrentWorkingDirectory() const
+{
+    return SetCurrentDirectory (getFullPathName().toUTF8()) != FALSE;
+}
+
 bool File::isSymbolicLink() const
 {
     return (GetFileAttributes (fullPath.toUTF8()) & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
@@ -1319,6 +1345,11 @@ File File::getCurrentWorkingDirectory()
     }
 
     return File (CharPointer_UTF8 (cwd));
+}
+
+bool File::setAsCurrentWorkingDirectory() const
+{
+    return chdir (getFullPathName().toUTF8()) == 0;
 }
 
 File water_getExecutableFile();

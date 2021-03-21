@@ -1,6 +1,6 @@
 /*
  * Carla Plugin Host
- * Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -363,9 +363,17 @@ void EngineNextAction::clearAndReset() noexcept
 }
 
 // -----------------------------------------------------------------------
+// Helper functions
+
+EngineEvent* CarlaEngine::getInternalEventBuffer(const bool isInput) const noexcept
+{
+    return isInput ? pData->events.in : pData->events.out;
+}
+
+// -----------------------------------------------------------------------
 // CarlaEngine::ProtectedData
 
-CarlaEngine::ProtectedData::ProtectedData(CarlaEngine* const engine) noexcept
+CarlaEngine::ProtectedData::ProtectedData(CarlaEngine* const engine)
     : thread(engine),
 #if defined(HAVE_LIBLO) && !defined(BUILD_BRIDGE)
       osc(engine),
@@ -377,7 +385,9 @@ CarlaEngine::ProtectedData::ProtectedData(CarlaEngine* const engine) noexcept
       actionCanceled(false),
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
       loadingProject(false),
+      ignoreClientPrefix(false),
       currentProjectFilename(),
+      currentProjectFolder(),
 #endif
       bufferSize(0),
       sampleRate(0.0),
@@ -396,6 +406,7 @@ CarlaEngine::ProtectedData::ProtectedData(CarlaEngine* const engine) noexcept
       xruns(0),
       dspLoad(0.0f),
 #endif
+      pluginsToDelete(),
       events(),
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
       graph(engine),
@@ -404,11 +415,12 @@ CarlaEngine::ProtectedData::ProtectedData(CarlaEngine* const engine) noexcept
       nextAction()
 {
 #ifdef BUILD_BRIDGE_ALTERNATIVE_ARCH
-    carla_zeroStructs(plugins, 1);
+    plugins[0].plugin = nullptr;
+    carla_zeroStructs(plugins[0].peaks, 1);
 #endif
 }
 
-CarlaEngine::ProtectedData::~ProtectedData() noexcept
+CarlaEngine::ProtectedData::~ProtectedData()
 {
     CARLA_SAFE_ASSERT(curPluginCount == 0);
     CARLA_SAFE_ASSERT(maxPluginNumber == 0);
@@ -417,6 +429,17 @@ CarlaEngine::ProtectedData::~ProtectedData() noexcept
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
     CARLA_SAFE_ASSERT(plugins == nullptr);
 #endif
+
+    if (pluginsToDelete.size() != 0)
+    {
+        for (std::vector<CarlaPluginPtr>::iterator it = pluginsToDelete.begin(); it != pluginsToDelete.end(); ++it)
+        {
+            carla_stderr2("Plugin not yet deleted, name: '%s', usage count: '%u'",
+                          (*it)->getName(), it->use_count());
+        }
+    }
+
+    pluginsToDelete.clear();
 }
 
 // -----------------------------------------------------------------------
@@ -480,7 +503,6 @@ bool CarlaEngine::ProtectedData::init(const char* const clientName)
 
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
     plugins = new EnginePluginData[maxPluginNumber];
-    carla_zeroStructs(plugins, maxPluginNumber);
     xruns = 0;
     dspLoad = 0.0f;
 #endif
@@ -513,6 +535,8 @@ void CarlaEngine::ProtectedData::close()
     maxPluginNumber = 0;
     nextPluginId    = 0;
 
+    deletePluginsAsNeeded();
+
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
     if (plugins != nullptr)
     {
@@ -542,6 +566,29 @@ void CarlaEngine::ProtectedData::initTime(const char* const features)
 
 // -----------------------------------------------------------------------
 
+void CarlaEngine::ProtectedData::deletePluginsAsNeeded()
+{
+    for (bool stop;;)
+    {
+        stop = true;
+
+        for (std::vector<CarlaPluginPtr>::iterator it = pluginsToDelete.begin(); it != pluginsToDelete.end(); ++it)
+        {
+            if (it->use_count() == 1)
+            {
+                stop = false;
+                pluginsToDelete.erase(it);
+                break;
+            }
+        }
+
+        if (stop)
+            break;
+    }
+}
+
+// -----------------------------------------------------------------------
+
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
 void CarlaEngine::ProtectedData::doPluginRemove(const uint pluginId) noexcept
 {
@@ -552,20 +599,19 @@ void CarlaEngine::ProtectedData::doPluginRemove(const uint pluginId) noexcept
     // move all plugins 1 spot backwards
     for (uint i=pluginId; i < curPluginCount; ++i)
     {
-        CarlaPlugin* const plugin(plugins[i+1].plugin);
-
-        CARLA_SAFE_ASSERT_BREAK(plugin != nullptr);
+        const CarlaPluginPtr plugin = plugins[i+1].plugin;
+        CARLA_SAFE_ASSERT_BREAK(plugin.get() != nullptr);
 
         plugin->setId(i);
 
         plugins[i].plugin = plugin;
-        carla_zeroFloats(plugins[i].peaks, 4);
+        carla_zeroStruct(plugins[i].peaks);
     }
 
-    const uint id(curPluginCount);
+    const uint id = curPluginCount;
 
     // reset last plugin (now removed)
-    plugins[id].plugin = nullptr;
+    plugins[id].plugin.reset();
     carla_zeroFloats(plugins[id].peaks, 4);
 }
 
@@ -576,11 +622,11 @@ void CarlaEngine::ProtectedData::doPluginsSwitch(const uint idA, const uint idB)
     CARLA_SAFE_ASSERT_RETURN(idA < curPluginCount,);
     CARLA_SAFE_ASSERT_RETURN(idB < curPluginCount,);
 
-    CarlaPlugin* const pluginA(plugins[idA].plugin);
-    CARLA_SAFE_ASSERT_RETURN(pluginA != nullptr,);
+    const CarlaPluginPtr pluginA = plugins[idA].plugin;
+    CARLA_SAFE_ASSERT_RETURN(pluginA.get() != nullptr,);
 
-    CarlaPlugin* const pluginB(plugins[idB].plugin);
-    CARLA_SAFE_ASSERT_RETURN(pluginB != nullptr,);
+    const CarlaPluginPtr pluginB = plugins[idB].plugin;
+    CARLA_SAFE_ASSERT_RETURN(pluginB.get() != nullptr,);
 
     pluginA->setId(idB);
     plugins[idA].plugin = pluginB;

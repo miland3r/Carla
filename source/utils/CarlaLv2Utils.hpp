@@ -1,6 +1,6 @@
 /*
  * Carla LV2 utils
- * Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -250,6 +250,7 @@ public:
 
     Lilv::Node lv2_name;
     Lilv::Node lv2_symbol;
+    Lilv::Node patch_readable;
     Lilv::Node patch_writable;
     Lilv::Node pg_group;
     Lilv::Node preset_preset;
@@ -385,6 +386,7 @@ public:
 
           lv2_name           (new_uri(LV2_CORE__name)),
           lv2_symbol         (new_uri(LV2_CORE__symbol)),
+          patch_readable     (new_uri(LV2_PATCH__readable)),
           patch_writable     (new_uri(LV2_PATCH__writable)),
           pg_group           (new_uri(LV2_PORT_GROUPS__group)),
           preset_preset      (new_uri(LV2_PRESETS__Preset)),
@@ -570,9 +572,11 @@ public:
           fUsingNominal(false),
           fBufferSize(0),
           fSampleRate(sampleRate),
+          fFreePath(nullptr),
           fUridMap(nullptr),
           fUridUnmap(nullptr),
           fWorker(nullptr),
+          fInlineDisplay(nullptr),
           fTimeInfo(),
           fLastPositionData(),
           fPorts(),
@@ -589,14 +593,18 @@ public:
             return;
         }
 
+        const LV2_State_Free_Path* freePath  = nullptr;
         const LV2_Options_Option*  options   = nullptr;
         const LV2_URID_Map*        uridMap   = nullptr;
         const LV2_URID_Unmap*      uridUnmap = nullptr;
         const LV2_Worker_Schedule* worker    = nullptr;
+        const LV2_Inline_Display*  idisp     = nullptr;
 
         for (int i=0; features[i] != nullptr; ++i)
         {
-            /**/ if (std::strcmp(features[i]->URI, LV2_OPTIONS__options) == 0)
+            /**/ if (std::strcmp(features[i]->URI, LV2_STATE__freePath) == 0)
+                freePath = (const LV2_State_Free_Path*)features[i]->data;
+            else if (std::strcmp(features[i]->URI, LV2_OPTIONS__options) == 0)
                 options = (const LV2_Options_Option*)features[i]->data;
             else if (std::strcmp(features[i]->URI, LV2_URID__map) == 0)
                 uridMap = (const LV2_URID_Map*)features[i]->data;
@@ -604,6 +612,8 @@ public:
                 uridUnmap = (const LV2_URID_Unmap*)features[i]->data;
             else if (std::strcmp(features[i]->URI, LV2_WORKER__schedule) == 0)
                 worker = (const LV2_Worker_Schedule*)features[i]->data;
+            else if (std::strcmp(features[i]->URI, LV2_INLINEDISPLAY__queue_draw) == 0)
+                idisp = (const LV2_Inline_Display*)features[i]->data;
         }
 
         if (options == nullptr || uridMap == nullptr)
@@ -663,8 +673,10 @@ public:
         fUridMap = uridMap;
         fURIs.map(uridMap);
 
+        fFreePath = freePath;
         fUridUnmap = uridUnmap;
         fWorker = worker;
+        fInlineDisplay = idisp;
 
         clearTimeData();
     }
@@ -953,10 +965,12 @@ public:
         if (frames == 0)
             return false;
 
-        // init midi out data
+        // init event out data
         if (fPorts.numMidiOuts > 0 || fPorts.hasUI)
         {
-            for (uint32_t i=0; i<fPorts.numMidiOuts; ++i)
+            const uint32_t count = fPorts.numMidiOuts > 0 ? fPorts.numMidiOuts : 1;
+
+            for (uint32_t i=0; i < count; ++i)
             {
                 LV2_Atom_Sequence* const seq(fPorts.eventsOut[i]);
                 CARLA_SAFE_ASSERT_CONTINUE(seq != nullptr);
@@ -1010,12 +1024,12 @@ public:
 
                 const double rest  = std::fmod(fLastPositionData.barBeat, 1.0f);
                 fTimeInfo.bbt.beat = static_cast<int32_t>(static_cast<double>(fLastPositionData.barBeat)-rest+1.0);
-                fTimeInfo.bbt.tick = static_cast<int32_t>(rest*fTimeInfo.bbt.ticksPerBeat+0.5);
+                fTimeInfo.bbt.tick = rest * fTimeInfo.bbt.ticksPerBeat;
 
                 if (fLastPositionData.bar_f >= 0.0f)
                 {
                     fLastPositionData.bar_f += std::floor((fLastPositionData.barBeat+static_cast<float>(addedBarBeats))/
-                                                            fLastPositionData.beatsPerBar);
+                                                           fLastPositionData.beatsPerBar);
 
                     if (fLastPositionData.bar_f <= 0.0f)
                     {
@@ -1178,9 +1192,11 @@ protected:
     double   fSampleRate;
 
     // LV2 host features
+    const LV2_State_Free_Path* fFreePath;
     const LV2_URID_Map* fUridMap;
     const LV2_URID_Unmap* fUridUnmap;
     const LV2_Worker_Schedule* fWorker;
+    const LV2_Inline_Display* fInlineDisplay;
 
     // Time info stuff
     TimeInfoStruct fTimeInfo;
@@ -1250,7 +1266,7 @@ protected:
         const LV2_Atom_Sequence** eventsIn;
         /* */ LV2_Atom_Sequence** eventsOut;
         /* */ EventsOutData*      eventsOutData;
-        const float** audioCVIns;
+        /* */ float** audioCVIns;
         /* */ float** audioCVOuts;
         /* */ float*  freewheel;
 
@@ -1359,11 +1375,12 @@ protected:
             {
                 eventsOut = new LV2_Atom_Sequence*[1];
                 eventsOut[0] = nullptr;
+                eventsOutData = new EventsOutData[1];
             }
 
             if (const uint32_t numAudioCVIns = numAudioIns+numCVIns)
             {
-                audioCVIns = new const float*[numAudioCVIns];
+                audioCVIns = new float*[numAudioCVIns];
                 carla_zeroPointers(audioCVIns, numAudioCVIns);
             }
 
@@ -1445,7 +1462,7 @@ protected:
             {
                 if (port == index++)
                 {
-                    audioCVIns[i] = (const float*)dataLocation;
+                    audioCVIns[i] = (float*)dataLocation;
                     return;
                 }
             }
@@ -1463,7 +1480,7 @@ protected:
             {
                 if (port == index++)
                 {
-                    audioCVIns[numAudioIns+i] = (const float*)dataLocation;
+                    audioCVIns[numAudioIns+i] = (float*)dataLocation;
                     return;
                 }
             }
@@ -1493,6 +1510,7 @@ protected:
     // Rest of host<->plugin support
     struct URIDs {
         LV2_URID atomBlank;
+        LV2_URID atomBool;
         LV2_URID atomObject;
         LV2_URID atomDouble;
         LV2_URID atomFloat;
@@ -1503,8 +1521,12 @@ protected:
         LV2_URID atomString;
         LV2_URID atomURID;
         LV2_URID carlaFile;
+        LV2_URID carlaFileAudio;
+        LV2_URID carlaFileMIDI;
+        LV2_URID carlaPreview;
         LV2_URID midiEvent;
         LV2_URID patchProperty;
+        LV2_URID patchGet;
         LV2_URID patchSet;
         LV2_URID patchValue;
         LV2_URID timePos;
@@ -1516,10 +1538,12 @@ protected:
         LV2_URID timeFrame;
         LV2_URID timeSpeed;
         LV2_URID timeTicksPerBeat;
-        LV2_URID uiEvents;
+        LV2_URID carlaRequestIdle;
+        LV2_URID carlaUiEvents;
 
         URIDs()
             : atomBlank(0),
+              atomBool(0),
               atomObject(0),
               atomDouble(0),
               atomFloat(0),
@@ -1530,8 +1554,12 @@ protected:
               atomString(0),
               atomURID(0),
               carlaFile(0),
+              carlaFileAudio(0),
+              carlaFileMIDI(0),
+              carlaPreview(0),
               midiEvent(0),
               patchProperty(0),
+              patchGet(0),
               patchSet(0),
               patchValue(0),
               timePos(0),
@@ -1543,11 +1571,13 @@ protected:
               timeFrame(0),
               timeSpeed(0),
               timeTicksPerBeat(0),
-              uiEvents(0) {}
+              carlaRequestIdle(0),
+              carlaUiEvents(0) {}
 
         void map(const LV2_URID_Map* const uridMap)
         {
             atomBlank          = uridMap->map(uridMap->handle, LV2_ATOM__Blank);
+            atomBool           = uridMap->map(uridMap->handle, LV2_ATOM__Bool);
             atomObject         = uridMap->map(uridMap->handle, LV2_ATOM__Object);
             atomDouble         = uridMap->map(uridMap->handle, LV2_ATOM__Double);
             atomFloat          = uridMap->map(uridMap->handle, LV2_ATOM__Float);
@@ -1558,8 +1588,12 @@ protected:
             atomString         = uridMap->map(uridMap->handle, LV2_ATOM__String);
             atomURID           = uridMap->map(uridMap->handle, LV2_ATOM__URID);
             carlaFile          = uridMap->map(uridMap->handle, "http://kxstudio.sf.net/carla/file");
+            carlaFileAudio     = uridMap->map(uridMap->handle, "http://kxstudio.sf.net/carla/file/audio");
+            carlaFileMIDI      = uridMap->map(uridMap->handle, "http://kxstudio.sf.net/carla/file/midi");
+            carlaPreview       = uridMap->map(uridMap->handle, "http://kxstudio.sf.net/carla/preview");
             midiEvent          = uridMap->map(uridMap->handle, LV2_MIDI__MidiEvent);
             patchProperty      = uridMap->map(uridMap->handle, LV2_PATCH__property);
+            patchGet           = uridMap->map(uridMap->handle, LV2_PATCH__Get);
             patchSet           = uridMap->map(uridMap->handle, LV2_PATCH__Set);
             patchValue         = uridMap->map(uridMap->handle, LV2_PATCH__value);
             timePos            = uridMap->map(uridMap->handle, LV2_TIME__Position);
@@ -1571,7 +1605,8 @@ protected:
             timeBeatsPerBar    = uridMap->map(uridMap->handle, LV2_TIME__beatsPerBar);
             timeBeatsPerMinute = uridMap->map(uridMap->handle, LV2_TIME__beatsPerMinute);
             timeTicksPerBeat   = uridMap->map(uridMap->handle, LV2_KXSTUDIO_PROPERTIES__TimePositionTicksPerBeat);
-            uiEvents           = uridMap->map(uridMap->handle, "urn:carla:transmitEv");
+            carlaRequestIdle   = uridMap->map(uridMap->handle, "urn:carla:idle");
+            carlaUiEvents      = uridMap->map(uridMap->handle, "urn:carla:uiEvents");
         }
     } fURIs;
 
@@ -2323,23 +2358,46 @@ const LV2_RDF_Descriptor* lv2_rdf_new(const LV2_URI uri, const bool loadPresets)
     // ----------------------------------------------------------------------------------------------------------------
     // Set Plugin Parameters
     {
+        std::map<std::string, LV2_RDF_Parameter> parameters;
+        Lilv::Nodes patchReadableNodes(lilvPlugin.get_value(lv2World.patch_readable));
         Lilv::Nodes patchWritableNodes(lilvPlugin.get_value(lv2World.patch_writable));
 
         if (const uint numParameters = patchWritableNodes.size())
         {
-            rdfDescriptor->Parameters = new LV2_RDF_Parameter[numParameters];
-
             uint numUsed = 0;
             LILV_FOREACH(nodes, it, patchWritableNodes)
             {
                 CARLA_SAFE_ASSERT_BREAK(numUsed < numParameters);
 
                 Lilv::Node patchWritableNode(patchWritableNodes.get(it));
-                LV2_RDF_Parameter& rdfParam(rdfDescriptor->Parameters[numUsed++]);
+
+                if (LilvNode* const typeNode = lilv_world_get(lv2World.me, patchWritableNode,
+                                                              lv2World.rdf_type.me, nullptr))
+                {
+                    const char* const type = lilv_node_as_uri(typeNode);
+
+                    if (std::strcmp(type, LV2_CORE__Parameter) != 0)
+                    {
+                        lilv_node_free(typeNode);
+                        continue;
+                    }
+
+                    lilv_node_free(typeNode);
+                }
+                else
+                {
+                    continue;
+                }
 
                 CARLA_SAFE_ASSERT_CONTINUE(patchWritableNode.is_uri());
 
+                ++numUsed;
+                LV2_RDF_Parameter rdfParam;
                 rdfParam.URI = carla_strdup(patchWritableNode.as_uri());
+                rdfParam.Flags = LV2_PARAMETER_FLAG_INPUT;
+
+                if (patchReadableNodes.contains(patchWritableNode))
+                    rdfParam.Flags |= LV2_PARAMETER_FLAG_OUTPUT;
 
                 // ----------------------------------------------------------------------------------------------------
                 // Set Basics
@@ -2350,19 +2408,19 @@ const LV2_RDF_Descriptor* lv2_rdf_new(const LV2_URI uri, const bool loadPresets)
                     const char* const rangeURI = lilv_node_as_string(rangeNode);
 
                     /**/ if (std::strcmp(rangeURI, LV2_ATOM__Bool) == 0)
-                        rdfParam.Type = LV2_PARAMETER_BOOL;
+                        rdfParam.Type = LV2_PARAMETER_TYPE_BOOL;
                     else if (std::strcmp(rangeURI, LV2_ATOM__Int) == 0)
-                        rdfParam.Type = LV2_PARAMETER_INT;
+                        rdfParam.Type = LV2_PARAMETER_TYPE_INT;
                     else if (std::strcmp(rangeURI, LV2_ATOM__Long) == 0)
-                        rdfParam.Type = LV2_PARAMETER_LONG;
+                        rdfParam.Type = LV2_PARAMETER_TYPE_LONG;
                     else if (std::strcmp(rangeURI, LV2_ATOM__Float) == 0)
-                        rdfParam.Type = LV2_PARAMETER_FLOAT;
+                        rdfParam.Type = LV2_PARAMETER_TYPE_FLOAT;
                     else if (std::strcmp(rangeURI, LV2_ATOM__Double) == 0)
-                        rdfParam.Type = LV2_PARAMETER_DOUBLE;
+                        rdfParam.Type = LV2_PARAMETER_TYPE_DOUBLE;
                     else if (std::strcmp(rangeURI, LV2_ATOM__Path) == 0)
-                        rdfParam.Type = LV2_PARAMETER_PATH;
+                        rdfParam.Type = LV2_PARAMETER_TYPE_PATH;
                     else if (std::strcmp(rangeURI, LV2_ATOM__String) == 0)
-                        rdfParam.Type = LV2_PARAMETER_STRING;
+                        rdfParam.Type = LV2_PARAMETER_TYPE_STRING;
                     else
                         carla_stderr("lv2_rdf_new(\"%s\") - got unknown parameter type '%s'", uri, rangeURI);
 
@@ -2521,11 +2579,23 @@ const LV2_RDF_Descriptor* lv2_rdf_new(const LV2_URI uri, const bool loadPresets)
 
                     lilv_node_free(unitUnitNode);
                 }
+
+                parameters[rdfParam.URI].copyAndReplace(rdfParam);
             }
 
+            CARLA_SAFE_ASSERT_UINT2(parameters.size() == numUsed, parameters.size(), numUsed);
+            rdfDescriptor->Parameters = new LV2_RDF_Parameter[numUsed];
             rdfDescriptor->ParameterCount = numUsed;
+
+            numUsed = 0;
+            for (std::map<std::string, LV2_RDF_Parameter>::iterator it = parameters.begin(), end = parameters.end();
+                 it != end; ++it)
+            {
+                rdfDescriptor->Parameters[numUsed++].copyAndReplace(it->second);
+            }
         }
 
+        lilv_nodes_free(const_cast<LilvNodes*>(patchReadableNodes.me));
         lilv_nodes_free(const_cast<LilvNodes*>(patchWritableNodes.me));
     }
 
@@ -2749,7 +2819,11 @@ const LV2_RDF_Descriptor* lv2_rdf_new(const LV2_URI uri, const bool loadPresets)
     // ----------------------------------------------------------------------------------------------------------------
     // Set Plugin UIs
     {
-        const bool hasMODGui(lilvPlugin.get_modgui_resources_directory().as_uri() != nullptr);
+#ifdef CARLA_OS_LINUX
+        const bool hasMODGui = lilvPlugin.get_modgui_resources_directory().as_uri() != nullptr;
+#else
+        const bool hasMODGui = false;
+#endif
 
         Lilv::UIs lilvUIs(lilvPlugin.get_uis());
 
@@ -3039,11 +3113,15 @@ bool is_lv2_feature_supported(const LV2_URI uri) noexcept
         return true;
     if (std::strcmp(uri, LV2_RTSAFE_MEMORY_POOL_DEPRECATED_URI) == 0)
         return true;
+    if (std::strcmp(uri, LV2_STATE__freePath) == 0)
+        return true;
     if (std::strcmp(uri, LV2_STATE__loadDefaultState) == 0)
         return true;
     if (std::strcmp(uri, LV2_STATE__makePath) == 0)
         return true;
     if (std::strcmp(uri, LV2_STATE__mapPath) == 0)
+        return true;
+    if (std::strcmp(uri, LV2_STATE__threadSafeRestore) == 0)
         return true;
     if (std::strcmp(uri, LV2_PORT_PROPS__supportsStrictBounds) == 0)
         return true;
@@ -3089,6 +3167,8 @@ bool is_lv2_ui_feature_supported(const LV2_URI uri) noexcept
     if (std::strcmp(uri, LV2_UI__portMap) == 0)
         return true;
     if (std::strcmp(uri, LV2_UI__portSubscribe) == 0)
+        return true;
+    if (std::strcmp(uri, LV2_UI__requestValue) == 0)
         return true;
     if (std::strcmp(uri, LV2_UI__resize) == 0)
         return true;

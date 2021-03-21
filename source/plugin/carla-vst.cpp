@@ -1,6 +1,6 @@
 /*
  * Carla Native Plugins
- * Copyright (C) 2013-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2013-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -42,22 +42,6 @@
 #include "CarlaMathUtils.hpp"
 #include "CarlaVstUtils.hpp"
 
-#ifdef USING_JUCE
-# if defined(__GNUC__) && (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6))
-#  pragma GCC diagnostic push
-#  pragma GCC diagnostic ignored "-Wconversion"
-#  pragma GCC diagnostic ignored "-Weffc++"
-#  pragma GCC diagnostic ignored "-Wsign-conversion"
-#  pragma GCC diagnostic ignored "-Wundef"
-#  pragma GCC diagnostic ignored "-Wzero-as-null-pointer-constant"
-# endif
-# include "AppConfig.h"
-# include "juce_events/juce_events.h"
-# if defined(__GNUC__) && (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6))
-#  pragma GCC diagnostic pop
-# endif
-#endif
-
 static uint32_t d_lastBufferSize = 0;
 static double   d_lastSampleRate = 0.0;
 
@@ -65,7 +49,11 @@ static const int32_t kBaseUniqueID = CCONST('C', 'r', 'l', 'a');
 static const int32_t kVstMidiEventSize = static_cast<int32_t>(sizeof(VstMidiEvent));
 
 #ifdef CARLA_VST_SHELL
+# if CARLA_PLUGIN_SYNTH
 static const int32_t kShellUniqueID = CCONST('C', 'r', 'l', 's');
+# else
+static const int32_t kShellUniqueID = CCONST('C', 'r', 'l', 'F');
+# endif
 #else
 static const int32_t kNumParameters = 100;
 #endif
@@ -94,9 +82,6 @@ public:
           fUiLauncher(nullptr),
           fHostType(kHostTypeNull),
           fMidiOutEvents(),
-#ifdef USING_JUCE
-          fJuceInitialiser(),
-#endif
           fStateChunk(nullptr)
     {
         fHost.handle      = this;
@@ -113,11 +98,13 @@ public:
         File curExe = File::getSpecialLocation(File::currentExecutableFile).getLinkedTarget();
         File resDir = curExe.getSiblingFile("resources");
 
+#ifndef CARLA_OS_MAC
         // FIXME: proper fallback path for other OSes
         if (! resDir.exists())
             resDir = File("/usr/local/share/carla/resources");
         if (! resDir.exists())
             resDir = File("/usr/share/carla/resources");
+#endif
 
         // find host type
         const String hostFilename(File::getSpecialLocation(File::hostApplicationPath).getFileName());
@@ -144,15 +131,15 @@ public:
         fVstRect.top  = 0;
         fVstRect.left = 0;
 
-        if (kIsUsingUILauncher)
+        if (kIsUsingUILauncher || (fDescriptor->hints & NATIVE_PLUGIN_USES_UI_SIZE) == 0x0)
         {
-            fVstRect.bottom = ui_launcher_res::carla_uiHeight;
             fVstRect.right  = ui_launcher_res::carla_uiWidth;
+            fVstRect.bottom = ui_launcher_res::carla_uiHeight;
         }
         else
         {
-            fVstRect.bottom = 712;
-            fVstRect.right  = 1024;
+            fVstRect.right  = static_cast<int16_t>(fDescriptor->ui_width);
+            fVstRect.bottom = static_cast<int16_t>(fDescriptor->ui_height);
         }
 
         init();
@@ -240,7 +227,8 @@ public:
         case effGetProgramName:
             if (char* const programName = (char*)ptr)
             {
-                std::strncpy(programName, fProgramName, 24);
+                std::strncpy(programName, fProgramName, 23);
+                programName[23] = '\0';
                 return 1;
             }
             break;
@@ -248,7 +236,8 @@ public:
         case effGetProgramNameIndexed:
             if (char* const programName = (char*)ptr)
             {
-                std::strncpy(programName, fProgramName, 24);
+                std::strncpy(programName, fProgramName, 23);
+                programName[23] = '\0';
                 return 1;
             }
             break;
@@ -298,15 +287,15 @@ public:
                     std::snprintf(cptr, 23, "%d%s%s",
                                   static_cast<int>(paramValue),
                                   param->unit != nullptr && param->unit[0] != '\0' ? " " : "",
-                                  param->unit != nullptr ? param->unit : "");
+                                  param->unit != nullptr && param->unit[0] != '\0' ? param->unit : "");
                     cptr[23] = '\0';
                 }
                 else
                 {
-                    std::snprintf(cptr, 23, "%f%s%s",
+                    std::snprintf(cptr, 23, "%.12g%s%s",
                                   static_cast<double>(paramValue),
                                   param->unit != nullptr && param->unit[0] != '\0' ? " " : "",
-                                  param->unit != nullptr ? param->unit : "");
+                                  param->unit != nullptr && param->unit[0] != '\0' ? param->unit : "");
                     cptr[23] = '\0';
                 }
 
@@ -597,7 +586,8 @@ public:
         fDescriptor->set_parameter_value(fHandle, uindex, realValue);
     }
 
-    void vst_processReplacing(const float** const inputs, float** const outputs, const int32_t sampleFrames)
+    // FIXME for v3.0, use const for the input buffer
+    void vst_processReplacing(float** const inputs, float** const outputs, const int32_t sampleFrames)
     {
         if (sampleFrames <= 0)
             return;
@@ -630,7 +620,7 @@ public:
 
         if (const VstTimeInfo* const vstTimeInfo = (const VstTimeInfo*)hostCallback(audioMasterGetTime, 0, kWantVstTimeFlags))
         {
-            fTimeInfo.frame     = static_cast<uint64_t>(vstTimeInfo->samplePos);
+            fTimeInfo.frame     = static_cast<uint64_t>(std::max(0.0, vstTimeInfo->samplePos));
             fTimeInfo.playing   =  (vstTimeInfo->flags & kVstTransportPlaying);
             fTimeInfo.bbt.valid = ((vstTimeInfo->flags & kVstTempoValid) != 0 || (vstTimeInfo->flags & kVstTimeSigValid) != 0);
 
@@ -642,7 +632,7 @@ public:
             else
                 fTimeInfo.bbt.beatsPerMinute = 120.0;
 
-            if (vstTimeInfo->flags & (kVstPpqPosValid|kVstTimeSigValid))
+            if ((vstTimeInfo->flags & kVstPpqPosValid) != 0 && (vstTimeInfo->flags & kVstTimeSigValid) != 0)
             {
                 const double ppqPos    = std::abs(vstTimeInfo->ppqPos);
                 const int    ppqPerBar = vstTimeInfo->timeSigNumerator * 4 / vstTimeInfo->timeSigDenominator;
@@ -651,25 +641,37 @@ public:
 
                 fTimeInfo.bbt.bar         = static_cast<int32_t>(ppqPos) / ppqPerBar + 1;
                 fTimeInfo.bbt.beat        = static_cast<int32_t>(barBeats - rest + 0.5) + 1;
-                fTimeInfo.bbt.tick        = static_cast<int32_t>(rest * fTimeInfo.bbt.ticksPerBeat + 0.5);
+                fTimeInfo.bbt.tick        = rest * fTimeInfo.bbt.ticksPerBeat;
                 fTimeInfo.bbt.beatsPerBar = static_cast<float>(vstTimeInfo->timeSigNumerator);
                 fTimeInfo.bbt.beatType    = static_cast<float>(vstTimeInfo->timeSigDenominator);
 
                 if (vstTimeInfo->ppqPos < 0.0)
                 {
-                    --fTimeInfo.bbt.bar;
-                    fTimeInfo.bbt.beat = vstTimeInfo->timeSigNumerator - fTimeInfo.bbt.beat + 1;
-                    fTimeInfo.bbt.tick = fTimeInfo.bbt.ticksPerBeat - fTimeInfo.bbt.tick - 1;
+                    fTimeInfo.bbt.bar  = std::max(1, fTimeInfo.bbt.bar-1);
+                    fTimeInfo.bbt.beat = std::max(1, vstTimeInfo->timeSigNumerator - fTimeInfo.bbt.beat + 1);
+                    fTimeInfo.bbt.tick = std::max(0.0, fTimeInfo.bbt.ticksPerBeat - fTimeInfo.bbt.tick - 1);
                 }
             }
             else
             {
                 fTimeInfo.bbt.bar         = 1;
                 fTimeInfo.bbt.beat        = 1;
-                fTimeInfo.bbt.tick        = 0;
+                fTimeInfo.bbt.tick        = 0.0;
                 fTimeInfo.bbt.beatsPerBar = 4.0f;
                 fTimeInfo.bbt.beatType    = 4.0f;
             }
+
+#if 0
+            // for testing bad host values
+            static double last = -99999.0;
+            if (carla_isNotEqual(vstTimeInfo->samplePos, last))
+            {
+                last = vstTimeInfo->samplePos;
+                carla_stdout("time info %f %f %lu | %i %i",
+                             vstTimeInfo->samplePos, vstTimeInfo->ppqPos, fTimeInfo.frame,
+                             vstTimeInfo->timeSigNumerator, vstTimeInfo->timeSigDenominator);
+            }
+#endif
 
             fTimeInfo.bbt.barStartTick = fTimeInfo.bbt.ticksPerBeat *
                                          static_cast<double>(fTimeInfo.bbt.beatsPerBar) *
@@ -679,7 +681,6 @@ public:
         fMidiOutEvents.numEvents = 0;
 
         if (fHandle != nullptr)
-            // FIXME
             fDescriptor->process(fHandle,
                                  inputs, outputs, static_cast<uint32_t>(sampleFrames),
                                  fMidiEvents, fMidiEventCount);
@@ -737,6 +738,15 @@ protected:
         hostCallback(touch ? audioMasterBeginEdit : audioMasterEndEdit, static_cast<int32_t>(index));
     }
 
+    void handleUiResize(const int16_t width, const int16_t height)
+    {
+        if (kIsUsingUILauncher)
+            return;
+        fVstRect.right = width;
+        fVstRect.bottom = height;
+        hostCallback(audioMasterSizeWindow, width, height);
+    }
+
     void handleUiCustomDataChanged(const char* const /*key*/, const char* const /*value*/) const
     {
     }
@@ -772,6 +782,9 @@ protected:
         case NATIVE_HOST_OPCODE_UI_UNAVAILABLE:
         case NATIVE_HOST_OPCODE_INTERNAL_PLUGIN:
         case NATIVE_HOST_OPCODE_QUEUE_INLINE_DISPLAY:
+        case NATIVE_HOST_OPCODE_REQUEST_IDLE:
+        case NATIVE_HOST_OPCODE_GET_FILE_PATH:
+        case NATIVE_HOST_OPCODE_PREVIEW_BUFFER_DATA:
             // nothing
             break;
 
@@ -786,6 +799,12 @@ protected:
         case NATIVE_HOST_OPCODE_UI_TOUCH_PARAMETER:
             CARLA_SAFE_ASSERT_RETURN(index >= 0, 0);
             handleUiParameterTouch(static_cast<uint32_t>(index), value != 0);
+            break;
+
+        case NATIVE_HOST_OPCODE_UI_RESIZE:
+            CARLA_SAFE_ASSERT_RETURN(index > 0 && index < INT16_MAX, 0);
+            CARLA_SAFE_ASSERT_RETURN(value > 0 && value < INT16_MAX, 0);
+            handleUiResize(static_cast<int16_t>(index), static_cast<int16_t>(value));
             break;
         }
 
@@ -854,10 +873,6 @@ private:
 
         CARLA_DECLARE_NON_COPY_STRUCT(FixedVstEvents);
     } fMidiOutEvents;
-
-#ifdef USING_JUCE
-    juce::SharedResourcePointer<juce::ScopedJuceInitialiser_GUI> fJuceInitialiser;
-#endif
 
     char* fStateChunk;
 
@@ -980,17 +995,17 @@ intptr_t vst_dispatcherCallback(AEffect* effect, int32_t opcode, int32_t index, 
 
            #else // CARLA_VST_SHELL
 
-           #  if defined(CARLA_PLUGIN_64CH)
+           # if defined(CARLA_PLUGIN_64CH)
             const char* const pluginLabel = "carlapatchbay64";
-           #  elif defined(CARLA_PLUGIN_32CH)
+           # elif defined(CARLA_PLUGIN_32CH)
             const char* const pluginLabel = "carlapatchbay32";
-           #  elif defined(CARLA_PLUGIN_16CH)
+           # elif defined(CARLA_PLUGIN_16CH)
             const char* const pluginLabel = "carlapatchbay16";
-           #  elif CARLA_PLUGIN_PATCHBAY
+           # elif CARLA_PLUGIN_PATCHBAY
             const char* const pluginLabel = "carlapatchbay";
-           #  else
+           # else
             const char* const pluginLabel = "carlarack";
-           #  endif
+           # endif
 
             for (LinkedList<const NativePluginDescriptor*>::Itenerator it = plm.descs.begin2(); it.valid(); it.next())
             {
@@ -1018,10 +1033,12 @@ intptr_t vst_dispatcherCallback(AEffect* effect, int32_t opcode, int32_t index, 
             else
                 effect->flags &= ~effFlagsHasEditor;
 
+            /* carla as plugin always has NATIVE_PLUGIN_IS_SYNTH set
             if (pluginDesc->hints & NATIVE_PLUGIN_IS_SYNTH)
                 effect->flags |= effFlagsIsSynth;
             else
                 effect->flags &= ~effFlagsIsSynth;
+            */
            #endif // CARLA_VST_SHELL
 
            #if CARLA_PLUGIN_SYNTH
@@ -1084,7 +1101,11 @@ intptr_t vst_dispatcherCallback(AEffect* effect, int32_t opcode, int32_t index, 
             if (validPlugin)
             {
                 const NativePluginDescriptor* const desc = pluginPtr->getDescriptor();
+               #if CARLA_PLUGIN_SYNTH
                 std::strncpy(cptr, desc->name, 32);
+               #else
+                std::snprintf(cptr, 32, "%s FX", desc->name);
+               #endif
             }
             else
             {
@@ -1136,7 +1157,11 @@ intptr_t vst_dispatcherCallback(AEffect* effect, int32_t opcode, int32_t index, 
             if (validPlugin)
             {
                 const NativePluginDescriptor* const desc = pluginPtr->getDescriptor();
+               #if CARLA_PLUGIN_SYNTH
                 std::strncpy(cptr, desc->label, 32);
+               #else
+                std::snprintf(cptr, 32, "%sFX", desc->label);
+               #endif
             }
             else
             {
@@ -1198,7 +1223,12 @@ intptr_t vst_dispatcherCallback(AEffect* effect, int32_t opcode, int32_t index, 
                 if (desc->midiIns > 1 || desc->midiOuts > 1)
                     continue;
 
+               #if CARLA_PLUGIN_SYNTH
                 std::strncpy(cptr, desc->label, 32);
+               #else
+                std::snprintf(cptr, 32, "%sFX", desc->label);
+               #endif
+
                 return effect->uniqueID;
             }
         }
@@ -1228,13 +1258,13 @@ void vst_setParameterCallback(AEffect* effect, int32_t index, float value)
 void vst_processCallback(AEffect* effect, float** inputs, float** outputs, int32_t sampleFrames)
 {
     if (validPlugin)
-        pluginPtr->vst_processReplacing(const_cast<const float**>(inputs), outputs, sampleFrames);
+        pluginPtr->vst_processReplacing(inputs, outputs, sampleFrames);
 }
 
 void vst_processReplacingCallback(AEffect* effect, float** inputs, float** outputs, int32_t sampleFrames)
 {
     if (validPlugin)
-        pluginPtr->vst_processReplacing(const_cast<const float**>(inputs), outputs, sampleFrames);
+        pluginPtr->vst_processReplacing(inputs, outputs, sampleFrames);
 }
 
 #undef pluginPtr
@@ -1301,6 +1331,9 @@ const AEffect* VSTPluginMainInit(AEffect* const effect)
 #endif
 
     return effect;
+
+    // may be unused
+    (void)kBaseUniqueID;
 }
 
 // -----------------------------------------------------------------------

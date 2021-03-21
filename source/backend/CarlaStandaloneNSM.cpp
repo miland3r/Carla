@@ -1,6 +1,6 @@
 /*
  * Carla Standalone
- * Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -15,41 +15,29 @@
  * For a full copy of the GNU General Public License see the doc/GPL.txt file.
  */
 
-#include "CarlaHost.h"
+#include "CarlaHostImpl.hpp"
 
 #ifdef HAVE_LIBLO
 
 #define NSM_API_VERSION_MAJOR 1
 #define NSM_API_VERSION_MINOR 2
 
-#define NSM_CLIENT_FEATURES ":switch:"
-//#define NSM_CLIENT_FEATURES ":switch:optional-gui:"
+// #define NSM_CLIENT_FEATURES ":switch:"
+#define NSM_CLIENT_FEATURES ":switch:optional-gui:"
 
 #include "CarlaOscUtils.hpp"
 #include "CarlaString.hpp"
 
 #include "water/files/File.h"
 
-namespace CB = CarlaBackend;
-
-// -------------------------------------------------------------------------------------------------------------------
-
-struct CarlaBackendStandalone {
-    CarlaEngine*       engine;
-    EngineCallbackFunc engineCallback;
-    void*              engineCallbackPtr;
-    // ...
-};
-
-extern CarlaBackendStandalone gStandalone;
-
 // -------------------------------------------------------------------------------------------------------------------
 
 class CarlaNSM
 {
 public:
-    CarlaNSM() noexcept
-        : fReplyAddress(nullptr),
+    CarlaNSM(CarlaHostStandalone& shandle) noexcept
+        : gStandalone(shandle),
+          fReplyAddress(nullptr),
           fServer(nullptr),
           fServerThread(nullptr),
           fServerURL(nullptr),
@@ -88,7 +76,7 @@ public:
         }
     }
 
-    bool announce(const int pid, const char* const executableName)
+    bool announce(const uint64_t pid, const char* const executableName)
     {
         CARLA_SAFE_ASSERT_RETURN(pid != 0, false);
         CARLA_SAFE_ASSERT_RETURN(executableName != nullptr && executableName[0] != '\0', false);
@@ -194,9 +182,9 @@ public:
         }
     }
 
-    static CarlaNSM& getInstance()
+    static CarlaNSM& getInstance(CarlaHostStandalone& shandle)
     {
-        static CarlaNSM sInstance;
+        static CarlaNSM sInstance(shandle);
         return sInstance;
     }
 
@@ -242,13 +230,14 @@ protected:
 
             fHasBroadcast     = std::strstr(features, ":broadcast:")      != nullptr;
             fHasOptionalGui   = std::strstr(features, ":optional-gui:")   != nullptr;
-            fHasServerControl = std::strstr(features, ":server_control:") != nullptr;
+            fHasServerControl = std::strstr(features, ":server-control:") != nullptr;
 
-#if 0
-            // UI starts visible
+            // UI starts hidden
             if (fHasOptionalGui)
-                lo_send_from(fReplyAddress, fServer, LO_TT_IMMEDIATE, "/nsm/client/gui_is_shown", "");
-#endif
+            {
+                // NOTE: lo_send_from is a macro that creates local variables
+                lo_send_from(fReplyAddress, fServer, LO_TT_IMMEDIATE, "/nsm/client/gui_is_hidden", "");
+            }
 
             carla_stdout("Carla started via '%s', message: %s", smName, message);
 
@@ -288,6 +277,10 @@ protected:
         CARLA_SAFE_ASSERT_RETURN(fServer != nullptr, 1);
         carla_stdout("CarlaNSM::handleOpen(\"%s\", \"%s\", \"%s\")", projectPath, displayName, clientNameId);
 
+        const CarlaHostHandle handle = (CarlaHostHandle)&gStandalone;
+
+        carla_set_engine_option(handle, CB::ENGINE_OPTION_CLIENT_NAME_PREFIX, 0, clientNameId);
+
         if (gStandalone.engineCallback != nullptr)
         {
             fReadyActionOpen = false;
@@ -305,10 +298,11 @@ protected:
         {
             using namespace water;
 
-            if (carla_is_engine_running())
-                carla_engine_close();
+            if (carla_is_engine_running(handle))
+                carla_engine_close(handle);
 
-            carla_engine_init("JACK", clientNameId);
+            // TODO send error if engine failed to initialize
+            carla_engine_init(handle, "JACK", clientNameId);
 
             fProjectPath  = projectPath;
             fProjectPath += ".carxp";
@@ -316,7 +310,7 @@ protected:
             const String jfilename = String(CharPointer_UTF8(fProjectPath));
 
             if (File(jfilename).existsAsFile())
-                carla_load_project(fProjectPath);
+                carla_load_project(handle, fProjectPath);
         }
 
         fClientNameId = clientNameId;
@@ -360,7 +354,9 @@ protected:
         {
             CARLA_SAFE_ASSERT_RETURN(fProjectPath.isNotEmpty(), 0);
 
-            carla_save_project(fProjectPath);
+            const CarlaHostHandle handle = (CarlaHostHandle)&gStandalone;
+
+            carla_save_project(handle, fProjectPath);
         }
 
         lo_send_from(fReplyAddress, fServer, LO_TT_IMMEDIATE, "/reply", "ss", "/nsm/client/save", "OK");
@@ -532,6 +528,8 @@ protected:
     }
 
 private:
+    CarlaHostStandalone& gStandalone;
+
     lo_address       fReplyAddress;
     lo_server        fServer;
     lo_server_thread fServerThread;
@@ -635,10 +633,12 @@ private:
 
 // -------------------------------------------------------------------------------------------------------------------
 
-bool carla_nsm_init(int pid, const char* executableName)
+bool carla_nsm_init(CarlaHostHandle handle, uint64_t pid, const char* executableName)
 {
+    CARLA_SAFE_ASSERT_RETURN(handle->isStandalone, false);
+
 #ifdef HAVE_LIBLO
-    return CarlaNSM::getInstance().announce(pid, executableName);
+    return CarlaNSM::getInstance(*(CarlaHostStandalone*)handle).announce(pid, executableName);
 #else
     return false;
 
@@ -647,10 +647,12 @@ bool carla_nsm_init(int pid, const char* executableName)
 #endif
 }
 
-void carla_nsm_ready(NsmCallbackOpcode action)
+void carla_nsm_ready(CarlaHostHandle handle, NsmCallbackOpcode action)
 {
+    CARLA_SAFE_ASSERT_RETURN(handle->isStandalone,);
+
 #ifdef HAVE_LIBLO
-    CarlaNSM::getInstance().ready(action);
+    CarlaNSM::getInstance(*(CarlaHostStandalone*)handle).ready(action);
 #else
     // unused
     return; (void)action;

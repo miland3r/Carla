@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # Carla Backend utils
-# Copyright (C) 2011-2018 Filipe Coelho <falktx@falktx.com>
+# Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License as
@@ -23,9 +23,47 @@ from os import environ
 from sys import argv
 
 # ------------------------------------------------------------------------------------------------------------
+# Imports (ctypes)
+
+from ctypes import (
+    c_bool, c_char_p, c_double, c_int, c_uint, c_uint32, c_void_p,
+    cdll, Structure,
+    CFUNCTYPE, POINTER
+)
+
+# ------------------------------------------------------------------------------------------------------------
 # Imports (Custom)
 
-from carla_backend import *
+from carla_backend import (
+    PLUGIN_NONE,
+    PLUGIN_INTERNAL,
+    PLUGIN_LADSPA,
+    PLUGIN_DSSI,
+    PLUGIN_LV2,
+    PLUGIN_VST2,
+    PLUGIN_VST3,
+    PLUGIN_AU,
+    PLUGIN_DLS,
+    PLUGIN_GIG,
+    PLUGIN_SF2,
+    PLUGIN_SFZ,
+    PLUGIN_JACK,
+    PLUGIN_CATEGORY_NONE,
+    PLUGIN_CATEGORY_SYNTH,
+    PLUGIN_CATEGORY_DELAY,
+    PLUGIN_CATEGORY_EQ,
+    PLUGIN_CATEGORY_FILTER,
+    PLUGIN_CATEGORY_DISTORTION,
+    PLUGIN_CATEGORY_DYNAMICS,
+    PLUGIN_CATEGORY_MODULATOR,
+    PLUGIN_CATEGORY_UTILITY,
+    PLUGIN_CATEGORY_OTHER,
+    WINDOWS,
+    c_enum, c_uintptr,
+    charPtrToString,
+    charPtrPtrToStringList,
+    structToDict
+)
 
 # ------------------------------------------------------------------------------------------------------------
 
@@ -46,6 +84,10 @@ def getPluginTypeAsString(ptype):
         return "VST3"
     if ptype == PLUGIN_AU:
         return "AU"
+    if ptype == PLUGIN_DLS:
+        return "DLS"
+    if ptype == PLUGIN_GIG:
+        return "GIG"
     if ptype == PLUGIN_SF2:
         return "SF2"
     if ptype == PLUGIN_SFZ:
@@ -53,7 +95,7 @@ def getPluginTypeAsString(ptype):
     if ptype == PLUGIN_JACK:
         return "JACK"
 
-    print("getPluginTypeAsString(%i) - invalid type" % ptype);
+    print("getPluginTypeAsString(%i) - invalid type" % ptype)
     return "Unknown"
 
 def getPluginTypeFromString(stype):
@@ -78,6 +120,10 @@ def getPluginTypeFromString(stype):
         return PLUGIN_VST3
     if stype in ("au", "audiounit"):
         return PLUGIN_AU
+    if stype == "dls":
+        return PLUGIN_DLS
+    if stype == "gig":
+        return PLUGIN_GIG
     if stype == "sf2":
         return PLUGIN_SF2
     if stype == "sfz":
@@ -87,6 +133,31 @@ def getPluginTypeFromString(stype):
 
     print("getPluginTypeFromString(\"%s\") - invalid string type" % stype)
     return PLUGIN_NONE
+
+def getPluginCategoryAsString(category):
+    if category == PLUGIN_CATEGORY_NONE:
+        return "none"
+    if category == PLUGIN_CATEGORY_SYNTH:
+        return "synth"
+    if category == PLUGIN_CATEGORY_DELAY:
+        return "delay"
+    if category == PLUGIN_CATEGORY_EQ:
+        return "eq"
+    if category == PLUGIN_CATEGORY_FILTER:
+        return "filter"
+    if category == PLUGIN_CATEGORY_DISTORTION:
+        return "distortion"
+    if category == PLUGIN_CATEGORY_DYNAMICS:
+        return "dynamics"
+    if category == PLUGIN_CATEGORY_MODULATOR:
+        return "modulator"
+    if category == PLUGIN_CATEGORY_UTILITY:
+        return "utility"
+    if category == PLUGIN_CATEGORY_OTHER:
+        return "other"
+
+    print("CarlaBackend::getPluginCategoryAsString(%i) - invalid category" % category)
+    return "NONE"
 
 # ------------------------------------------------------------------------------------------------------------
 # Carla Utils API (C stuff)
@@ -173,10 +244,8 @@ PyCarlaCachedPluginInfo = {
 # ------------------------------------------------------------------------------------------------------------
 # Carla Utils object using a DLL
 
-class CarlaUtils(object):
+class CarlaUtils():
     def __init__(self, filename):
-        object.__init__(self)
-
         self.lib = cdll.LoadLibrary(filename)
         #self.lib = CDLL(filename, RTLD_GLOBAL)
 
@@ -211,7 +280,7 @@ class CarlaUtils(object):
         self.lib.carla_pipe_client_new.restype = CarlaPipeClientHandle
 
         self.lib.carla_pipe_client_idle.argtypes = [CarlaPipeClientHandle]
-        self.lib.carla_pipe_client_idle.restype = c_char_p
+        self.lib.carla_pipe_client_idle.restype = None
 
         self.lib.carla_pipe_client_is_running.argtypes = [CarlaPipeClientHandle]
         self.lib.carla_pipe_client_is_running.restype = c_bool
@@ -224,6 +293,15 @@ class CarlaUtils(object):
 
         self.lib.carla_pipe_client_readlineblock.argtypes = [CarlaPipeClientHandle, c_uint]
         self.lib.carla_pipe_client_readlineblock.restype = c_char_p
+
+        self.lib.carla_pipe_client_readlineblock_bool.argtypes = [CarlaPipeClientHandle, c_uint]
+        self.lib.carla_pipe_client_readlineblock_bool.restype = c_bool
+
+        self.lib.carla_pipe_client_readlineblock_int.argtypes = [CarlaPipeClientHandle, c_uint]
+        self.lib.carla_pipe_client_readlineblock_int.restype = c_int
+
+        self.lib.carla_pipe_client_readlineblock_float.argtypes = [CarlaPipeClientHandle, c_uint]
+        self.lib.carla_pipe_client_readlineblock_float.restype = c_double
 
         self.lib.carla_pipe_client_write_msg.argtypes = [CarlaPipeClientHandle, c_char_p]
         self.lib.carla_pipe_client_write_msg.restype = c_bool
@@ -240,6 +318,15 @@ class CarlaUtils(object):
         self.lib.carla_pipe_client_destroy.argtypes = [CarlaPipeClientHandle]
         self.lib.carla_pipe_client_destroy.restype = None
 
+        self.lib.carla_juce_init.argtypes = None
+        self.lib.carla_juce_init.restype = None
+
+        self.lib.carla_juce_idle.argtypes = None
+        self.lib.carla_juce_idle.restype = None
+
+        self.lib.carla_juce_cleanup.argtypes = None
+        self.lib.carla_juce_cleanup.restype = None
+
         self.lib.carla_cocoa_get_window.argtypes = [c_uintptr]
         self.lib.carla_cocoa_get_window.restype = c_int
 
@@ -252,14 +339,19 @@ class CarlaUtils(object):
         self.lib.carla_x11_get_window_pos.argtypes = [c_uintptr]
         self.lib.carla_x11_get_window_pos.restype = POINTER(c_int)
 
+        self._pipeClientFunc = None
+        self._pipeClientCallback = None
+
         # use _putenv on windows
         if not WINDOWS:
             self.msvcrt = None
             return
 
         self.msvcrt = cdll.msvcrt
+        # pylint: disable=protected-access
         self.msvcrt._putenv.argtypes = [c_char_p]
         self.msvcrt._putenv.restype = None
+        # pylint: enable=protected-access
 
     # --------------------------------------------------------------------------------------------------------
 
@@ -269,7 +361,9 @@ class CarlaUtils(object):
 
         if WINDOWS:
             keyvalue = "%s=%s" % (key, value)
+            # pylint: disable=protected-access
             self.msvcrt._putenv(keyvalue.encode("utf-8"))
+            # pylint: enable=protected-access
 
     # unset environment variable
     def unsetenv(self, key):
@@ -278,7 +372,9 @@ class CarlaUtils(object):
 
         if WINDOWS:
             keyrm = "%s=" % key
+            # pylint: disable=protected-access
             self.msvcrt._putenv(keyrm.encode("utf-8"))
+            # pylint: enable=protected-access
 
     # --------------------------------------------------------------------------------------------------------
 
@@ -331,17 +427,10 @@ class CarlaUtils(object):
         return self.lib.carla_pipe_client_new(cargv, self._pipeClientCallback, None)
 
     def pipe_client_idle(self, handle):
-        while True:
-            try:
-                msg = self.lib.carla_pipe_client_idle(handle)
-            except OSError as e:
-                print("pipe_client_idle", e)
-                return
-
-            if not msg:
-                break
-
-            self._pipeClientFunc(None, msg.decode("utf-8", errors="ignore"))
+        try:
+            self.lib.carla_pipe_client_idle(handle)
+        except OSError as e:
+            print("carla_pipe_client_idle", e)
 
     def pipe_client_is_running(self, handle):
         return bool(self.lib.carla_pipe_client_is_running(handle))
@@ -354,6 +443,15 @@ class CarlaUtils(object):
 
     def pipe_client_readlineblock(self, handle, timeout):
         return charPtrToString(self.lib.carla_pipe_client_readlineblock(handle, timeout))
+
+    def pipe_client_readlineblock_bool(self, handle, timeout):
+        return bool(self.lib.carla_pipe_client_readlineblock_bool(handle, timeout))
+
+    def pipe_client_readlineblock_int(self, handle, timeout):
+        return int(self.lib.carla_pipe_client_readlineblock_int(handle, timeout))
+
+    def pipe_client_readlineblock_float(self, handle, timeout):
+        return float(self.lib.carla_pipe_client_readlineblock_float(handle, timeout))
 
     def pipe_client_write_msg(self, handle, msg):
         return bool(self.lib.carla_pipe_client_write_msg(handle, msg.encode("utf-8")))
@@ -369,6 +467,15 @@ class CarlaUtils(object):
 
     def pipe_client_destroy(self, handle):
         self.lib.carla_pipe_client_destroy(handle)
+
+    def juce_init(self):
+        self.lib.carla_juce_init()
+
+    def juce_idle(self):
+        self.lib.carla_juce_idle()
+
+    def juce_cleanup(self):
+        self.lib.carla_juce_cleanup()
 
     def cocoa_get_window(self, winId):
         return self.lib.carla_cocoa_get_window(winId)

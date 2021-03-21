@@ -1,6 +1,6 @@
 /*
  * Carla common utils
- * Copyright (C) 2011-2016 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -27,6 +27,7 @@
 #include <cstring>
 
 #ifdef CARLA_PROPER_CPP11_SUPPORT
+# include <cxxabi.h>
 # include <cstdint>
 #else
 # include <stdint.h>
@@ -84,7 +85,7 @@ FILE* __carla_fopen(const char* const filename, FILE* const fallback) noexcept
 
     try {
         ret = std::fopen(filename, "a+");
-    } catch (...) {}
+    } CARLA_CATCH_UNWIND catch (...) {}
 
     if (ret == nullptr)
         ret = fallback;
@@ -115,7 +116,11 @@ void carla_debug(const char* const fmt, ...) noexcept
 
         if (output == stdout)
         {
+#ifdef CARLA_OS_MAC
+            std::fprintf(output, "\x1b[37;1m");
+#else
             std::fprintf(output, "\x1b[30;1m");
+#endif
             std::vfprintf(output, fmt, args);
             std::fprintf(output, "\x1b[0m\n");
         }
@@ -123,11 +128,11 @@ void carla_debug(const char* const fmt, ...) noexcept
         {
             std::vfprintf(output, fmt, args);
             std::fprintf(output, "\n");
-            std::fflush(output);
         }
 
+        std::fflush(output);
         ::va_end(args);
-    } catch (...) {}
+    } CARLA_CATCH_UNWIND catch (...) {}
 }
 #endif
 
@@ -144,10 +149,12 @@ void carla_stdout(const char* const fmt, ...) noexcept
         ::va_start(args, fmt);
         std::vfprintf(output, fmt, args);
         std::fprintf(output, "\n");
+#ifndef DEBUG
         if (output != stdout)
+#endif
             std::fflush(output);
         ::va_end(args);
-    } catch (...) {}
+    } CARLA_CATCH_UNWIND catch (...) {}
 }
 
 /*
@@ -163,10 +170,12 @@ void carla_stderr(const char* const fmt, ...) noexcept
         ::va_start(args, fmt);
         std::vfprintf(output, fmt, args);
         std::fprintf(output, "\n");
+#ifndef DEBUG
         if (output != stderr)
+#endif
             std::fflush(output);
         ::va_end(args);
-    } catch (...) {}
+    } CARLA_CATCH_UNWIND catch (...) {}
 }
 
 /*
@@ -191,11 +200,11 @@ void carla_stderr2(const char* const fmt, ...) noexcept
         {
             std::vfprintf(output, fmt, args);
             std::fprintf(output, "\n");
-            std::fflush(output);
         }
 
+        std::fflush(output);
         ::va_end(args);
-    } catch (...) {}
+    } CARLA_CATCH_UNWIND catch (...) {}
 }
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -248,6 +257,16 @@ void carla_safe_assert_uint2(const char* const assertion, const char* const file
                              const int line, const uint v1, const uint v2) noexcept
 {
     carla_stderr2("Carla assertion failure: \"%s\" in file %s, line %i, v1 %u, v2 %u", assertion, file, line, v1, v2);
+}
+
+/*
+ * Print a safe assertion error message, with a custom error message.
+ */
+static inline
+void carla_custom_safe_assert(const char* const message,
+                              const char* const assertion, const char* const file, const int line) noexcept
+{
+    carla_stderr2("Carla assertion failure: %s, condition \"%s\" in file %s, line %i", message, assertion, file, line);
 }
 
 // --------------------------------------------------------------------------------------------------------------------

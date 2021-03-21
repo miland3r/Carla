@@ -139,58 +139,83 @@ typedef struct _CarlaCachedPluginInfo {
 } CarlaCachedPluginInfo;
 
 /* --------------------------------------------------------------------------------------------------------------------
- * get stuff */
-
-/*!
- * Get the complete license text of used third-party code and features.
- * Returned string is in basic html format.
- */
-CARLA_EXPORT const char* carla_get_complete_license_text();
-
-/*!
- * Get the juce version used in the current Carla build.
- */
-CARLA_EXPORT const char* carla_get_juce_version();
-
-/*!
- * Get the list of supported file extensions in carla_load_file().
- */
-CARLA_EXPORT const char* const* carla_get_supported_file_extensions();
-
-/*!
- * Get the list of supported features in the current Carla build.
- */
-CARLA_EXPORT const char* const* carla_get_supported_features();
+ * cached plugins */
 
 /*!
  * Get how many cached plugins are available.
  * Internal and LV2 plugin formats are cached and need to be discovered via this function.
  * Do not call this for any other plugin formats.
+ *
+ * @note if this carla build uses JUCE, then you must call carla_juce_init beforehand
  */
 CARLA_EXPORT uint carla_get_cached_plugin_count(PluginType ptype, const char* pluginPath);
 
 /*!
  * Get information about a cached plugin.
+ *
+ * @note if this carla build uses JUCE, then you must call carla_juce_init beforehand
  */
 CARLA_EXPORT const CarlaCachedPluginInfo* carla_get_cached_plugin_info(PluginType ptype, uint index);
 
+#ifndef CARLA_HOST_H_INCLUDED
 /* --------------------------------------------------------------------------------------------------------------------
- * set stuff */
+ * information */
 
 /*!
- * Flush stdout or stderr.
+ * Get the complete license text of used third-party code and features.
+ * Returned string is in basic html format.
  */
-CARLA_EXPORT void carla_fflush(bool err);
+CARLA_EXPORT const char* carla_get_complete_license_text(void);
 
 /*!
- * Print the string @a string to stdout or stderr.
+ * Get the juce version used in the current Carla build.
  */
-CARLA_EXPORT void carla_fputs(bool err, const char* string);
+CARLA_EXPORT const char* carla_get_juce_version(void);
 
 /*!
- * Set the current process name to @a name.
+ * Get the list of supported file extensions in carla_load_file().
  */
-CARLA_EXPORT void carla_set_process_name(const char* name);
+CARLA_EXPORT const char* const* carla_get_supported_file_extensions(void);
+
+/*!
+ * Get the list of supported features in the current Carla build.
+ */
+CARLA_EXPORT const char* const* carla_get_supported_features(void);
+
+/*!
+ * Get the absolute filename of this carla library.
+ */
+CARLA_EXPORT const char* carla_get_library_filename(void);
+
+/*!
+ * Get the folder where this carla library resides.
+ */
+CARLA_EXPORT const char* carla_get_library_folder(void);
+#endif
+
+/* --------------------------------------------------------------------------------------------------------------------
+ * JUCE */
+
+/*!
+ * Initialize data structures and GUI support for JUCE.
+ * This is only needed when carla builds use JUCE and you call cached-plugin related APIs.
+ *
+ * Idle must then be called at somewhat regular intervals, though in practice there is no reason for it yet.
+ *
+ * Make sure to call carla_juce_cleanup after you are done with APIs that need JUCE.
+ */
+CARLA_EXPORT void carla_juce_init(void);
+
+/*!
+ * Give idle time to JUCE stuff.
+ * Currently only used for Linux.
+ */
+CARLA_EXPORT void carla_juce_idle(void);
+
+/*!
+ * Cleanup the JUCE stuff that was initialized by carla_juce_init.
+ */
+CARLA_EXPORT void carla_juce_cleanup(void);
 
 /* --------------------------------------------------------------------------------------------------------------------
  * pipes */
@@ -203,7 +228,7 @@ CARLA_EXPORT CarlaPipeClientHandle carla_pipe_client_new(const char* argv[], Car
 /*!
  * TODO.
  */
-CARLA_EXPORT const char* carla_pipe_client_idle(CarlaPipeClientHandle handle);
+CARLA_EXPORT void carla_pipe_client_idle(CarlaPipeClientHandle handle);
 
 /*!
  * TODO.
@@ -224,6 +249,14 @@ CARLA_EXPORT void carla_pipe_client_unlock(CarlaPipeClientHandle handle);
  * TODO.
  */
 CARLA_EXPORT const char* carla_pipe_client_readlineblock(CarlaPipeClientHandle handle, uint timeout);
+
+/*!
+ * Extras.
+ * TODO.
+ */
+CARLA_EXPORT bool carla_pipe_client_readlineblock_bool(CarlaPipeClientHandle handle, uint timeout);
+CARLA_EXPORT int carla_pipe_client_readlineblock_int(CarlaPipeClientHandle handle, uint timeout);
+CARLA_EXPORT double carla_pipe_client_readlineblock_float(CarlaPipeClientHandle handle, uint timeout);
 
 /*!
  * TODO.
@@ -250,20 +283,23 @@ CARLA_EXPORT bool carla_pipe_client_flush_and_unlock(CarlaPipeClientHandle handl
  */
 CARLA_EXPORT void carla_pipe_client_destroy(CarlaPipeClientHandle handle);
 
-#ifndef CARLA_HOST_H_INCLUDED
 /* --------------------------------------------------------------------------------------------------------------------
- * info about current library */
+ * system stuff */
 
 /*!
- * Get the absolute filename of this carla library.
+ * Flush stdout or stderr.
  */
-CARLA_EXPORT const char* carla_get_library_filename();
+CARLA_EXPORT void carla_fflush(bool err);
 
 /*!
- * Get the folder where this carla library resides.
+ * Print the string @a string to stdout or stderr.
  */
-CARLA_EXPORT const char* carla_get_library_folder();
-#endif
+CARLA_EXPORT void carla_fputs(bool err, const char* string);
+
+/*!
+ * Set the current process name to @a name.
+ */
+CARLA_EXPORT void carla_set_process_name(const char* name);
 
 /* --------------------------------------------------------------------------------------------------------------------
  * window control */

@@ -1,6 +1,6 @@
 /*
  * Carla Plugin Host
- * Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -22,6 +22,8 @@
  * - something about the peaks?
  */
 
+#include "CarlaEngineClient.hpp"
+#include "CarlaEngineInit.hpp"
 #include "CarlaEngineInternal.hpp"
 #include "CarlaPlugin.hpp"
 
@@ -31,6 +33,7 @@
 #include "CarlaMathUtils.hpp"
 #include "CarlaPipeUtils.hpp"
 #include "CarlaProcessUtils.hpp"
+#include "CarlaScopeUtils.hpp"
 #include "CarlaStateUtils.hpp"
 #include "CarlaMIDI.h"
 
@@ -40,6 +43,15 @@
 #include "water/streams/MemoryOutputStream.h"
 #include "water/xml/XmlDocument.h"
 #include "water/xml/XmlElement.h"
+
+#ifdef CARLA_OS_MAC
+# include "CarlaMacUtils.hpp"
+# if defined(CARLA_OS_64BIT) && defined(HAVE_LIBMAGIC) && ! defined(BUILD_BRIDGE_ALTERNATIVE_ARCH)
+#  define ADAPT_FOR_APPLE_SILLICON
+# endif
+#endif
+
+#include <map>
 
 // FIXME Remove on 2.1 release
 #include "lv2/atom.h"
@@ -52,6 +64,8 @@ using water::String;
 using water::StringArray;
 using water::XmlDocument;
 using water::XmlElement;
+
+// #define SFZ_FILES_USING_SFIZZ
 
 CARLA_BACKEND_START_NAMESPACE
 
@@ -77,6 +91,7 @@ CarlaEngine::~CarlaEngine()
 uint CarlaEngine::getDriverCount()
 {
     carla_debug("CarlaEngine::getDriverCount()");
+    using namespace EngineInit;
 
     uint count = 0;
 
@@ -84,7 +99,7 @@ uint CarlaEngine::getDriverCount()
         count += 1;
 
 #ifndef BUILD_BRIDGE
-# ifdef USING_JUCE
+# ifdef USING_JUCE_AUDIO_DEVICES
     count += getJuceApiCount();
 # else
     count += getRtAudioApiCount();
@@ -97,6 +112,7 @@ uint CarlaEngine::getDriverCount()
 const char* CarlaEngine::getDriverName(const uint index2)
 {
     carla_debug("CarlaEngine::getDriverName(%i)", index2);
+    using namespace EngineInit;
 
     uint index = index2;
 
@@ -104,7 +120,7 @@ const char* CarlaEngine::getDriverName(const uint index2)
         return "JACK";
 
 #ifndef BUILD_BRIDGE
-# ifdef USING_JUCE
+# ifdef USING_JUCE_AUDIO_DEVICES
     if (const uint count = getJuceApiCount())
     {
         if (index < count)
@@ -127,6 +143,7 @@ const char* CarlaEngine::getDriverName(const uint index2)
 const char* const* CarlaEngine::getDriverDeviceNames(const uint index2)
 {
     carla_debug("CarlaEngine::getDriverDeviceNames(%i)", index2);
+    using namespace EngineInit;
 
     uint index = index2;
 
@@ -137,7 +154,7 @@ const char* const* CarlaEngine::getDriverDeviceNames(const uint index2)
     }
 
 #ifndef BUILD_BRIDGE
-# ifdef USING_JUCE
+# ifdef USING_JUCE_AUDIO_DEVICES
     if (const uint count = getJuceApiCount())
     {
         if (index < count)
@@ -160,6 +177,7 @@ const char* const* CarlaEngine::getDriverDeviceNames(const uint index2)
 const EngineDriverDeviceInfo* CarlaEngine::getDriverDeviceInfo(const uint index2, const char* const deviceName)
 {
     carla_debug("CarlaEngine::getDriverDeviceInfo(%i, \"%s\")", index2, deviceName);
+    using namespace EngineInit;
 
     uint index = index2;
 
@@ -173,7 +191,7 @@ const EngineDriverDeviceInfo* CarlaEngine::getDriverDeviceInfo(const uint index2
     }
 
 #ifndef BUILD_BRIDGE
-# ifdef USING_JUCE
+# ifdef USING_JUCE_AUDIO_DEVICES
     if (const uint count = getJuceApiCount())
     {
         if (index < count)
@@ -196,6 +214,7 @@ const EngineDriverDeviceInfo* CarlaEngine::getDriverDeviceInfo(const uint index2
 bool CarlaEngine::showDriverDeviceControlPanel(const uint index2, const char* const deviceName)
 {
     carla_debug("CarlaEngine::showDriverDeviceControlPanel(%i, \"%s\")", index2, deviceName);
+    using namespace EngineInit;
 
     uint index = index2;
 
@@ -205,7 +224,7 @@ bool CarlaEngine::showDriverDeviceControlPanel(const uint index2, const char* co
     }
 
 #ifndef BUILD_BRIDGE
-# ifdef USING_JUCE
+# ifdef USING_JUCE_AUDIO_DEVICES
     if (const uint count = getJuceApiCount())
     {
         if (index < count)
@@ -229,6 +248,7 @@ CarlaEngine* CarlaEngine::newDriverByName(const char* const driverName)
 {
     CARLA_SAFE_ASSERT_RETURN(driverName != nullptr && driverName[0] != '\0', nullptr);
     carla_debug("CarlaEngine::newDriverByName(\"%s\")", driverName);
+    using namespace EngineInit;
 
     if (std::strcmp(driverName, "JACK") == 0)
         return newJack();
@@ -239,7 +259,7 @@ CarlaEngine* CarlaEngine::newDriverByName(const char* const driverName)
 #endif
 
 #ifndef BUILD_BRIDGE
-# ifdef USING_JUCE
+# ifdef USING_JUCE_AUDIO_DEVICES
     // -------------------------------------------------------------------
     // linux
 
@@ -353,19 +373,35 @@ void CarlaEngine::idle() noexcept
     CARLA_SAFE_ASSERT_RETURN(pData->nextPluginId == pData->maxPluginNumber,);
     CARLA_SAFE_ASSERT_RETURN(getType() != kEngineTypePlugin,);
 
+    const bool engineNotRunning = !isRunning();
+
     for (uint i=0; i < pData->curPluginCount; ++i)
     {
-        CarlaPlugin* const plugin(pData->plugins[i].plugin);
-
-        if (plugin != nullptr && plugin->isEnabled())
+        if (const CarlaPluginPtr plugin = pData->plugins[i].plugin)
         {
-            const uint hints(plugin->getHints());
-
-            if ((hints & PLUGIN_HAS_CUSTOM_UI) != 0 && (hints & PLUGIN_NEEDS_UI_MAIN_THREAD) != 0)
+            if (plugin->isEnabled())
             {
-                try {
-                    plugin->uiIdle();
-                } CARLA_SAFE_EXCEPTION_CONTINUE("Plugin uiIdle");
+                const uint hints = plugin->getHints();
+
+                if (engineNotRunning)
+                {
+                    try {
+                        plugin->idle();
+                    } CARLA_SAFE_EXCEPTION_CONTINUE("Plugin idle");
+
+                    if (hints & PLUGIN_HAS_CUSTOM_UI)
+                    {
+                        try {
+                            plugin->uiIdle();
+                        } CARLA_SAFE_EXCEPTION_CONTINUE("Plugin uiIdle");
+                    }
+                }
+                else if ((hints & PLUGIN_HAS_CUSTOM_UI) != 0 && (hints & PLUGIN_NEEDS_UI_MAIN_THREAD) != 0)
+                {
+                    try {
+                        plugin->uiIdle();
+                    } CARLA_SAFE_EXCEPTION_CONTINUE("Plugin uiIdle");
+                }
             }
         }
     }
@@ -373,11 +409,20 @@ void CarlaEngine::idle() noexcept
 #if defined(HAVE_LIBLO) && !defined(BUILD_BRIDGE)
     pData->osc.idle();
 #endif
+
+    pData->deletePluginsAsNeeded();
 }
 
-CarlaEngineClient* CarlaEngine::addClient(CarlaPlugin* const)
+CarlaEngineClient* CarlaEngine::addClient(CarlaPluginPtr plugin)
 {
-    return new CarlaEngineClient(*this);
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+    return new CarlaEngineClientForStandalone(*this, pData->graph, plugin);
+#else
+    return new CarlaEngineClientForBridge(*this);
+
+    // unused
+    (void)plugin;
+#endif
 }
 
 float CarlaEngine::getDSPLoad() const noexcept
@@ -418,9 +463,14 @@ bool CarlaEngine::setBufferSizeAndSampleRate(const uint, const double)
 // -----------------------------------------------------------------------
 // Plugin management
 
-bool CarlaEngine::addPlugin(const BinaryType btype, const PluginType ptype,
-                            const char* const filename, const char* const name, const char* const label, const int64_t uniqueId,
-                            const void* const extra, const uint options)
+bool CarlaEngine::addPlugin(const BinaryType btype,
+                            const PluginType ptype,
+                            const char* const filename,
+                            const char* const name,
+                            const char* const label,
+                            const int64_t uniqueId,
+                            const void* const extra,
+                            const uint options)
 {
     CARLA_SAFE_ASSERT_RETURN_ERR(pData->isIdling == 0, "An operation is still being processed, please wait for it to finish");
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
@@ -443,7 +493,7 @@ bool CarlaEngine::addPlugin(const BinaryType btype, const PluginType ptype,
     uint id;
 
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
-    CarlaPlugin* oldPlugin = nullptr;
+    CarlaPluginPtr oldPlugin;
 
     if (pData->nextPluginId < pData->curPluginCount)
     {
@@ -452,7 +502,7 @@ bool CarlaEngine::addPlugin(const BinaryType btype, const PluginType ptype,
 
         oldPlugin = pData->plugins[id].plugin;
 
-        CARLA_SAFE_ASSERT_RETURN_ERR(oldPlugin != nullptr, "Invalid replace plugin Id");
+        CARLA_SAFE_ASSERT_RETURN_ERR(oldPlugin.get() != nullptr, "Invalid replace plugin Id");
     }
     else
 #endif
@@ -466,7 +516,7 @@ bool CarlaEngine::addPlugin(const BinaryType btype, const PluginType ptype,
         }
 
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
-        CARLA_SAFE_ASSERT_RETURN_ERR(pData->plugins[id].plugin == nullptr, "Invalid engine internal data");
+        CARLA_SAFE_ASSERT_RETURN_ERR(pData->plugins[id].plugin.get() == nullptr, "Invalid engine internal data");
 #endif
     }
 
@@ -480,7 +530,7 @@ bool CarlaEngine::addPlugin(const BinaryType btype, const PluginType ptype,
         options
     };
 
-    CarlaPlugin* plugin = nullptr;
+    CarlaPluginPtr plugin;
     CarlaString bridgeBinary(pData->options.binaryDir);
 
     if (bridgeBinary.isNotEmpty())
@@ -502,10 +552,18 @@ bool CarlaEngine::addPlugin(const BinaryType btype, const PluginType ptype,
                 bridgeBinary += CARLA_OS_SEP_STR "carla-bridge-posix64";
                 break;
             case BINARY_WIN32:
+#if defined(CARLA_OS_WIN) && !defined(CARLA_OS_64BIT)
+                bridgeBinary += CARLA_OS_SEP_STR "carla-bridge-native.exe";
+#else
                 bridgeBinary += CARLA_OS_SEP_STR "carla-bridge-win32.exe";
+#endif
                 break;
             case BINARY_WIN64:
+#if defined(CARLA_OS_WIN) && defined(CARLA_OS_64BIT)
+                bridgeBinary += CARLA_OS_SEP_STR "carla-bridge-native.exe";
+#else
                 bridgeBinary += CARLA_OS_SEP_STR "carla-bridge-win64.exe";
+#endif
                 break;
             default:
                 bridgeBinary.clear();
@@ -517,12 +575,27 @@ bool CarlaEngine::addPlugin(const BinaryType btype, const PluginType ptype,
             bridgeBinary.clear();
     }
 
-    // Prefer bridges for some specific plugins
-    const bool preferBridges = pData->options.preferPluginBridges;
+    const bool canBeBridged = ptype != PLUGIN_INTERNAL
+                           && ptype != PLUGIN_DLS
+                           && ptype != PLUGIN_GIG
+                           && ptype != PLUGIN_SF2
+                           && ptype != PLUGIN_SFZ
+                           && ptype != PLUGIN_JACK;
 
-#if 0 // ndef BUILD_BRIDGE
-    if (! preferBridges)
+    // Prefer bridges for some specific plugins
+    bool preferBridges = pData->options.preferPluginBridges;
+    const char* needsArchBridge = nullptr;
+
+#ifdef CARLA_OS_MAC
+    // Plugin might be in quarentine due to Apple stupid notarization rules, let's remove that if possible
+    if (canBeBridged && ptype != PLUGIN_LV2 && ptype != PLUGIN_AU)
+        removeFileFromQuarantine(filename);
+#endif
+
+#ifndef BUILD_BRIDGE
+    if (canBeBridged && ! preferBridges)
     {
+# if 0
         if (ptype == PLUGIN_LV2 && label != nullptr)
         {
             if (std::strncmp(label, "http://calf.sourceforge.net/plugins/", 36) == 0 ||
@@ -532,19 +605,44 @@ bool CarlaEngine::addPlugin(const BinaryType btype, const PluginType ptype,
                 preferBridges = true;
             }
         }
+# endif
+# ifdef ADAPT_FOR_APPLE_SILLICON
+        // see if this binary needs bridging
+        if (ptype == PLUGIN_VST2 || ptype == PLUGIN_VST3)
+        {
+            if (const char* const vst2Binary = findBinaryInBundle(filename))
+            {
+                const CarlaMagic magic;
+                if (const char* const output = magic.getFileDescription(vst2Binary))
+                {
+                    carla_stdout("VST binary magic output is '%s'", output);
+#  ifdef __aarch64__
+                    if (std::strstr(output, "arm64") == nullptr && std::strstr(output, "x86_64") != nullptr)
+                        needsArchBridge = "x86_64";
+#  else
+                    if (std::strstr(output, "x86_64") == nullptr && std::strstr(output, "arm64") != nullptr)
+                        needsArchBridge = "arm64";
+#  endif
+                }
+                else
+                {
+                    carla_stdout("VST binary magic output is null");
+                }
+            }
+            else
+            {
+                carla_stdout("Search for binary in VST bundle failed");
+            }
+        }
+# endif
     }
 #endif // ! BUILD_BRIDGE
 
-    const bool canBeBridged = ptype != PLUGIN_INTERNAL
-                           && ptype != PLUGIN_SF2
-                           && ptype != PLUGIN_SFZ
-                           && ptype != PLUGIN_JACK;
-
-    if (canBeBridged && (btype != BINARY_NATIVE || (preferBridges && bridgeBinary.isNotEmpty())))
+    if (canBeBridged && (needsArchBridge || btype != BINARY_NATIVE || (preferBridges && bridgeBinary.isNotEmpty())))
     {
         if (bridgeBinary.isNotEmpty())
         {
-            plugin = CarlaPlugin::newBridge(initializer, btype, ptype, bridgeBinary);
+            plugin = CarlaPlugin::newBridge(initializer, btype, ptype, needsArchBridge, bridgeBinary);
         }
         else
         {
@@ -596,13 +694,31 @@ bool CarlaEngine::addPlugin(const BinaryType btype, const PluginType ptype,
             plugin = CarlaPlugin::newNative(initializer);
             break;
 
+        case PLUGIN_DLS:
+        case PLUGIN_GIG:
         case PLUGIN_SF2:
             use16Outs = (extra != nullptr && std::strcmp((const char*)extra, "true") == 0);
-            plugin = CarlaPlugin::newFluidSynth(initializer, use16Outs);
+            plugin = CarlaPlugin::newFluidSynth(initializer, ptype, use16Outs);
             break;
 
         case PLUGIN_SFZ:
+# ifdef SFZ_FILES_USING_SFIZZ
+            {
+                CarlaPlugin::Initializer sfizzInitializer = {
+                    this,
+                    id,
+                    name,
+                    "",
+                    "http://sfztools.github.io/sfizz",
+                    0,
+                    options
+                };
+
+                plugin = CarlaPlugin::newLV2(sfizzInitializer);
+            }
+# else
             plugin = CarlaPlugin::newSFZero(initializer);
+# endif
             break;
 
         case PLUGIN_JACK:
@@ -610,6 +726,8 @@ bool CarlaEngine::addPlugin(const BinaryType btype, const PluginType ptype,
             break;
 #else
         case PLUGIN_INTERNAL:
+        case PLUGIN_DLS:
+        case PLUGIN_GIG:
         case PLUGIN_SF2:
         case PLUGIN_SFZ:
         case PLUGIN_JACK:
@@ -619,22 +737,26 @@ bool CarlaEngine::addPlugin(const BinaryType btype, const PluginType ptype,
         }
     }
 
-    if (plugin == nullptr)
+    if (plugin.get() == nullptr)
         return false;
 
     plugin->reload();
 
+#ifdef SFZ_FILES_USING_SFIZZ
+    if (ptype == PLUGIN_SFZ && plugin->getType() == PLUGIN_LV2)
+    {
+        plugin->setCustomData(LV2_ATOM__Path,
+                              "http://sfztools.github.io/sfizz:sfzfile",
+                              filename,
+                              false);
+
+        plugin->restoreLV2State(true);
+    }
+#endif
+
     bool canRun = true;
 
-    /**/ if (pData->options.processMode == ENGINE_PROCESS_MODE_CONTINUOUS_RACK)
-    {
-        if (plugin->getCVInCount() > 0 || plugin->getCVInCount() > 0)
-        {
-            setLastError("Carla's rack mode cannot work with plugins that have CV ports, sorry!");
-            canRun = false;
-        }
-    }
-    else if (pData->options.processMode == ENGINE_PROCESS_MODE_PATCHBAY)
+    if (pData->options.processMode == ENGINE_PROCESS_MODE_PATCHBAY)
     {
         /**/ if (plugin->getMidiInCount() > 1 || plugin->getMidiOutCount() > 1)
         {
@@ -645,7 +767,6 @@ bool CarlaEngine::addPlugin(const BinaryType btype, const PluginType ptype,
 
     if (! canRun)
     {
-        delete plugin;
         return false;
     }
 
@@ -654,7 +775,7 @@ bool CarlaEngine::addPlugin(const BinaryType btype, const PluginType ptype,
     carla_zeroFloats(pluginData.peaks, 4);
 
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
-    if (oldPlugin != nullptr)
+    if (oldPlugin.get() != nullptr)
     {
         CARLA_SAFE_ASSERT(! pData->loadingProject);
 
@@ -667,7 +788,8 @@ bool CarlaEngine::addPlugin(const BinaryType btype, const PluginType ptype,
         const float oldDryWet = oldPlugin->getInternalParameterValue(PARAMETER_DRYWET);
         const float oldVolume = oldPlugin->getInternalParameterValue(PARAMETER_VOLUME);
 
-        delete oldPlugin;
+        oldPlugin->prepareForDeletion();
+        pData->pluginsToDelete.push_back(oldPlugin);
 
         if (plugin->getHints() & PLUGIN_CAN_DRYWET)
             plugin->setDryWet(oldDryWet, true, true);
@@ -700,9 +822,14 @@ bool CarlaEngine::addPlugin(const BinaryType btype, const PluginType ptype,
     return true;
 }
 
-bool CarlaEngine::addPlugin(const PluginType ptype, const char* const filename, const char* const name, const char* const label, const int64_t uniqueId, const void* const extra)
+bool CarlaEngine::addPlugin(const PluginType ptype,
+                            const char* const filename,
+                            const char* const name,
+                            const char* const label,
+                            const int64_t uniqueId,
+                            const void* const extra)
 {
-    return addPlugin(BINARY_NATIVE, ptype, filename, name, label, uniqueId, extra, 0x0);
+    return addPlugin(BINARY_NATIVE, ptype, filename, name, label, uniqueId, extra, PLUGIN_OPTIONS_NULL);
 }
 
 bool CarlaEngine::removePlugin(const uint id)
@@ -711,14 +838,16 @@ bool CarlaEngine::removePlugin(const uint id)
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
     CARLA_SAFE_ASSERT_RETURN_ERR(pData->plugins != nullptr, "Invalid engine internal data");
     CARLA_SAFE_ASSERT_RETURN_ERR(pData->curPluginCount != 0, "Invalid engine internal data");
+#else
+    CARLA_SAFE_ASSERT_RETURN_ERR(id == 0, "Invalid engine internal data");
 #endif
     CARLA_SAFE_ASSERT_RETURN_ERR(pData->nextAction.opcode == kEnginePostActionNull, "Invalid engine internal data");
     CARLA_SAFE_ASSERT_RETURN_ERR(id < pData->curPluginCount, "Invalid plugin Id");
     carla_debug("CarlaEngine::removePlugin(%i)", id);
 
-    CarlaPlugin* const plugin(pData->plugins[id].plugin);
+    const CarlaPluginPtr plugin = pData->plugins[id].plugin;
 
-    CARLA_SAFE_ASSERT_RETURN_ERR(plugin != nullptr, "Could not find plugin to remove");
+    CARLA_SAFE_ASSERT_RETURN_ERR(plugin.get() != nullptr, "Could not find plugin to remove");
     CARLA_SAFE_ASSERT_RETURN_ERR(plugin->getId() == id, "Invalid engine internal data");
 
     const ScopedThreadStopper sts(this);
@@ -739,10 +868,12 @@ bool CarlaEngine::removePlugin(const uint id)
     */
 #else
     pData->curPluginCount = 0;
-    carla_zeroStructs(pData->plugins, 1);
+    pData->plugins[0].plugin = nullptr;
+    carla_zeroStruct(pData->plugins[0].peaks);
 #endif
 
-    delete plugin;
+    plugin->prepareForDeletion();
+    pData->pluginsToDelete.push_back(plugin);
 
     callback(true, true, ENGINE_CALLBACK_PLUGIN_REMOVED, id, 0, 0, 0, 0.0f, nullptr);
     return true;
@@ -763,7 +894,7 @@ bool CarlaEngine::removeAllPlugins()
 
     const ScopedThreadStopper sts(this);
 
-    const uint curPluginCount(pData->curPluginCount);
+    const uint curPluginCount = pData->curPluginCount;
 
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
     if (pData->options.processMode == ENGINE_PROCESS_MODE_PATCHBAY)
@@ -779,13 +910,11 @@ bool CarlaEngine::removeAllPlugins()
         const uint id = curPluginCount - i - 1;
         EnginePluginData& pluginData(pData->plugins[id]);
 
-        if (pluginData.plugin != nullptr)
-        {
-            delete pluginData.plugin;
-            pluginData.plugin = nullptr;
-        }
+        pluginData.plugin->prepareForDeletion();
+        pData->pluginsToDelete.push_back(pluginData.plugin);
 
-        carla_zeroFloats(pluginData.peaks, 4);
+        pluginData.plugin.reset();
+        carla_zeroStruct(pluginData.peaks);
 
         callback(true, true, ENGINE_CALLBACK_PLUGIN_REMOVED, id, 0, 0, 0, 0.0f, nullptr);
         callback(true, false, ENGINE_CALLBACK_IDLE, 0, 0, 0, 0, 0.0f, nullptr);
@@ -805,8 +934,8 @@ bool CarlaEngine::renamePlugin(const uint id, const char* const newName)
     CARLA_SAFE_ASSERT_RETURN_ERR(newName != nullptr && newName[0] != '\0', "Invalid plugin name");
     carla_debug("CarlaEngine::renamePlugin(%i, \"%s\")", id, newName);
 
-    CarlaPlugin* const plugin(pData->plugins[id].plugin);
-    CARLA_SAFE_ASSERT_RETURN_ERR(plugin != nullptr, "Could not find plugin to rename");
+    const CarlaPluginPtr plugin = pData->plugins[id].plugin;
+    CARLA_SAFE_ASSERT_RETURN_ERR(plugin.get() != nullptr, "Could not find plugin to rename");
     CARLA_SAFE_ASSERT_RETURN_ERR(plugin->getId() == id, "Invalid engine internal data");
 
     const char* const uniqueName(getUniquePluginName(newName));
@@ -832,9 +961,9 @@ bool CarlaEngine::clonePlugin(const uint id)
     CARLA_SAFE_ASSERT_RETURN_ERR(id < pData->curPluginCount, "Invalid plugin Id");
     carla_debug("CarlaEngine::clonePlugin(%i)", id);
 
-    CarlaPlugin* const plugin(pData->plugins[id].plugin);
+    const CarlaPluginPtr plugin = pData->plugins[id].plugin;
 
-    CARLA_SAFE_ASSERT_RETURN_ERR(plugin != nullptr, "Could not find plugin to clone");
+    CARLA_SAFE_ASSERT_RETURN_ERR(plugin.get() != nullptr, "Could not find plugin to clone");
     CARLA_SAFE_ASSERT_RETURN_ERR(plugin->getId() == id, "Invalid engine internal data");
 
     char label[STR_MAX+1];
@@ -852,8 +981,11 @@ bool CarlaEngine::clonePlugin(const uint id)
 
     CARLA_SAFE_ASSERT_RETURN_ERR(pluginCountBefore+1 == pData->curPluginCount, "No new plugin found");
 
-    if (CarlaPlugin* const newPlugin = pData->plugins[pluginCountBefore].plugin)
-        newPlugin->loadStateSave(plugin->getStateSave());
+    if (const CarlaPluginPtr newPlugin = pData->plugins[pluginCountBefore].plugin)
+    {
+        newPlugin->cloneLV2Files(*plugin);
+        newPlugin->loadStateSave(plugin->getStateSave(true));
+    }
 
     return true;
 }
@@ -875,9 +1007,9 @@ bool CarlaEngine::replacePlugin(const uint id) noexcept
 
     CARLA_SAFE_ASSERT_RETURN_ERR(id < pData->curPluginCount, "Invalid plugin Id");
 
-    CarlaPlugin* const plugin(pData->plugins[id].plugin);
+    const CarlaPluginPtr plugin = pData->plugins[id].plugin;
 
-    CARLA_SAFE_ASSERT_RETURN_ERR(plugin != nullptr, "Could not find plugin to replace");
+    CARLA_SAFE_ASSERT_RETURN_ERR(plugin.get() != nullptr, "Could not find plugin to replace");
     CARLA_SAFE_ASSERT_RETURN_ERR(plugin->getId() == id, "Invalid engine internal data");
 
     pData->nextPluginId = id;
@@ -896,18 +1028,18 @@ bool CarlaEngine::switchPlugins(const uint idA, const uint idB) noexcept
     CARLA_SAFE_ASSERT_RETURN_ERR(idB < pData->curPluginCount, "Invalid plugin Id");
     carla_debug("CarlaEngine::switchPlugins(%i)", idA, idB);
 
-    CarlaPlugin* const pluginA(pData->plugins[idA].plugin);
-    CarlaPlugin* const pluginB(pData->plugins[idB].plugin);
+    const CarlaPluginPtr pluginA = pData->plugins[idA].plugin;
+    const CarlaPluginPtr pluginB = pData->plugins[idB].plugin;
 
-    CARLA_SAFE_ASSERT_RETURN_ERR(pluginA != nullptr, "Could not find plugin to switch");
-    CARLA_SAFE_ASSERT_RETURN_ERR(pluginA != nullptr, "Could not find plugin to switch");
+    CARLA_SAFE_ASSERT_RETURN_ERR(pluginA.get() != nullptr, "Could not find plugin to switch");
+    CARLA_SAFE_ASSERT_RETURN_ERR(pluginB.get() != nullptr, "Could not find plugin to switch");
     CARLA_SAFE_ASSERT_RETURN_ERR(pluginA->getId() == idA, "Invalid engine internal data");
     CARLA_SAFE_ASSERT_RETURN_ERR(pluginB->getId() == idB, "Invalid engine internal data");
 
     const ScopedThreadStopper sts(this);
 
     if (pData->options.processMode == ENGINE_PROCESS_MODE_PATCHBAY)
-        pData->graph.replacePlugin(pluginA, pluginB);
+        pData->graph.switchPlugins(pluginA, pluginB);
 
     const ScopedActionLock sal(this, kEnginePostActionSwitchPlugins, idA, idB);
 
@@ -928,7 +1060,7 @@ void CarlaEngine::touchPluginParameter(const uint, const uint32_t, const bool) n
 {
 }
 
-CarlaPlugin* CarlaEngine::getPlugin(const uint id) const noexcept
+CarlaPluginPtr CarlaEngine::getPlugin(const uint id) const noexcept
 {
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
     CARLA_SAFE_ASSERT_RETURN_ERRN(pData->plugins != nullptr, "Invalid engine internal data");
@@ -940,7 +1072,7 @@ CarlaPlugin* CarlaEngine::getPlugin(const uint id) const noexcept
     return pData->plugins[id].plugin;
 }
 
-CarlaPlugin* CarlaEngine::getPluginUnchecked(const uint id) const noexcept
+CarlaPluginPtr CarlaEngine::getPluginUnchecked(const uint id) const noexcept
 {
     return pData->plugins[id].plugin;
 }
@@ -967,13 +1099,15 @@ const char* CarlaEngine::getUniquePluginName(const char* const name) const
 
     sname.truncate(maxNameSize);
     sname.replace(':', '.'); // ':' is used in JACK1 to split client/port names
+    sname.replace('/', '.'); // '/' is used by us for client name prefix
 
     for (uint i=0; i < pData->curPluginCount; ++i)
     {
-        CARLA_SAFE_ASSERT_BREAK(pData->plugins[i].plugin != nullptr);
+        const CarlaPluginPtr plugin = pData->plugins[i].plugin;
+        CARLA_SAFE_ASSERT_BREAK(plugin.use_count() > 0);
 
         // Check if unique name doesn't exist
-        if (const char* const pluginName = pData->plugins[i].plugin->getName())
+        if (const char* const pluginName = plugin->getName())
         {
             if (sname != pluginName)
                 continue;
@@ -984,7 +1118,7 @@ const char* CarlaEngine::getUniquePluginName(const char* const name) const
             const std::size_t len(sname.length());
 
             // 1 digit, ex: " (2)"
-            if (sname[len-4] == ' ' && sname[len-3] == '(' && sname.isDigit(len-2) && sname[len-1] == ')')
+            if (len > 4 && sname[len-4] == ' ' && sname[len-3] == '(' && sname.isDigit(len-2) && sname[len-1] == ')')
             {
                 const int number = sname[len-2] - '0';
 
@@ -1002,7 +1136,7 @@ const char* CarlaEngine::getUniquePluginName(const char* const name) const
             }
 
             // 2 digits, ex: " (11)"
-            if (sname[len-5] == ' ' && sname[len-4] == '(' && sname.isDigit(len-3) && sname.isDigit(len-2) && sname[len-1] == ')')
+            if (len > 5 && sname[len-5] == ' ' && sname[len-4] == '(' && sname.isDigit(len-3) && sname.isDigit(len-2) && sname[len-1] == ')')
             {
                 char n2 = sname[len-2];
                 char n3 = sname[len-3];
@@ -1055,6 +1189,12 @@ bool CarlaEngine::loadFile(const char* const filename)
 
     // -------------------------------------------------------------------
 
+    if (extension == "dls")
+        return addPlugin(PLUGIN_DLS, filename, baseName, baseName, 0, nullptr);
+
+    if (extension == "gig")
+        return addPlugin(PLUGIN_GIG, filename, baseName, baseName, 0, nullptr);
+
     if (extension == "sf2" || extension == "sf3")
         return addPlugin(PLUGIN_SF2, filename, baseName, baseName, 0, nullptr);
 
@@ -1064,6 +1204,7 @@ bool CarlaEngine::loadFile(const char* const filename)
     // -------------------------------------------------------------------
 
     if (
+        extension == "mp3"  ||
 #ifdef HAVE_SNDFILE
         extension == "aif"  ||
         extension == "aifc" ||
@@ -1077,6 +1218,7 @@ bool CarlaEngine::loadFile(const char* const filename)
         extension == "mat5" ||
         extension == "oga"  ||
         extension == "ogg"  ||
+        extension == "opus" ||
         extension == "paf"  ||
         extension == "pvf"  ||
         extension == "pvf5" ||
@@ -1097,7 +1239,6 @@ bool CarlaEngine::loadFile(const char* const filename)
         extension == "amr" ||
         extension == "ape" ||
         extension == "mp2" ||
-        extension == "mp3" ||
         extension == "mpc" ||
         extension == "wma" ||
 # ifndef HAVE_SNDFILE
@@ -1114,7 +1255,7 @@ bool CarlaEngine::loadFile(const char* const filename)
     {
         if (addPlugin(PLUGIN_INTERNAL, nullptr, baseName, "audiofile", 0, nullptr))
         {
-            if (CarlaPlugin* const plugin = getPlugin(curPluginId))
+            if (const CarlaPluginPtr plugin = getPlugin(curPluginId))
                 plugin->setCustomData(CUSTOM_DATA_TYPE_STRING, "file", filename, true);
             return true;
         }
@@ -1127,7 +1268,7 @@ bool CarlaEngine::loadFile(const char* const filename)
     {
         if (addPlugin(PLUGIN_INTERNAL, nullptr, baseName, "midifile", 0, nullptr))
         {
-            if (CarlaPlugin* const plugin = getPlugin(curPluginId))
+            if (const CarlaPluginPtr plugin = getPlugin(curPluginId))
                 plugin->setCustomData(CUSTOM_DATA_TYPE_STRING, "file", filename, true);
             return true;
         }
@@ -1149,13 +1290,16 @@ bool CarlaEngine::loadFile(const char* const filename)
         else
             nicerName += baseName;
 
-        //nicerName
         if (addPlugin(PLUGIN_INTERNAL, nullptr, nicerName, "zynaddsubfx", 0, nullptr))
         {
             callback(true, true, ENGINE_CALLBACK_UI_STATE_CHANGED, curPluginId, 0, 0, 0, 0.0f, nullptr);
 
-            if (CarlaPlugin* const plugin = getPlugin(curPluginId))
-                plugin->setCustomData(CUSTOM_DATA_TYPE_STRING, (extension == "xmz") ? "CarlaAlternateFile1" : "CarlaAlternateFile2", filename, true);
+            if (const CarlaPluginPtr plugin = getPlugin(curPluginId))
+            {
+                const char* const ext = (extension == "xmz") ? "CarlaAlternateFile1" : "CarlaAlternateFile2";
+                plugin->setCustomData(CUSTOM_DATA_TYPE_STRING, ext, filename, true);
+            }
+
             return true;
         }
         return false;
@@ -1173,12 +1317,12 @@ bool CarlaEngine::loadFile(const char* const filename)
         return addPlugin(PLUGIN_VST2, filename, nullptr, nullptr, 0, nullptr);
 #else
     if (extension == "dll" || extension == "so")
-        return addPlugin(getBinaryTypeFromFile(filename), PLUGIN_VST2, filename, nullptr, nullptr, 0, nullptr, 0x0);
+        return addPlugin(getBinaryTypeFromFile(filename), PLUGIN_VST2, filename, nullptr, nullptr, 0, nullptr);
 #endif
 
-#if defined(USING_JUCE) && (defined(CARLA_OS_MAC) || defined(CARLA_OS_WIN))
+#ifdef USING_JUCE
     if (extension == "vst3")
-        return addPlugin(getBinaryTypeFromFile(filename), PLUGIN_VST3, filename, nullptr, nullptr, 0, nullptr, 0x0);
+        return addPlugin(getBinaryTypeFromFile(filename), PLUGIN_VST3, filename, nullptr, nullptr, 0, nullptr);
 #endif
 
     // -------------------------------------------------------------------
@@ -1194,18 +1338,34 @@ bool CarlaEngine::loadProject(const char* const filename, const bool setAsCurren
     carla_debug("CarlaEngine::loadProject(\"%s\")", filename);
 
     const String jfilename = String(CharPointer_UTF8(filename));
-    File file(jfilename);
+    const File file(jfilename);
     CARLA_SAFE_ASSERT_RETURN_ERR(file.existsAsFile(), "Requested file does not exist or is not a readable file");
 
     if (setAsCurrentProject)
     {
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
-        pData->currentProjectFilename = filename;
+        if (pData->currentProjectFilename != filename)
+        {
+            pData->currentProjectFilename = filename;
+
+            bool found;
+            const size_t r = pData->currentProjectFilename.rfind(CARLA_OS_SEP, &found);
+
+            if (found)
+            {
+                pData->currentProjectFolder = filename;
+                pData->currentProjectFolder[r] = '\0';
+            }
+            else
+            {
+                pData->currentProjectFolder.clear();
+            }
+        }
 #endif
     }
 
     XmlDocument xml(file);
-    return loadProjectInternal(xml);
+    return loadProjectInternal(xml, !setAsCurrentProject);
 }
 
 bool CarlaEngine::saveProject(const char* const filename, const bool setAsCurrentProject)
@@ -1222,7 +1382,23 @@ bool CarlaEngine::saveProject(const char* const filename, const bool setAsCurren
     if (setAsCurrentProject)
     {
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
-        pData->currentProjectFilename = filename;
+        if (pData->currentProjectFilename != filename)
+        {
+            pData->currentProjectFilename = filename;
+
+            bool found;
+            const size_t r = pData->currentProjectFilename.rfind(CARLA_OS_SEP, &found);
+
+            if (found)
+            {
+                pData->currentProjectFolder = filename;
+                pData->currentProjectFolder[r] = '\0';
+            }
+            else
+            {
+                pData->currentProjectFolder.clear();
+            }
+        }
 #endif
     }
 
@@ -1234,6 +1410,12 @@ bool CarlaEngine::saveProject(const char* const filename, const bool setAsCurren
 }
 
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+const char* CarlaEngine::getCurrentProjectFolder() const noexcept
+{
+    return pData->currentProjectFolder.isNotEmpty() ? pData->currentProjectFolder.buffer()
+                                                    : nullptr;
+}
+
 const char* CarlaEngine::getCurrentProjectFilename() const noexcept
 {
     return pData->currentProjectFilename;
@@ -1242,6 +1424,7 @@ const char* CarlaEngine::getCurrentProjectFilename() const noexcept
 void CarlaEngine::clearCurrentProjectFilename() noexcept
 {
     pData->currentProjectFilename.clear();
+    pData->currentProjectFolder.clear();
 }
 #endif
 
@@ -1341,18 +1524,20 @@ float CarlaEngine::getOutputPeak(const uint pluginId, const bool isLeft) const n
 // -----------------------------------------------------------------------
 // Callback
 
-void CarlaEngine::callback(const bool sendHost, const bool sendOsc,
+void CarlaEngine::callback(const bool sendHost, const bool sendOSC,
                            const EngineCallbackOpcode action, const uint pluginId,
                            const int value1, const int value2, const int value3,
                            const float valuef, const char* const valueStr) noexcept
 {
 #ifdef DEBUG
     if (pData->isIdling)
-        carla_stdout("CarlaEngine::callback [while idling] (%i:%s, %i, %i, %i, %i, %f, \"%s\")",
+        carla_stdout("CarlaEngine::callback [while idling] (%s, %s, %i:%s, %i, %i, %i, %i, %f, \"%s\")",
+                     bool2str(sendHost), bool2str(sendOSC),
                      action, EngineCallbackOpcode2Str(action), pluginId, value1, value2, value3,
                      static_cast<double>(valuef), valueStr);
     else if (action != ENGINE_CALLBACK_IDLE && action != ENGINE_CALLBACK_NOTE_ON && action != ENGINE_CALLBACK_NOTE_OFF)
-        carla_debug("CarlaEngine::callback(%i:%s, %i, %i, %i, %i, %f, \"%s\")",
+        carla_debug("CarlaEngine::callback(%s, %s, %i:%s, %i, %i, %i, %i, %f, \"%s\")",
+                    bool2str(sendHost), bool2str(sendOSC),
                     action, EngineCallbackOpcode2Str(action), pluginId, value1, value2, value3,
                     static_cast<double>(valuef), valueStr);
 #endif
@@ -1364,20 +1549,13 @@ void CarlaEngine::callback(const bool sendHost, const bool sendOsc,
 
         try {
             pData->callback(pData->callbackPtr, action, pluginId, value1, value2, value3, valuef, valueStr);
-#if defined(CARLA_OS_LINUX) && defined(__arm__)
-        } catch (__cxxabiv1::__forced_unwind&) {
-            carla_stderr2("Caught forced unwind exception in callback");
-            throw;
-#endif
-        } catch (...) {
-            carla_safe_exception("callback", __FILE__, __LINE__);
-        }
+        } CARLA_SAFE_EXCEPTION("callback")
 
         if (action == ENGINE_CALLBACK_IDLE)
             --pData->isIdling;
     }
 
-    if (sendOsc)
+    if (sendOSC)
     {
 #if defined(HAVE_LIBLO) && ! defined(BUILD_BRIDGE)
         if (pData->osc.isControlRegisteredForTCP())
@@ -1386,7 +1564,7 @@ void CarlaEngine::callback(const bool sendHost, const bool sendOsc,
             {
             case ENGINE_CALLBACK_RELOAD_INFO:
             {
-                CarlaPlugin* const plugin = pData->plugins[pluginId].plugin;
+                CarlaPluginPtr plugin = pData->plugins[pluginId].plugin;
                 CARLA_SAFE_ASSERT_BREAK(plugin != nullptr);
 
                 pData->osc.sendPluginInfo(plugin);
@@ -1395,7 +1573,7 @@ void CarlaEngine::callback(const bool sendHost, const bool sendOsc,
 
             case ENGINE_CALLBACK_RELOAD_PARAMETERS:
             {
-                CarlaPlugin* const plugin = pData->plugins[pluginId].plugin;
+                CarlaPluginPtr plugin = pData->plugins[pluginId].plugin;
                 CARLA_SAFE_ASSERT_BREAK(plugin != nullptr);
 
                 pData->osc.sendPluginPortCount(plugin);
@@ -1410,7 +1588,7 @@ void CarlaEngine::callback(const bool sendHost, const bool sendOsc,
 
             case ENGINE_CALLBACK_RELOAD_PROGRAMS:
             {
-                CarlaPlugin* const plugin = pData->plugins[pluginId].plugin;
+                CarlaPluginPtr plugin = pData->plugins[pluginId].plugin;
                 CARLA_SAFE_ASSERT_BREAK(plugin != nullptr);
 
                 pData->osc.sendPluginProgramCount(plugin);
@@ -1432,7 +1610,7 @@ void CarlaEngine::callback(const bool sendHost, const bool sendOsc,
             case ENGINE_CALLBACK_PLUGIN_ADDED:
             case ENGINE_CALLBACK_RELOAD_ALL:
             {
-                CarlaPlugin* const plugin = pData->plugins[pluginId].plugin;
+                CarlaPluginPtr plugin = pData->plugins[pluginId].plugin;
                 CARLA_SAFE_ASSERT_BREAK(plugin != nullptr);
 
                 pData->osc.sendPluginInfo(plugin);
@@ -1681,6 +1859,11 @@ void CarlaEngine::setOption(const EngineOption option, const int value, const ch
         pData->options.maxParameters = static_cast<uint>(value);
         break;
 
+    case ENGINE_OPTION_RESET_XRUNS:
+        CARLA_SAFE_ASSERT_RETURN(value == 0 || value == 1,);
+        pData->options.resetXruns = (value != 0);
+        break;
+
     case ENGINE_OPTION_UI_BRIDGES_TIMEOUT:
         CARLA_SAFE_ASSERT_RETURN(value >= 0,);
         pData->options.uiBridgesTimeout = static_cast<uint>(value);
@@ -1740,6 +1923,34 @@ void CarlaEngine::setOption(const EngineOption option, const int value, const ch
 #endif
         break;
 
+    case ENGINE_OPTION_FILE_PATH:
+        CARLA_SAFE_ASSERT_RETURN(value > FILE_NONE,);
+        CARLA_SAFE_ASSERT_RETURN(value <= FILE_MIDI,);
+
+        switch (value)
+        {
+        case FILE_AUDIO:
+            if (pData->options.pathAudio != nullptr)
+                delete[] pData->options.pathAudio;
+            if (valueStr != nullptr)
+                pData->options.pathAudio = carla_strdup_safe(valueStr);
+            else
+                pData->options.pathAudio = nullptr;
+            break;
+        case FILE_MIDI:
+            if (pData->options.pathMIDI != nullptr)
+                delete[] pData->options.pathMIDI;
+            if (valueStr != nullptr)
+                pData->options.pathMIDI = carla_strdup_safe(valueStr);
+            else
+                pData->options.pathMIDI = nullptr;
+            break;
+        default:
+            return carla_stderr("CarlaEngine::setOption(%i:%s, %i, \"%s\") - Invalid file type",
+                                option, EngineOption2Str(option), value, valueStr);
+            break;
+        }
+        break;
     case ENGINE_OPTION_PLUGIN_PATH:
         CARLA_SAFE_ASSERT_RETURN(value > PLUGIN_NONE,);
         CARLA_SAFE_ASSERT_RETURN(value <= PLUGIN_SFZ,);
@@ -1803,7 +2014,8 @@ void CarlaEngine::setOption(const EngineOption option, const int value, const ch
                 pData->options.pathSFZ = nullptr;
             break;
         default:
-            return carla_stderr("CarlaEngine::setOption(%i:%s, %i, \"%s\") - Invalid plugin type", option, EngineOption2Str(option), value, valueStr);
+            return carla_stderr("CarlaEngine::setOption(%i:%s, %i, \"%s\") - Invalid plugin type",
+                                option, EngineOption2Str(option), value, valueStr);
             break;
         }
         break;
@@ -1843,6 +2055,14 @@ void CarlaEngine::setOption(const EngineOption option, const int value, const ch
         }
 #endif
     }   break;
+
+    case ENGINE_OPTION_FRONTEND_BACKGROUND_COLOR:
+        pData->options.bgColor = static_cast<uint>(value);
+        break;
+
+    case ENGINE_OPTION_FRONTEND_FOREGROUND_COLOR:
+        pData->options.fgColor = static_cast<uint>(value);
+        break;
 
     case ENGINE_OPTION_FRONTEND_UI_SCALE:
         CARLA_SAFE_ASSERT_RETURN(value > 0,);
@@ -1898,6 +2118,15 @@ void CarlaEngine::setOption(const EngineOption option, const int value, const ch
 
     case ENGINE_OPTION_DEBUG_CONSOLE_OUTPUT:
         break;
+
+    case ENGINE_OPTION_CLIENT_NAME_PREFIX:
+        if (pData->options.clientNamePrefix != nullptr)
+            delete[] pData->options.clientNamePrefix;
+
+        pData->options.clientNamePrefix = valueStr != nullptr && valueStr[0] != '\0'
+                                        ? carla_strdup_safe(valueStr)
+                                        : nullptr;
+        break;
     }
 }
 
@@ -1934,14 +2163,6 @@ const char* CarlaEngine::getOscServerPathUDP() const noexcept
 #endif
 
 // -----------------------------------------------------------------------
-// Helper functions
-
-EngineEvent* CarlaEngine::getInternalEventBuffer(const bool isInput) const noexcept
-{
-    return isInput ? pData->events.in : pData->events.out;
-}
-
-// -----------------------------------------------------------------------
 // Internal stuff
 
 void CarlaEngine::bufferSizeChanged(const uint32_t newBufferSize)
@@ -1960,13 +2181,13 @@ void CarlaEngine::bufferSizeChanged(const uint32_t newBufferSize)
 
     for (uint i=0; i < pData->curPluginCount; ++i)
     {
-        CarlaPlugin* const plugin(pData->plugins[i].plugin);
-
-        if (plugin != nullptr && plugin->isEnabled())
+        if (const CarlaPluginPtr plugin = pData->plugins[i].plugin)
         {
-            plugin->tryLock(true);
-            plugin->bufferSizeChanged(newBufferSize);
-            plugin->unlock();
+            if (plugin->isEnabled() && plugin->tryLock(true))
+            {
+                plugin->bufferSizeChanged(newBufferSize);
+                plugin->unlock();
+            }
         }
     }
 
@@ -1989,13 +2210,13 @@ void CarlaEngine::sampleRateChanged(const double newSampleRate)
 
     for (uint i=0; i < pData->curPluginCount; ++i)
     {
-        CarlaPlugin* const plugin(pData->plugins[i].plugin);
-
-        if (plugin != nullptr && plugin->isEnabled())
+        if (const CarlaPluginPtr plugin = pData->plugins[i].plugin)
         {
-            plugin->tryLock(true);
-            plugin->sampleRateChanged(newSampleRate);
-            plugin->unlock();
+            if (plugin->isEnabled() && plugin->tryLock(true))
+            {
+                plugin->sampleRateChanged(newSampleRate);
+                plugin->unlock();
+            }
         }
     }
 
@@ -2016,10 +2237,9 @@ void CarlaEngine::offlineModeChanged(const bool isOfflineNow)
 
     for (uint i=0; i < pData->curPluginCount; ++i)
     {
-        CarlaPlugin* const plugin(pData->plugins[i].plugin);
-
-        if (plugin != nullptr && plugin->isEnabled())
-            plugin->offlineModeChanged(isOfflineNow);
+        if (const CarlaPluginPtr plugin = pData->plugins[i].plugin)
+            if (plugin->isEnabled())
+                plugin->offlineModeChanged(isOfflineNow);
     }
 }
 
@@ -2038,22 +2258,30 @@ void CarlaEngine::saveProjectInternal(water::MemoryOutputStream& outStream) cons
     // send initial prepareForSave first, giving time for bridges to act
     for (uint i=0; i < pData->curPluginCount; ++i)
     {
-        CarlaPlugin* const plugin(pData->plugins[i].plugin);
-
-        if (plugin != nullptr && plugin->isEnabled())
+        if (const CarlaPluginPtr plugin = pData->plugins[i].plugin)
         {
+            if (plugin->isEnabled())
+            {
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
-            // deactivate bridge client-side ping check, since some plugins block during save
-            if (plugin->getHints() & PLUGIN_IS_BRIDGE)
-                plugin->setCustomData(CUSTOM_DATA_TYPE_STRING, "__CarlaPingOnOff__", "false", false);
+                // deactivate bridge client-side ping check, since some plugins block during save
+                if (plugin->getHints() & PLUGIN_IS_BRIDGE)
+                    plugin->setCustomData(CUSTOM_DATA_TYPE_STRING, "__CarlaPingOnOff__", "false", false);
 #endif
-            plugin->prepareForSave();
+                plugin->prepareForSave(false);
+            }
         }
     }
 
     outStream << "<?xml version='1.0' encoding='UTF-8'?>\n";
     outStream << "<!DOCTYPE CARLA-PROJECT>\n";
-    outStream << "<CARLA-PROJECT VERSION='2.0'>\n";
+    outStream << "<CARLA-PROJECT VERSION='2.2'";
+
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+    if (pData->ignoreClientPrefix)
+        outStream << " IgnoreClientPrefix='true'";
+#endif
+
+    outStream << ">\n";
 
     const bool isPlugin(getType() == kEngineTypePlugin);
     const EngineOptions& options(pData->options);
@@ -2102,22 +2330,23 @@ void CarlaEngine::saveProjectInternal(water::MemoryOutputStream& outStream) cons
 
     for (uint i=0; i < pData->curPluginCount; ++i)
     {
-        CarlaPlugin* const plugin(pData->plugins[i].plugin);
-
-        if (plugin != nullptr && plugin->isEnabled())
+        if (const CarlaPluginPtr plugin = pData->plugins[i].plugin)
         {
-            MemoryOutputStream outPlugin(4096), streamPlugin;
-            plugin->getStateSave(false).dumpToMemoryStream(streamPlugin);
+            if (plugin->isEnabled())
+            {
+                MemoryOutputStream outPlugin(4096), streamPlugin;
+                plugin->getStateSave(false).dumpToMemoryStream(streamPlugin);
 
-            outPlugin << "\n";
+                outPlugin << "\n";
 
-            if (plugin->getRealName(strBuf))
-                outPlugin << " <!-- " << xmlSafeString(strBuf, true) << " -->\n";
+                if (plugin->getRealName(strBuf))
+                    outPlugin << " <!-- " << xmlSafeString(strBuf, true) << " -->\n";
 
-            outPlugin << " <Plugin>\n";
-            outPlugin << streamPlugin;
-            outPlugin << " </Plugin>\n";
-            outStream << outPlugin;
+                outPlugin << " <Plugin>\n";
+                outPlugin << streamPlugin;
+                outPlugin << " </Plugin>\n";
+                outStream << outPlugin;
+            }
         }
     }
 
@@ -2125,76 +2354,153 @@ void CarlaEngine::saveProjectInternal(water::MemoryOutputStream& outStream) cons
     // tell bridges we're done saving
     for (uint i=0; i < pData->curPluginCount; ++i)
     {
-        CarlaPlugin* const plugin(pData->plugins[i].plugin);
-
-        if (plugin != nullptr && plugin->isEnabled() && (plugin->getHints() & PLUGIN_IS_BRIDGE) != 0)
-            plugin->setCustomData(CUSTOM_DATA_TYPE_STRING, "__CarlaPingOnOff__", "true", false);
+        if (const CarlaPluginPtr plugin = pData->plugins[i].plugin)
+            if (plugin->isEnabled() && (plugin->getHints() & PLUGIN_IS_BRIDGE) != 0)
+                plugin->setCustomData(CUSTOM_DATA_TYPE_STRING, "__CarlaPingOnOff__", "true", false);
     }
 
     // save internal connections
     if (pData->options.processMode == ENGINE_PROCESS_MODE_PATCHBAY)
     {
-        if (const char* const* const patchbayConns = getPatchbayConnections(false))
+        uint posCount = 0;
+        const char* const* const patchbayConns = getPatchbayConnections(false);
+        const PatchbayPosition* const patchbayPos = getPatchbayPositions(false, posCount);
+
+        if (patchbayConns != nullptr || patchbayPos != nullptr)
         {
             MemoryOutputStream outPatchbay(2048);
 
             outPatchbay << "\n <Patchbay>\n";
 
-            for (int i=0; patchbayConns[i] != nullptr && patchbayConns[i+1] != nullptr; ++i, ++i )
+            if (patchbayConns != nullptr)
             {
-                const char* const connSource(patchbayConns[i]);
-                const char* const connTarget(patchbayConns[i+1]);
+                for (int i=0; patchbayConns[i] != nullptr && patchbayConns[i+1] != nullptr; ++i, ++i)
+                {
+                    const char* const connSource(patchbayConns[i]);
+                    const char* const connTarget(patchbayConns[i+1]);
 
-                CARLA_SAFE_ASSERT_CONTINUE(connSource != nullptr && connSource[0] != '\0');
-                CARLA_SAFE_ASSERT_CONTINUE(connTarget != nullptr && connTarget[0] != '\0');
+                    CARLA_SAFE_ASSERT_CONTINUE(connSource != nullptr && connSource[0] != '\0');
+                    CARLA_SAFE_ASSERT_CONTINUE(connTarget != nullptr && connTarget[0] != '\0');
 
-                outPatchbay << "  <Connection>\n";
-                outPatchbay << "   <Source>" << xmlSafeString(connSource, true) << "</Source>\n";
-                outPatchbay << "   <Target>" << xmlSafeString(connTarget, true) << "</Target>\n";
-                outPatchbay << "  </Connection>\n";
+                    outPatchbay << "  <Connection>\n";
+                    outPatchbay << "   <Source>" << xmlSafeString(connSource, true) << "</Source>\n";
+                    outPatchbay << "   <Target>" << xmlSafeString(connTarget, true) << "</Target>\n";
+                    outPatchbay << "  </Connection>\n";
+                }
+            }
+
+            if (patchbayPos != nullptr && posCount != 0)
+            {
+                outPatchbay << "  <Positions>\n";
+
+                for (uint i=0; i<posCount; ++i)
+                {
+                    const PatchbayPosition& ppos(patchbayPos[i]);
+
+                    CARLA_SAFE_ASSERT_CONTINUE(ppos.name != nullptr && ppos.name[0] != '\0');
+
+                    outPatchbay << "   <Position x1=\"" << ppos.x1 << "\" y1=\"" << ppos.y1;
+                    if (ppos.x2 != 0 || ppos.y2 != 0)
+                        outPatchbay << "\" x2=\"" << ppos.x2 << "\" y2=\"" << ppos.y2;
+                    if (ppos.pluginId >= 0)
+                        outPatchbay << "\" pluginId=\"" << ppos.pluginId;
+                    outPatchbay << "\">\n";
+                    outPatchbay << "    <Name>" << xmlSafeString(ppos.name, true) << "</Name>\n";
+                    outPatchbay << "   </Position>\n";
+
+                    if (ppos.dealloc)
+                        delete[] ppos.name;
+                }
+
+                outPatchbay << "  </Positions>\n";
             }
 
             outPatchbay << " </Patchbay>\n";
             outStream << outPatchbay;
+
+            delete[] patchbayPos;
         }
+
     }
 
     // if we're running inside some session-manager (and using JACK), let them handle the connections
-    bool saveExternalConnections;
+    bool saveExternalConnections, saveExternalPositions = true;
 
     /**/ if (isPlugin)
-        saveExternalConnections = false;
-    else if (std::strcmp(getCurrentDriverName(), "JACK") != 0)
-        saveExternalConnections = true;
-    else if (std::getenv("CARLA_DONT_MANAGE_CONNECTIONS") != nullptr)
-        saveExternalConnections = false;
-    else if (std::getenv("LADISH_APP_NAME") != nullptr)
-        saveExternalConnections = false;
-    else if (std::getenv("NSM_URL") != nullptr)
-        saveExternalConnections = false;
-    else
-        saveExternalConnections = true;
-
-    if (saveExternalConnections)
     {
-        if (const char* const* const patchbayConns = getPatchbayConnections(true))
+        saveExternalConnections = false;
+        saveExternalPositions = false;
+    }
+    else if (std::strcmp(getCurrentDriverName(), "JACK") != 0)
+    {
+        saveExternalConnections = true;
+    }
+    else if (std::getenv("CARLA_DONT_MANAGE_CONNECTIONS") != nullptr)
+    {
+        saveExternalConnections = false;
+    }
+    else
+    {
+        saveExternalConnections = true;
+    }
+
+    if (saveExternalConnections || saveExternalPositions)
+    {
+        uint posCount = 0;
+        const char* const* const patchbayConns = saveExternalConnections
+                                               ? getPatchbayConnections(true)
+                                               : nullptr;
+        const PatchbayPosition* const patchbayPos = saveExternalPositions
+                                                  ? getPatchbayPositions(true, posCount)
+                                                  : nullptr;
+
+        if (patchbayConns != nullptr || patchbayPos != nullptr)
         {
             MemoryOutputStream outPatchbay(2048);
 
             outPatchbay << "\n <ExternalPatchbay>\n";
 
-            for (int i=0; patchbayConns[i] != nullptr && patchbayConns[i+1] != nullptr; ++i, ++i )
+            if (patchbayConns != nullptr)
             {
-                const char* const connSource(patchbayConns[i]);
-                const char* const connTarget(patchbayConns[i+1]);
+                for (int i=0; patchbayConns[i] != nullptr && patchbayConns[i+1] != nullptr; ++i, ++i )
+                {
+                    const char* const connSource(patchbayConns[i]);
+                    const char* const connTarget(patchbayConns[i+1]);
 
-                CARLA_SAFE_ASSERT_CONTINUE(connSource != nullptr && connSource[0] != '\0');
-                CARLA_SAFE_ASSERT_CONTINUE(connTarget != nullptr && connTarget[0] != '\0');
+                    CARLA_SAFE_ASSERT_CONTINUE(connSource != nullptr && connSource[0] != '\0');
+                    CARLA_SAFE_ASSERT_CONTINUE(connTarget != nullptr && connTarget[0] != '\0');
 
-                outPatchbay << "  <Connection>\n";
-                outPatchbay << "   <Source>" << xmlSafeString(connSource, true) << "</Source>\n";
-                outPatchbay << "   <Target>" << xmlSafeString(connTarget, true) << "</Target>\n";
-                outPatchbay << "  </Connection>\n";
+                    outPatchbay << "  <Connection>\n";
+                    outPatchbay << "   <Source>" << xmlSafeString(connSource, true) << "</Source>\n";
+                    outPatchbay << "   <Target>" << xmlSafeString(connTarget, true) << "</Target>\n";
+                    outPatchbay << "  </Connection>\n";
+                }
+            }
+
+            if (patchbayPos != nullptr && posCount != 0)
+            {
+                outPatchbay << "  <Positions>\n";
+
+                for (uint i=0; i<posCount; ++i)
+                {
+                    const PatchbayPosition& ppos(patchbayPos[i]);
+
+                    CARLA_SAFE_ASSERT_CONTINUE(ppos.name != nullptr && ppos.name[0] != '\0');
+
+                    outPatchbay << "   <Position x1=\"" << ppos.x1 << "\" y1=\"" << ppos.y1;
+                    if (ppos.x2 != 0 || ppos.y2 != 0)
+                        outPatchbay << "\" x2=\"" << ppos.x2 << "\" y2=\"" << ppos.y2;
+                    if (ppos.pluginId >= 0)
+                        outPatchbay << "\" pluginId=\"" << ppos.pluginId;
+                    outPatchbay << "\">\n";
+                    outPatchbay << "    <Name>" << xmlSafeString(ppos.name, true) << "</Name>\n";
+                    outPatchbay << "   </Position>\n";
+
+                    if (ppos.dealloc)
+                        delete[] ppos.name;
+                }
+
+                outPatchbay << "  </Positions>\n";
             }
 
             outPatchbay << " </ExternalPatchbay>\n";
@@ -2270,9 +2576,11 @@ static String findBinaryInCustomPath(const char* const searchPath, const char* c
     return String();
 }
 
-bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
+bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc, const bool alwaysLoadConnections)
 {
-    ScopedPointer<XmlElement> xmlElement(xmlDoc.getDocumentElement(true));
+    carla_debug("CarlaEngine::loadProjectInternal(%p, %s) - START", &xmlDoc, bool2str(alwaysLoadConnections));
+
+    CarlaScopedPointer<XmlElement> xmlElement(xmlDoc.getDocumentElement(true));
     CARLA_SAFE_ASSERT_RETURN_ERR(xmlElement != nullptr, "Failed to parse project file");
 
     const String& xmlType(xmlElement->getTagName());
@@ -2289,14 +2597,23 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
     callback(true, true, ENGINE_CALLBACK_CANCELABLE_ACTION, 0, 1, 0, 0, 0.0f, "Loading project");
 
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
-    const ScopedValueSetter<bool> _svs2(pData->loadingProject, true, false);
+    if (pData->options.clientNamePrefix != nullptr)
+    {
+        if (carla_isEqual(xmlElement->getDoubleAttribute("VERSION", 0.0), 2.0) ||
+            xmlElement->getBoolAttribute("IgnoreClientPrefix", false))
+        {
+            carla_stdout("Loading project in compatibility mode, will ignore client name prefix");
+            pData->ignoreClientPrefix = true;
+            setOption(ENGINE_OPTION_CLIENT_NAME_PREFIX, 0, "");
+        }
+    }
+
+    const CarlaScopedValueSetter<bool> csvs(pData->loadingProject, true, false);
 #endif
 
     // completely load file
     xmlElement = xmlDoc.getDocumentElement(false);
     CARLA_SAFE_ASSERT_RETURN_ERR(xmlElement != nullptr, "Failed to completely parse project file");
-
-    callback(true, false, ENGINE_CALLBACK_IDLE, 0, 0, 0, 0, 0.0f, nullptr);
 
     if (pData->aboutToClose)
         return true;
@@ -2307,7 +2624,13 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
         return false;
     }
 
-    const bool isPlugin(getType() == kEngineTypePlugin);
+    callback(true, false, ENGINE_CALLBACK_IDLE, 0, 0, 0, 0, 0.0f, nullptr);
+
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+    const bool isMultiClient = pData->options.processMode == ENGINE_PROCESS_MODE_MULTIPLE_CLIENTS;
+    const bool isPatchbay    = pData->options.processMode == ENGINE_PROCESS_MODE_PATCHBAY;
+#endif
+    const bool isPlugin = getType() == kEngineTypePlugin;
 
     // load engine settings first of all
     if (XmlElement* const elem = isPreset ? nullptr : xmlElement->getChildByName("EngineSettings"))
@@ -2421,8 +2744,6 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
             setOption(static_cast<EngineOption>(option), value, valueStr);
         }
 
-        callback(true, true, ENGINE_CALLBACK_IDLE, 0, 0, 0, 0, 0.0f, nullptr);
-
         if (pData->aboutToClose)
             return true;
 
@@ -2445,8 +2766,6 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
             if (bpm >= 20.0 && bpm < 400.0)
                 pData->time.setBPM(bpm);
 
-            callback(true, true, ENGINE_CALLBACK_IDLE, 0, 0, 0, 0, 0.0f, nullptr);
-
             if (pData->aboutToClose)
                 return true;
 
@@ -2468,8 +2787,6 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
             CarlaStateSave stateSave;
             stateSave.fillFromXmlElement(isPreset ? xmlElement.get() : elem);
 
-            callback(true, true, ENGINE_CALLBACK_IDLE, 0, 0, 0, 0, 0.0f, nullptr);
-
             if (pData->aboutToClose)
                 return true;
 
@@ -2481,7 +2798,7 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
 
             CARLA_SAFE_ASSERT_CONTINUE(stateSave.type != nullptr);
 
-#ifndef BUILD_BRIDGE
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
             // compatibility code to load projects with GIG files
             // FIXME Remove on 2.1 release
             if (std::strcmp(stateSave.type, "GIG") == 0)
@@ -2490,10 +2807,8 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
                 {
                     const uint pluginId = pData->curPluginCount;
 
-                    if (CarlaPlugin* const plugin = pData->plugins[pluginId].plugin)
+                    if (const CarlaPluginPtr plugin = pData->plugins[pluginId].plugin)
                     {
-                        callback(true, true, ENGINE_CALLBACK_IDLE, 0, 0, 0, 0, 0.0f, nullptr);
-
                         if (pData->aboutToClose)
                             return true;
 
@@ -2512,7 +2827,7 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
                         lsState << "0 0 0 0 1 0 GIG\n";
 
                         plugin->setCustomData(LV2_ATOM__String, "http://linuxsampler.org/schema#state-string", lsState.toRawUTF8(), true);
-                        plugin->restoreLV2State();
+                        plugin->restoreLV2State(true);
 
                         plugin->setDryWet(stateSave.dryWet, true, true);
                         plugin->setVolume(stateSave.volume, true, true);
@@ -2526,7 +2841,7 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
                         ++pData->curPluginCount;
                         callback(true, true, ENGINE_CALLBACK_PLUGIN_ADDED, pluginId, 0, 0, 0, 0.0f, plugin->getName());
 
-                        if (pData->options.processMode == ENGINE_PROCESS_MODE_PATCHBAY)
+                        if (isPatchbay)
                             pData->graph.addPlugin(plugin);
                     }
                     else
@@ -2539,8 +2854,63 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
                     carla_stderr2("Failed to load a linuxsampler LV2 plugin, GIG file won't be loaded");
                 }
 
+                callback(true, true, ENGINE_CALLBACK_IDLE, 0, 0, 0, 0, 0.0f, nullptr);
                 continue;
             }
+# ifdef SFZ_FILES_USING_SFIZZ
+            if (std::strcmp(stateSave.type, "SFZ") == 0)
+            {
+                if (addPlugin(PLUGIN_LV2, "", stateSave.name, "http://sfztools.github.io/sfizz", 0, nullptr))
+                {
+                    const uint pluginId = pData->curPluginCount;
+
+                    if (const CarlaPluginPtr plugin = pData->plugins[pluginId].plugin)
+                    {
+                        if (pData->aboutToClose)
+                            return true;
+
+                        if (pData->actionCanceled)
+                        {
+                            setLastError("Project load canceled");
+                            return false;
+                        }
+
+                        plugin->setCustomData(LV2_ATOM__Path,
+                                              "http://sfztools.github.io/sfizz:sfzfile",
+                                              stateSave.binary,
+                                              false);
+
+                        plugin->restoreLV2State(true);
+
+                        plugin->setDryWet(stateSave.dryWet, true, true);
+                        plugin->setVolume(stateSave.volume, true, true);
+                        plugin->setBalanceLeft(stateSave.balanceLeft, true, true);
+                        plugin->setBalanceRight(stateSave.balanceRight, true, true);
+                        plugin->setPanning(stateSave.panning, true, true);
+                        plugin->setCtrlChannel(stateSave.ctrlChannel, true, true);
+                        plugin->setActive(stateSave.active, true, true);
+                        plugin->setEnabled(true);
+
+                        ++pData->curPluginCount;
+                        callback(true, true, ENGINE_CALLBACK_PLUGIN_ADDED, pluginId, 0, 0, 0, 0.0f, plugin->getName());
+
+                        if (isPatchbay)
+                            pData->graph.addPlugin(plugin);
+                    }
+                    else
+                    {
+                        carla_stderr2("Failed to get new plugin, state will not be restored correctly\n");
+                    }
+                }
+                else
+                {
+                    carla_stderr2("Failed to load a sfizz LV2 plugin, SFZ file won't be loaded");
+                }
+
+                callback(true, true, ENGINE_CALLBACK_IDLE, 0, 0, 0, 0, 0.0f, nullptr);
+                continue;
+            }
+# endif
 #endif
 
             const void* extraStuff    = nullptr;
@@ -2609,6 +2979,8 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
                         {
                             carla_stderr("Damn, we failed... :(");
                         }
+
+                        callback(true, true, ENGINE_CALLBACK_IDLE, 0, 0, 0, 0, 0.0f, nullptr);
                     }
                 }
                 break;
@@ -2624,6 +2996,7 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
             case PLUGIN_DSSI:
             case PLUGIN_LV2:
             case PLUGIN_VST2:
+            case PLUGIN_VST3:
                 btype = getBinaryTypeFromFile(stateSave.binary);
                 break;
             default:
@@ -2640,10 +3013,8 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
                 const uint pluginId = 0;
 #endif
 
-                if (CarlaPlugin* const plugin = pData->plugins[pluginId].plugin)
+                if (const CarlaPluginPtr plugin = pData->plugins[pluginId].plugin)
                 {
-                    callback(true, true, ENGINE_CALLBACK_IDLE, 0, 0, 0, 0, 0.0f, nullptr);
-
                     if (pData->aboutToClose)
                         return true;
 
@@ -2669,7 +3040,7 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
                     callback(true, true, ENGINE_CALLBACK_PLUGIN_ADDED, pluginId, 0, 0, 0, 0.0f, plugin->getName());
 
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
-                    if (pData->options.processMode == ENGINE_PROCESS_MODE_PATCHBAY)
+                    if (isPatchbay)
                         pData->graph.addPlugin(plugin);
 #endif
                 }
@@ -2682,6 +3053,9 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
             {
                 carla_stderr2("Failed to load a plugin '%s', error was:\n%s", stateSave.name, getLastError());
             }
+
+            if (! isPreset)
+                callback(true, true, ENGINE_CALLBACK_IDLE, 0, 0, 0, 0, 0.0f, nullptr);
         }
 
         if (isPreset)
@@ -2696,13 +3070,10 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
     // tell bridges we're done loading
     for (uint i=0; i < pData->curPluginCount; ++i)
     {
-        CarlaPlugin* const plugin(pData->plugins[i].plugin);
-
-        if (plugin != nullptr && plugin->isEnabled() && (plugin->getHints() & PLUGIN_IS_BRIDGE) != 0)
-            plugin->setCustomData(CUSTOM_DATA_TYPE_STRING, "__CarlaPingOnOff__", "true", false);
+        if (const CarlaPluginPtr plugin = pData->plugins[i].plugin)
+            if (plugin->isEnabled() && (plugin->getHints() & PLUGIN_IS_BRIDGE) != 0)
+                plugin->setCustomData(CUSTOM_DATA_TYPE_STRING, "__CarlaPingOnOff__", "true", false);
     }
-
-    callback(true, true, ENGINE_CALLBACK_IDLE, 0, 0, 0, 0, 0.0f, nullptr);
 
     if (pData->aboutToClose)
         return true;
@@ -2713,6 +3084,134 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
         return false;
     }
 
+    // now we handle positions
+    bool loadingAsExternal;
+    std::map<water::String, water::String> mapGroupNamesInternal, mapGroupNamesExternal;
+
+    bool hasInternalPositions = false;
+
+    if (XmlElement* const elemPatchbay = xmlElement->getChildByName("Patchbay"))
+    {
+        hasInternalPositions = true;
+
+        if (XmlElement* const elemPositions = elemPatchbay->getChildByName("Positions"))
+        {
+            String name;
+            PatchbayPosition ppos = { nullptr, -1, 0, 0, 0, 0, false };
+
+            for (XmlElement* patchElem = elemPositions->getFirstChildElement(); patchElem != nullptr; patchElem = patchElem->getNextElement())
+            {
+                const String& patchTag(patchElem->getTagName());
+
+                if (patchTag != "Position")
+                    continue;
+
+                XmlElement* const patchName = patchElem->getChildByName("Name");
+                CARLA_SAFE_ASSERT_CONTINUE(patchName != nullptr);
+
+                const String nameText(patchName->getAllSubText().trim());
+                name = xmlSafeString(nameText, false);
+
+                ppos.name = name.toRawUTF8();
+                ppos.x1 = patchElem->getIntAttribute("x1");
+                ppos.y1 = patchElem->getIntAttribute("y1");
+                ppos.x2 = patchElem->getIntAttribute("x2");
+                ppos.y2 = patchElem->getIntAttribute("y2");
+                ppos.pluginId = patchElem->getIntAttribute("pluginId", -1);
+                ppos.dealloc = false;
+
+                loadingAsExternal = ppos.pluginId >= 0 && isMultiClient;
+
+                if (name.isNotEmpty() && restorePatchbayGroupPosition(loadingAsExternal, ppos))
+                {
+                    if (name != ppos.name)
+                    {
+                        carla_stdout("Converted client name '%s' to '%s' for this session",
+                                     name.toRawUTF8(), ppos.name);
+                        if (loadingAsExternal)
+                            mapGroupNamesExternal[name] = ppos.name;
+                        else
+                            mapGroupNamesInternal[name] = ppos.name;
+                    }
+
+                    if (ppos.dealloc)
+                        std::free(const_cast<char*>(ppos.name));
+                }
+            }
+
+            if (pData->aboutToClose)
+                return true;
+
+            if (pData->actionCanceled)
+            {
+                setLastError("Project load canceled");
+                return false;
+            }
+        }
+    }
+
+    if (XmlElement* const elemPatchbay = xmlElement->getChildByName("ExternalPatchbay"))
+    {
+        if (XmlElement* const elemPositions = elemPatchbay->getChildByName("Positions"))
+        {
+            String name;
+            PatchbayPosition ppos = { nullptr, -1, 0, 0, 0, 0, false };
+
+            for (XmlElement* patchElem = elemPositions->getFirstChildElement(); patchElem != nullptr; patchElem = patchElem->getNextElement())
+            {
+                const String& patchTag(patchElem->getTagName());
+
+                if (patchTag != "Position")
+                    continue;
+
+                XmlElement* const patchName = patchElem->getChildByName("Name");
+                CARLA_SAFE_ASSERT_CONTINUE(patchName != nullptr);
+
+                const String nameText(patchName->getAllSubText().trim());
+                name = xmlSafeString(nameText, false);
+
+                ppos.name = name.toRawUTF8();
+                ppos.x1 = patchElem->getIntAttribute("x1");
+                ppos.y1 = patchElem->getIntAttribute("y1");
+                ppos.x2 = patchElem->getIntAttribute("x2");
+                ppos.y2 = patchElem->getIntAttribute("y2");
+                ppos.pluginId = patchElem->getIntAttribute("pluginId", -1);
+                ppos.dealloc = false;
+
+                loadingAsExternal = ppos.pluginId < 0 || hasInternalPositions || !isPatchbay;
+
+                carla_debug("loadingAsExternal: %i because %i %i %i",
+                            loadingAsExternal, ppos.pluginId < 0, hasInternalPositions, !isPatchbay);
+
+                if (name.isNotEmpty() && restorePatchbayGroupPosition(loadingAsExternal, ppos))
+                {
+                    if (name != ppos.name)
+                    {
+                        carla_stdout("Converted client name '%s' to '%s' for this session",
+                                     name.toRawUTF8(), ppos.name);
+
+                        if (loadingAsExternal)
+                            mapGroupNamesExternal[name] = ppos.name;
+                        else
+                            mapGroupNamesInternal[name] = ppos.name;
+                    }
+
+                    if (ppos.dealloc)
+                        std::free(const_cast<char*>(ppos.name));
+                }
+            }
+
+            if (pData->aboutToClose)
+                return true;
+
+            if (pData->actionCanceled)
+            {
+                setLastError("Project load canceled");
+                return false;
+            }
+        }
+    }
+
     bool hasInternalConnections = false;
 
     // and now we handle connections (internal)
@@ -2720,9 +3219,9 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
     {
         hasInternalConnections = true;
 
-        if (pData->options.processMode == ENGINE_PROCESS_MODE_PATCHBAY)
+        if (isPatchbay)
         {
-            CarlaString sourcePort, targetPort;
+            water::String sourcePort, targetPort;
 
             for (XmlElement* patchElem = elem->getFirstChildElement(); patchElem != nullptr; patchElem = patchElem->getNextElement())
             {
@@ -2740,16 +3239,24 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
                     const String  text(connElem->getAllSubText().trim());
 
                     /**/ if (tag == "Source")
-                        sourcePort = xmlSafeString(text, false).toRawUTF8();
+                        sourcePort = xmlSafeString(text, false);
                     else if (tag == "Target")
-                        targetPort = xmlSafeString(text, false).toRawUTF8();
+                        targetPort = xmlSafeString(text, false);
                 }
 
                 if (sourcePort.isNotEmpty() && targetPort.isNotEmpty())
-                    restorePatchbayConnection(false, sourcePort, targetPort);
-            }
+                {
+                    std::map<water::String, water::String>& map(mapGroupNamesInternal);
+                    std::map<water::String, water::String>::iterator it;
 
-            callback(true, true, ENGINE_CALLBACK_IDLE, 0, 0, 0, 0, 0.0f, nullptr);
+                    if ((it = map.find(sourcePort.upToFirstOccurrenceOf(":", false, false))) != map.end())
+                        sourcePort = it->second + sourcePort.fromFirstOccurrenceOf(":", true, false);
+                    if ((it = map.find(targetPort.upToFirstOccurrenceOf(":", false, false))) != map.end())
+                        targetPort = it->second + targetPort.fromFirstOccurrenceOf(":", true, false);
+
+                    restorePatchbayConnection(false, sourcePort.toRawUTF8(), targetPort.toRawUTF8());
+                }
+            }
 
             if (pData->aboutToClose)
                 return true;
@@ -2765,22 +3272,30 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
     // if we're running inside some session-manager (and using JACK), let them handle the external connections
     bool loadExternalConnections;
 
-    /**/ if (std::strcmp(getCurrentDriverName(), "JACK") != 0)
+    if (alwaysLoadConnections)
+    {
         loadExternalConnections = true;
-    else if (std::getenv("CARLA_DONT_MANAGE_CONNECTIONS") != nullptr)
-        loadExternalConnections = false;
-    else if (std::getenv("LADISH_APP_NAME") != nullptr)
-        loadExternalConnections = false;
-    else if (std::getenv("NSM_URL") != nullptr)
-        loadExternalConnections = false;
+    }
     else
-        loadExternalConnections = true;
+    {
+        /**/ if (std::strcmp(getCurrentDriverName(), "JACK") != 0)
+            loadExternalConnections = true;
+        else if (std::getenv("CARLA_DONT_MANAGE_CONNECTIONS") != nullptr)
+            loadExternalConnections = false;
+        else if (std::getenv("LADISH_APP_NAME") != nullptr)
+            loadExternalConnections = false;
+        else if (std::getenv("NSM_URL") != nullptr)
+            loadExternalConnections = false;
+        else
+            loadExternalConnections = true;
+    }
 
     // plus external connections too
     if (loadExternalConnections)
     {
-        const bool loadingAsExternal = pData->options.processMode == ENGINE_PROCESS_MODE_PATCHBAY &&
-                                       hasInternalConnections;
+        bool isExternal;
+        loadingAsExternal = hasInternalConnections &&
+            (pData->options.processMode == ENGINE_PROCESS_MODE_CONTINUOUS_RACK || isPatchbay);
 
         for (XmlElement* elem = xmlElement->getFirstChildElement(); elem != nullptr; elem = elem->getNextElement())
         {
@@ -2789,16 +3304,24 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
             // check if we want to load patchbay-mode connections into an external (multi-client) graph
             if (tagName == "Patchbay")
             {
-                if (pData->options.processMode == ENGINE_PROCESS_MODE_PATCHBAY)
+                if (isPatchbay)
                     continue;
+                isExternal = false;
+                loadingAsExternal = true;
             }
             // or load external patchbay connections
-            else if (tagName != "ExternalPatchbay")
+            else if (tagName == "ExternalPatchbay")
+            {
+                if (! isPatchbay)
+                    loadingAsExternal = true;
+                isExternal = true;
+            }
+            else
             {
                 continue;
             }
 
-            CarlaString sourcePort, targetPort;
+            water::String sourcePort, targetPort;
 
             for (XmlElement* patchElem = elem->getFirstChildElement(); patchElem != nullptr; patchElem = patchElem->getNextElement())
             {
@@ -2816,22 +3339,126 @@ bool CarlaEngine::loadProjectInternal(water::XmlDocument& xmlDoc)
                     const String  text(connElem->getAllSubText().trim());
 
                     /**/ if (tag == "Source")
-                        sourcePort = xmlSafeString(text, false).toRawUTF8();
+                        sourcePort = xmlSafeString(text, false);
                     else if (tag == "Target")
-                        targetPort = xmlSafeString(text, false).toRawUTF8();
+                        targetPort = xmlSafeString(text, false);
                 }
 
                 if (sourcePort.isNotEmpty() && targetPort.isNotEmpty())
-                    restorePatchbayConnection(loadingAsExternal, sourcePort, targetPort);
+                {
+                    std::map<water::String, water::String>& map(loadingAsExternal ? mapGroupNamesExternal
+                                                                                  : mapGroupNamesInternal);
+                    std::map<water::String, water::String>::iterator it;
+
+                    if (isExternal && isPatchbay && !loadingAsExternal && sourcePort.startsWith("system:capture_"))
+                    {
+                        water::String internalPort = sourcePort.trimCharactersAtStart("system:capture_");
+
+                        if (pData->graph.getNumAudioOuts() < 3)
+                        {
+                            /**/ if (internalPort == "1")
+                                internalPort = "Audio Input:Left";
+                            else if (internalPort == "2")
+                                internalPort = "Audio Input:Right";
+                            else if (internalPort == "3")
+                                internalPort = "Audio Input:Sidechain";
+                            else
+                                continue;
+                        }
+                        else
+                        {
+                            internalPort = "Audio Input:Capture " + internalPort;
+                        }
+
+                        carla_stdout("Converted port name '%s' to '%s' for this session",
+                                     sourcePort.toRawUTF8(), internalPort.toRawUTF8());
+                        sourcePort = internalPort;
+                    }
+                    else if (!isExternal && isMultiClient && sourcePort.startsWith("Audio Input:"))
+                    {
+                        water::String externalPort = sourcePort.trimCharactersAtStart("Audio Input:");
+
+                        /**/ if (externalPort == "Left")
+                            externalPort = "system:capture_1";
+                        else if (externalPort == "Right")
+                            externalPort = "system:capture_2";
+                        else if (externalPort == "Sidechain")
+                            externalPort = "system:capture_3";
+                        else
+                            externalPort = "system:capture_ " + externalPort.trimCharactersAtStart("Capture ");
+
+                        carla_stdout("Converted port name '%s' to '%s' for this session",
+                                     sourcePort.toRawUTF8(), externalPort.toRawUTF8());
+                        sourcePort = externalPort;
+                    }
+                    else if ((it = map.find(sourcePort.upToFirstOccurrenceOf(":", false, false))) != map.end())
+                    {
+                        sourcePort = it->second + sourcePort.fromFirstOccurrenceOf(":", true, false);
+                    }
+
+                    if (isExternal && isPatchbay && !loadingAsExternal && targetPort.startsWith("system:playback_"))
+                    {
+                        water::String internalPort = targetPort.trimCharactersAtStart("system:playback_");
+
+                        if (pData->graph.getNumAudioOuts() < 3)
+                        {
+                            /**/ if (internalPort == "1")
+                                internalPort = "Audio Output:Left";
+                            else if (internalPort == "2")
+                                internalPort = "Audio Output:Right";
+                            else
+                                continue;
+                        }
+                        else
+                        {
+                            internalPort = "Audio Input:Playback " + internalPort;
+                        }
+
+                        carla_stdout("Converted port name '%s' to '%s' for this session",
+                                     targetPort.toRawUTF8(), internalPort.toRawUTF8());
+                        targetPort = internalPort;
+                    }
+                    else if (!isExternal && isMultiClient && targetPort.startsWith("Audio Output:"))
+                    {
+                        water::String externalPort = targetPort.trimCharactersAtStart("Audio Output:");
+
+                        /**/ if (externalPort == "Left")
+                            externalPort = "system:playback_1";
+                        else if (externalPort == "Right")
+                            externalPort = "system:playback_2";
+                        else
+                            externalPort = "system:playback_ " + externalPort.trimCharactersAtStart("Playback ");
+
+                        carla_stdout("Converted port name '%s' to '%s' for this session",
+                                     targetPort.toRawUTF8(), externalPort.toRawUTF8());
+                        targetPort = externalPort;
+                    }
+                    else if ((it = map.find(targetPort.upToFirstOccurrenceOf(":", false, false))) != map.end())
+                    {
+                        targetPort = it->second + targetPort.fromFirstOccurrenceOf(":", true, false);
+                    }
+
+                    restorePatchbayConnection(loadingAsExternal, sourcePort.toRawUTF8(), targetPort.toRawUTF8());
+                }
             }
             break;
         }
     }
 #endif
 
+    if (pData->options.resetXruns)
+        clearXruns();
+
     callback(true, true, ENGINE_CALLBACK_PROJECT_LOAD_FINISHED, 0, 0, 0, 0, 0.0f, nullptr);
     callback(true, true, ENGINE_CALLBACK_CANCELABLE_ACTION, 0, 0, 0, 0, 0.0f, "Loading project");
+
+    carla_debug("CarlaEngine::loadProjectInternal(%p, %s) - END", &xmlDoc, bool2str(alwaysLoadConnections));
     return true;
+
+#ifdef BUILD_BRIDGE_ALTERNATIVE_ARCH
+    // unused
+    (void)alwaysLoadConnections;
+#endif
 }
 
 // -----------------------------------------------------------------------

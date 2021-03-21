@@ -1,6 +1,6 @@
 /*
  * Carla Plugin Host
- * Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -17,8 +17,6 @@
 
 #ifndef CARLA_JUCE_APPCONFIG_H_INCLUDED
 #define CARLA_JUCE_APPCONFIG_H_INCLUDED
-
-#define JUCE_APP_CONFIG_HEADER "AppConfig.h"
 
 // --------------------------------------------------------------------------------------------------------------------
 // Check OS
@@ -61,16 +59,16 @@
 #define JUCE_MODULE_AVAILABLE_juce_video                 0
 
 // conditional
-#ifdef APPCONFIG_OS_MAC
-# define JUCE_MODULE_AVAILABLE_juce_gui_extra            1
-#else
-# define JUCE_MODULE_AVAILABLE_juce_gui_extra            0
-#endif
-
-#ifndef BUILD_BRIDGE
+#if defined(USING_JUCE_AUDIO_DEVICES) && !defined(BUILD_BRIDGE)
 # define JUCE_MODULE_AVAILABLE_juce_audio_devices        1
 #else
 # define JUCE_MODULE_AVAILABLE_juce_audio_devices        0
+#endif
+
+#ifdef USING_JUCE_GUI_EXTRA
+# define JUCE_MODULE_AVAILABLE_juce_gui_extra            1
+#else
+# define JUCE_MODULE_AVAILABLE_juce_gui_extra            0
 #endif
 
 // misc
@@ -217,7 +215,11 @@
 
     @see VSTPluginFormat, AudioPluginFormat, AudioPluginFormatManager, JUCE_PLUGINHOST_AU
 */
-#define JUCE_PLUGINHOST_VST 1
+#if defined(APPCONFIG_OS_MAC) || defined(APPCONFIG_OS_WIN)
+# define JUCE_PLUGINHOST_VST 1
+#else
+# define JUCE_PLUGINHOST_VST 0
+#endif
 
 /** Config: JUCE_PLUGINHOST_VST3
     Enables the VST3 audio plugin hosting classes. This requires the Steinberg VST3 SDK to be
@@ -225,7 +227,7 @@
 
     @see VSTPluginFormat, VST3PluginFormat, AudioPluginFormat, AudioPluginFormatManager, JUCE_PLUGINHOST_VST, JUCE_PLUGINHOST_AU
 */
-#if defined(APPCONFIG_OS_MAC) || defined(APPCONFIG_OS_WIN)
+#if defined(APPCONFIG_OS_LINUX) || defined(APPCONFIG_OS_MAC) || defined(APPCONFIG_OS_WIN)
 # define JUCE_PLUGINHOST_VST3 1
 #else
 # define JUCE_PLUGINHOST_VST3 0

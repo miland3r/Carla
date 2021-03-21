@@ -2,17 +2,16 @@
   ==============================================================================
 
    This file is part of the JUCE library.
-   Copyright (c) 2017 - ROLI Ltd.
+   Copyright (c) 2020 - Raw Material Software Limited
 
    JUCE is an open source library subject to commercial or open-source
    licensing.
 
-   By using JUCE, you agree to the terms of both the JUCE 5 End-User License
-   Agreement and JUCE 5 Privacy Policy (both updated and effective as of the
-   27th April 2017).
+   By using JUCE, you agree to the terms of both the JUCE 6 End-User License
+   Agreement and JUCE Privacy Policy (both effective as of the 16th June 2020).
 
-   End User License Agreement: www.juce.com/juce-5-licence
-   Privacy Policy: www.juce.com/juce-5-privacy-policy
+   End User License Agreement: www.juce.com/juce-6-licence
+   Privacy Policy: www.juce.com/juce-privacy-policy
 
    Or: You may also use this code under the terms of the GPL v3 (see
    www.gnu.org/licenses).
@@ -45,11 +44,11 @@ ResizableWindow::~ResizableWindow()
     // Don't delete or remove the resizer components yourself! They're managed by the
     // ResizableWindow, and you should leave them alone! You may have deleted them
     // accidentally by careless use of deleteAllChildren()..?
-    jassert (resizableCorner == nullptr || getIndexOfChildComponent (resizableCorner) >= 0);
-    jassert (resizableBorder == nullptr || getIndexOfChildComponent (resizableBorder) >= 0);
+    jassert (resizableCorner == nullptr || getIndexOfChildComponent (resizableCorner.get()) >= 0);
+    jassert (resizableBorder == nullptr || getIndexOfChildComponent (resizableBorder.get()) >= 0);
 
-    resizableCorner = nullptr;
-    resizableBorder = nullptr;
+    resizableCorner.reset();
+    resizableBorder.reset();
     clearContentComponent();
 
     // have you been adding your own components directly to this window..? tut tut tut.
@@ -92,8 +91,8 @@ void ResizableWindow::clearContentComponent()
 }
 
 void ResizableWindow::setContent (Component* newContentComponent,
-                                  const bool takeOwnership,
-                                  const bool resizeToFitWhenContentChangesSize)
+                                  bool takeOwnership,
+                                  bool resizeToFitWhenContentChangesSize)
 {
     if (newContentComponent != contentComponent)
     {
@@ -250,26 +249,30 @@ void ResizableWindow::setResizable (const bool shouldBeResizable,
     {
         if (useBottomRightCornerResizer)
         {
-            resizableBorder = nullptr;
+            resizableBorder.reset();
 
             if (resizableCorner == nullptr)
             {
-                Component::addChildComponent (resizableCorner = new ResizableCornerComponent (this, constrainer));
+                resizableCorner.reset (new ResizableCornerComponent (this, constrainer));
+                Component::addChildComponent (resizableCorner.get());
                 resizableCorner->setAlwaysOnTop (true);
             }
         }
         else
         {
-            resizableCorner = nullptr;
+            resizableCorner.reset();
 
             if (resizableBorder == nullptr)
-                Component::addChildComponent (resizableBorder = new ResizableBorderComponent (this, constrainer));
+            {
+                resizableBorder.reset (new ResizableBorderComponent (this, constrainer));
+                Component::addChildComponent (resizableBorder.get());
+            }
         }
     }
     else
     {
-        resizableCorner = nullptr;
-        resizableBorder = nullptr;
+        resizableCorner.reset();
+        resizableBorder.reset();
     }
 
     if (isUsingNativeTitleBar())
@@ -316,8 +319,8 @@ void ResizableWindow::setConstrainer (ComponentBoundsConstrainer* newConstrainer
         bool useBottomRightCornerResizer = resizableCorner != nullptr;
         bool shouldBeResizable = useBottomRightCornerResizer || resizableBorder != nullptr;
 
-        resizableCorner = nullptr;
-        resizableBorder = nullptr;
+        resizableCorner.reset();
+        resizableBorder.reset();
 
         setResizable (shouldBeResizable, useBottomRightCornerResizer);
         updatePeerConstrainer();
@@ -538,7 +541,7 @@ bool ResizableWindow::restoreWindowStateFromString (const String& s)
 
         if (onScreenArea.getWidth() * onScreenArea.getHeight() < 32 * 32)
         {
-            auto screen = desktop.getDisplays().getDisplayContaining (newPos.getCentre()).userArea;
+            auto screen = desktop.getDisplays().findDisplayForRect (newPos).userArea;
 
             newPos.setSize (jmin (newPos.getWidth(),  screen.getWidth()),
                             jmin (newPos.getHeight(), screen.getHeight()));

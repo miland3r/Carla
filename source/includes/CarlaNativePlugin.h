@@ -1,6 +1,6 @@
 ﻿/*
  * Carla Plugin Host
- * Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -18,56 +18,59 @@
 #ifndef CARLA_NATIVE_PLUGIN_H_INCLUDED
 #define CARLA_NATIVE_PLUGIN_H_INCLUDED
 
-#include "CarlaBackend.h"
 #include "CarlaNative.h"
-
-#ifndef CARLA_HOST_H_INCLUDED
-/*!
- * Get the absolute filename of this carla library.
- */
-CARLA_EXPORT const char* carla_get_library_filename();
-
-/*!
- * Get the folder where this carla library resides.
- */
-CARLA_EXPORT const char* carla_get_library_folder();
-#endif
+#include "CarlaHost.h"
+#include "CarlaUtils.h"
 
 /*!
  * Get the native plugin descriptor for the carla-rack plugin.
  */
-CARLA_EXPORT const NativePluginDescriptor* carla_get_native_rack_plugin();
+CARLA_EXPORT const NativePluginDescriptor* carla_get_native_rack_plugin(void);
 
 /*!
  * Get the native plugin descriptor for the carla-patchbay plugin.
  */
-CARLA_EXPORT const NativePluginDescriptor* carla_get_native_patchbay_plugin();
+CARLA_EXPORT const NativePluginDescriptor* carla_get_native_patchbay_plugin(void);
 
 /*!
  * Get the native plugin descriptor for the carla-patchbay16 plugin.
  */
-CARLA_EXPORT const NativePluginDescriptor* carla_get_native_patchbay16_plugin();
+CARLA_EXPORT const NativePluginDescriptor* carla_get_native_patchbay16_plugin(void);
 
 /*!
  * Get the native plugin descriptor for the carla-patchbay32 plugin.
  */
-CARLA_EXPORT const NativePluginDescriptor* carla_get_native_patchbay32_plugin();
+CARLA_EXPORT const NativePluginDescriptor* carla_get_native_patchbay32_plugin(void);
 
 /*!
  * Get the native plugin descriptor for the carla-patchbay64 plugin.
  */
-CARLA_EXPORT const NativePluginDescriptor* carla_get_native_patchbay64_plugin();
+CARLA_EXPORT const NativePluginDescriptor* carla_get_native_patchbay64_plugin(void);
 
 /*!
  * Get the native plugin descriptor for the carla-patchbay-cv plugin.
  */
-CARLA_EXPORT const NativePluginDescriptor* carla_get_native_patchbay_cv_plugin();
+CARLA_EXPORT const NativePluginDescriptor* carla_get_native_patchbay_cv_plugin(void);
+
+/*!
+ * Create a CarlaHostHandle suitable for CarlaHost API calls.
+ * Returned value must be freed by the caller when no longer needed.
+ */
+CARLA_EXPORT CarlaHostHandle carla_create_native_plugin_host_handle(const NativePluginDescriptor* desc,
+                                                                    NativePluginHandle handle);
+
+/*!
+ * Free memory created during carla_create_native_plugin_host_handle.
+ */
+CARLA_EXPORT void carla_host_handle_free(CarlaHostHandle handle);
 
 #ifdef __cplusplus
 /*!
  * Get the internal CarlaEngine instance.
+ * @deprecated Please use carla_create_native_plugin_host_handle instead
  */
-CARLA_EXPORT CarlaBackend::CarlaEngine* carla_get_native_plugin_engine(const NativePluginDescriptor* desc, NativePluginHandle handle);
+CARLA_EXPORT CarlaBackend::CarlaEngine* carla_get_native_plugin_engine(const NativePluginDescriptor* desc,
+                                                                       NativePluginHandle handle);
 #endif
 
 #endif /* CARLA_NATIVE_PLUGIN_H_INCLUDED */

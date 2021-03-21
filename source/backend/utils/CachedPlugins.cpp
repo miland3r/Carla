@@ -1,6 +1,6 @@
 /*
  * Carla Plugin Host
- * Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -32,14 +32,9 @@
 
 namespace CB = CarlaBackend;
 
-using water::Array;
-using water::File;
-using water::String;
-using water::StringArray;
-
 // -------------------------------------------------------------------------------------------------------------------
 
-static const char* const gNullCharPtr = "";
+static const char* const gCachedPluginsNullCharPtr = "";
 
 static bool isCachedPluginType(const CB::PluginType ptype)
 {
@@ -69,29 +64,31 @@ _CarlaCachedPluginInfo::_CarlaCachedPluginInfo() noexcept
       midiOuts(0),
       parameterIns(0),
       parameterOuts(0),
-      name(gNullCharPtr),
-      label(gNullCharPtr),
-      maker(gNullCharPtr),
-      copyright(gNullCharPtr) {}
+      name(gCachedPluginsNullCharPtr),
+      label(gCachedPluginsNullCharPtr),
+      maker(gCachedPluginsNullCharPtr),
+      copyright(gCachedPluginsNullCharPtr) {}
 
 // -------------------------------------------------------------------------------------------------------------------
 
-static Array<File> gSFZs;
+static water::Array<water::File> gSFZs;
 
 static void findSFZs(const char* const sfzPaths)
 {
+    gSFZs.clearQuick();
+
     CARLA_SAFE_ASSERT_RETURN(sfzPaths != nullptr,);
 
     if (sfzPaths[0] == '\0')
         return;
 
-    const StringArray splitPaths(StringArray::fromTokens(sfzPaths, CARLA_OS_SPLIT_STR, ""));
+    const water::StringArray splitPaths(water::StringArray::fromTokens(sfzPaths, CARLA_OS_SPLIT_STR, ""));
 
-    for (String *it = splitPaths.begin(), *end = splitPaths.end(); it != end; ++it)
+    for (water::String *it = splitPaths.begin(), *end = splitPaths.end(); it != end; ++it)
     {
-        Array<File> results;
+        water::Array<water::File> results;
 
-        if (File(*it).findChildFiles(results, File::findFiles|File::ignoreHiddenFiles, true, "*.sfz") > 0)
+        if (water::File(*it).findChildFiles(results, water::File::findFiles|water::File::ignoreHiddenFiles, true, "*.sfz") > 0)
             gSFZs.addArray(results);
     }
 }
@@ -156,7 +153,7 @@ static const CarlaCachedPluginInfo* get_cached_plugin_lv2(Lv2WorldClass& lv2Worl
 
         if (char* const bundle = lilv_file_uri_parse(lilvPlugin.get_bundle_uri().as_uri(), nullptr))
         {
-            File fbundle(bundle);
+            water::File fbundle(bundle);
             lilv_free(bundle);
 
             suri = (fbundle.getFileName() + CARLA_OS_SEP).toRawUTF8() + suri;
@@ -205,8 +202,18 @@ static const CarlaCachedPluginInfo* get_cached_plugin_lv2(Lv2WorldClass& lv2Worl
 
     info.hints = 0x0;
 
-    if (lilvPlugin.get_uis().size() > 0 || lilvPlugin.get_modgui_resources_directory().as_uri() != nullptr)
-        info.hints |= CB::PLUGIN_HAS_CUSTOM_UI;
+    {
+        Lilv::UIs lilvUIs(lilvPlugin.get_uis());
+
+        if (lilvUIs.size() > 0)
+            info.hints |= CB::PLUGIN_HAS_CUSTOM_UI;
+#ifdef CARLA_OS_LINUX
+        else if (lilvPlugin.get_modgui_resources_directory().as_uri() != nullptr)
+            info.hints |= CB::PLUGIN_HAS_CUSTOM_UI;
+#endif
+
+        lilv_nodes_free(const_cast<LilvNodes*>(lilvUIs.me));
+    }
 
     {
         Lilv::Nodes lilvRequiredFeatureNodes(lilvPlugin.get_required_features());
@@ -569,7 +576,7 @@ static const CarlaCachedPluginInfo* get_cached_plugin_au(const juce::String plug
     info.name      = sname;
     info.label     = slabel;
     info.maker     = smaker;
-    info.copyright = gNullCharPtr;
+    info.copyright = gCachedPluginsNullCharPtr;
 
     return &info;
 }
@@ -577,7 +584,7 @@ static const CarlaCachedPluginInfo* get_cached_plugin_au(const juce::String plug
 
 // -------------------------------------------------------------------------------------------------------------------
 
-static const CarlaCachedPluginInfo* get_cached_plugin_sfz(const File file)
+static const CarlaCachedPluginInfo* get_cached_plugin_sfz(const water::File& file)
 {
     static CarlaCachedPluginInfo info;
 
@@ -604,8 +611,8 @@ static const CarlaCachedPluginInfo* get_cached_plugin_sfz(const File file)
 
     info.name      = name.buffer();
     info.label     = filename.buffer();
-    info.maker     = gNullCharPtr;
-    info.copyright = gNullCharPtr;
+    info.maker     = gCachedPluginsNullCharPtr;
+    info.copyright = gCachedPluginsNullCharPtr;
     return &info;
 }
 
@@ -697,6 +704,8 @@ const CarlaCachedPluginInfo* carla_get_cached_plugin_info(CB::PluginType ptype, 
 
 // -------------------------------------------------------------------------------------------------------------------
 
-#include "../native-plugins/_data.cpp"
+#ifndef CARLA_PLUGIN_EXPORT
+# include "../native-plugins/_data.cpp"
+#endif
 
 // -------------------------------------------------------------------------------------------------------------------

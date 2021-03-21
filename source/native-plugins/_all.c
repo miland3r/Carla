@@ -1,6 +1,6 @@
 /*
  * Carla Native Plugins
- * Copyright (C) 2012-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2012-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -23,7 +23,9 @@
 // Simple plugins
 extern void carla_register_native_plugin_audiogain(void);
 extern void carla_register_native_plugin_bypass(void);
+extern void carla_register_native_plugin_cv2audio(void);
 extern void carla_register_native_plugin_lfo(void);
+extern void carla_register_native_plugin_midi2cv(void);
 extern void carla_register_native_plugin_midichanab(void);
 extern void carla_register_native_plugin_midichanfilter(void);
 extern void carla_register_native_plugin_midichannelize(void);
@@ -46,6 +48,7 @@ extern void carla_register_native_plugin_carla(void);
 // External-UI plugins
 extern void carla_register_native_plugin_bigmeter(void);
 extern void carla_register_native_plugin_notes(void);
+extern void carla_register_native_plugin_xycontroller(void);
 
 #ifdef HAVE_EXTERNAL_PLUGINS
 void carla_register_all_native_external_plugins(void);
@@ -60,7 +63,9 @@ void carla_register_all_native_plugins(void)
     // Simple plugins
     carla_register_native_plugin_audiogain();
     carla_register_native_plugin_bypass();
+    carla_register_native_plugin_cv2audio();
     carla_register_native_plugin_lfo();
+    carla_register_native_plugin_midi2cv();
     carla_register_native_plugin_midichanab();
     carla_register_native_plugin_midichannelize();
     carla_register_native_plugin_midichanfilter();
@@ -84,6 +89,7 @@ void carla_register_all_native_plugins(void)
     carla_register_native_plugin_bigmeter();
     carla_register_native_plugin_midipattern();
     carla_register_native_plugin_notes();
+    carla_register_native_plugin_xycontroller();
 #endif // HAVE_PYQT
 
 #ifdef HAVE_EXTERNAL_PLUGINS

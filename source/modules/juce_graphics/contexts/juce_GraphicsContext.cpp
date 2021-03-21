@@ -2,17 +2,16 @@
   ==============================================================================
 
    This file is part of the JUCE library.
-   Copyright (c) 2017 - ROLI Ltd.
+   Copyright (c) 2020 - Raw Material Software Limited
 
    JUCE is an open source library subject to commercial or open-source
    licensing.
 
-   By using JUCE, you agree to the terms of both the JUCE 5 End-User License
-   Agreement and JUCE 5 Privacy Policy (both updated and effective as of the
-   27th April 2017).
+   By using JUCE, you agree to the terms of both the JUCE 6 End-User License
+   Agreement and JUCE Privacy Policy (both effective as of the 16th June 2020).
 
-   End User License Agreement: www.juce.com/juce-5-licence
-   Privacy Policy: www.juce.com/juce-5-privacy-policy
+   End User License Agreement: www.juce.com/juce-6-licence
+   Privacy Policy: www.juce.com/juce-privacy-policy
 
    Or: You may also use this code under the terms of the GPL v3 (see
    www.gnu.org/licenses).
@@ -51,8 +50,8 @@ LowLevelGraphicsContext::~LowLevelGraphicsContext() {}
 
 //==============================================================================
 Graphics::Graphics (const Image& imageToDrawOnto)
-    : context (*imageToDrawOnto.createLowLevelContext()),
-      contextToDelete (&context)
+    : contextHolder (imageToDrawOnto.createLowLevelContext()),
+      context (*contextHolder)
 {
     jassert (imageToDrawOnto.isValid()); // Can't draw into a null image!
 }
@@ -190,7 +189,7 @@ void Graphics::setColour (Colour newColour)
     context.setFill (newColour);
 }
 
-void Graphics::setOpacity (const float newOpacity)
+void Graphics::setOpacity (float newOpacity)
 {
     saveStateIfPending();
     context.setOpacity (newOpacity);
@@ -199,6 +198,11 @@ void Graphics::setOpacity (const float newOpacity)
 void Graphics::setGradientFill (const ColourGradient& gradient)
 {
     setFillType (gradient);
+}
+
+void Graphics::setGradientFill (ColourGradient&& gradient)
+{
+    setFillType (std::move (gradient));
 }
 
 void Graphics::setTiledImageFill (const Image& imageToUse, const int anchorX, const int anchorY, const float opacity)
@@ -268,7 +272,8 @@ void Graphics::drawSingleLineText (const String& text, const int startX, const i
 }
 
 void Graphics::drawMultiLineText (const String& text, const int startX,
-                                  const int baselineY, const int maximumLineWidth) const
+                                  const int baselineY, const int maximumLineWidth,
+                                  Justification justification, const float leading) const
 {
     if (text.isNotEmpty()
          && startX < context.getClipBounds().getRight())
@@ -276,7 +281,7 @@ void Graphics::drawMultiLineText (const String& text, const int startX,
         GlyphArrangement arr;
         arr.addJustifiedText (context.getFont(), text,
                               (float) startX, (float) baselineY, (float) maximumLineWidth,
-                              Justification::left);
+                              justification, leading);
         arr.draw (*this);
     }
 }
@@ -507,8 +512,7 @@ void Graphics::drawArrow (Line<float> line, float lineThickness, float arrowhead
     fillPath (p);
 }
 
-void Graphics::fillCheckerBoard (Rectangle<int> area,
-                                 const int checkWidth, const int checkHeight,
+void Graphics::fillCheckerBoard (Rectangle<float> area, float checkWidth, float checkHeight,
                                  Colour colour1, Colour colour2) const
 {
     jassert (checkWidth > 0 && checkHeight > 0); // can't be zero or less!
@@ -520,31 +524,33 @@ void Graphics::fillCheckerBoard (Rectangle<int> area,
         if (colour1 == colour2)
         {
             context.setFill (colour1);
-            context.fillRect (area, false);
+            context.fillRect (area);
         }
         else
         {
-            auto clipped = context.getClipBounds().getIntersection (area);
+            auto clipped = context.getClipBounds().getIntersection (area.getSmallestIntegerContainer());
 
             if (! clipped.isEmpty())
             {
-                context.clipToRectangle (clipped);
-
-                const int checkNumX = (clipped.getX() - area.getX()) / checkWidth;
-                const int checkNumY = (clipped.getY() - area.getY()) / checkHeight;
-                const int startX = area.getX() + checkNumX * checkWidth;
-                const int startY = area.getY() + checkNumY * checkHeight;
-                const int right  = clipped.getRight();
-                const int bottom = clipped.getBottom();
+                const int checkNumX = (int) (((float) clipped.getX() - area.getX()) / checkWidth);
+                const int checkNumY = (int) (((float) clipped.getY() - area.getY()) / checkHeight);
+                const float startX = area.getX() + (float) checkNumX * checkWidth;
+                const float startY = area.getY() + (float) checkNumY * checkHeight;
+                const float right  = (float) clipped.getRight();
+                const float bottom = (float) clipped.getBottom();
 
                 for (int i = 0; i < 2; ++i)
                 {
-                    context.setFill (i == ((checkNumX ^ checkNumY) & 1) ? colour1 : colour2);
-
                     int cy = i;
-                    for (int y = startY; y < bottom; y += checkHeight)
-                        for (int x = startX + (cy++ & 1) * checkWidth; x < right; x += checkWidth * 2)
-                            context.fillRect (Rectangle<int> (x, y, checkWidth, checkHeight), false);
+                    RectangleList<float> checks;
+
+                    for (float y = startY; y < bottom; y += checkHeight)
+                        for (float x = startX + (cy++ & 1) * checkWidth; x < right; x += checkWidth * 2.0f)
+                            checks.addWithoutMerging ({ x, y, checkWidth, checkHeight });
+
+                    checks.clipTo (area);
+                    context.setFill (i == ((checkNumX ^ checkNumY) & 1) ? colour1 : colour2);
+                    context.fillRectList (checks);
                 }
             }
         }
@@ -660,7 +666,7 @@ void Graphics::drawImage (const Image& imageToDraw,
 {
     if (imageToDraw.isValid() && context.clipRegionIntersects (coordsToRectangle (dx, dy, dw, dh)))
         drawImageTransformed (imageToDraw.getClippedImage (coordsToRectangle (sx, sy, sw, sh)),
-                              AffineTransform::scale (dw / (float) sw, dh / (float) sh)
+                              AffineTransform::scale ((float) dw / (float) sw, (float) dh / (float) sh)
                                               .translated ((float) dx, (float) dy),
                               fillAlphaChannelWithCurrentBrush);
 }

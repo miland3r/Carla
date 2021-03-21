@@ -1,6 +1,6 @@
 ﻿/*
  * Carla Plugin Host
- * Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -19,6 +19,7 @@
 #define CARLA_PLUGIN_HPP_INCLUDED
 
 #include "CarlaBackend.h"
+#include "CarlaPluginPtr.hpp"
 
 // -----------------------------------------------------------------------
 // Avoid including extra libs here
@@ -47,8 +48,10 @@ CARLA_BACKEND_START_NAMESPACE
 class CarlaEngineAudioPort;
 class CarlaEngineCVPort;
 class CarlaEngineEventPort;
+class CarlaEngineCVSourcePorts;
 class CarlaEngineBridge;
 struct CarlaStateSave;
+struct EngineEvent;
 
 // -----------------------------------------------------------------------
 
@@ -399,8 +402,10 @@ public:
 
     /*!
      * Tell the plugin to prepare for save.
+     * @param temporary Wherever we are saving into a temporary location
+     *                  (for duplication, renaming or similar)
      */
-    virtual void prepareForSave();
+    virtual void prepareForSave(bool temporary);
 
     /*!
      * Reset all possible parameters.
@@ -598,10 +603,17 @@ public:
     virtual void setParameterMidiChannel(uint32_t parameterId, uint8_t channel, bool sendOsc, bool sendCallback) noexcept;
 
     /*!
-     * Set parameter's @a parameterId MIDI CC to @a cc.
-     * @a cc must be between 0 and 119 (0x77), or -1 for invalid.
+     * Set parameter's @a parameterId mapped control index to @a index.
+     * @see ParameterData::mappedControlIndex
      */
-    virtual void setParameterMidiCC(uint32_t parameterId, int16_t cc, bool sendOsc, bool sendCallback) noexcept;
+    virtual void setParameterMappedControlIndex(uint32_t parameterId, int16_t index,
+                                                bool sendOsc, bool sendCallback, bool reconfigureNow) noexcept;
+
+    /*!
+     * Set parameter's @a parameterId mapped range to @a minimum and @a maximum.
+     */
+    virtual void setParameterMappedRange(uint32_t parameterId, float minimum, float maximum,
+                                         bool sendOsc, bool sendCallback) noexcept;
 
     /*!
      * Add a custom data set.
@@ -695,8 +707,8 @@ public:
     /*!
      * Plugin process call.
      */
-    virtual void process(const float** audioIn, float** audioOut,
-                         const float** cvIn, float** cvOut, uint32_t frames) = 0;
+    virtual void process(const float* const* audioIn, float** audioOut,
+                         const float* const* cvIn, float** cvOut, uint32_t frames) = 0;
 
     /*!
      * Tell the plugin the current buffer size changed.
@@ -783,10 +795,22 @@ public:
     // UI Stuff
 
     /*!
+     * Set a custom title for the plugin UI window created by Carla.
+     */
+    virtual void setCustomUITitle(const char* title) noexcept;
+
+    /*!
      * Show (or hide) the plugin's custom UI according to @a yesNo.
      * This function is always called from the main thread.
      */
     virtual void showCustomUI(bool yesNo);
+
+    /*!
+     * Embed the plugin's custom UI to the system pointer @a ptr.
+     * This function is always called from the main thread.
+     * @note This is very experimental and subject to change at this point
+     */
+    virtual void* embedCustomUI(void* ptr);
 
     /*!
      * UI idle function, called at regular intervals.
@@ -868,6 +892,14 @@ public:
      */
     CarlaEngineEventPort* getDefaultEventOutPort() const noexcept;
 
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+    /*!
+     * Check if the plugin is interested on MIDI learn, and if so, map this event to the parameter that wants it.
+     * Event MUST be of control type and not have been handled before.
+     */
+    void checkForMidiLearn(EngineEvent& event) noexcept;
+#endif
+
     /*!
      * Get the plugin's type native handle.
      * This will be LADSPA_Handle, LV2_Handle, etc.
@@ -930,21 +962,23 @@ public:
         const uint options; // see PluginOptions
     };
 
-    static CarlaPlugin* newNative(const Initializer& init);
-    static CarlaPlugin* newBridge(const Initializer& init, BinaryType btype, PluginType ptype, const char* bridgeBinary);
+    static CarlaPluginPtr newNative(const Initializer& init);
+    static CarlaPluginPtr newBridge(const Initializer& init,
+                                    BinaryType btype, PluginType ptype,
+                                    const char* binaryArchName, const char* bridgeBinary);
 
-    static CarlaPlugin* newLADSPA(const Initializer& init, const LADSPA_RDF_Descriptor* rdfDescriptor);
-    static CarlaPlugin* newDSSI(const Initializer& init);
-    static CarlaPlugin* newLV2(const Initializer& init);
-    static CarlaPlugin* newVST2(const Initializer& init);
-    static CarlaPlugin* newVST3(const Initializer& init);
-    static CarlaPlugin* newAU(const Initializer& init);
+    static CarlaPluginPtr newLADSPA(const Initializer& init, const LADSPA_RDF_Descriptor* rdfDescriptor);
+    static CarlaPluginPtr newDSSI(const Initializer& init);
+    static CarlaPluginPtr newLV2(const Initializer& init);
+    static CarlaPluginPtr newVST2(const Initializer& init);
+    static CarlaPluginPtr newVST3(const Initializer& init);
+    static CarlaPluginPtr newAU(const Initializer& init);
 
-    static CarlaPlugin* newJuce(const Initializer& init, const char* format);
-    static CarlaPlugin* newFluidSynth(const Initializer& init, bool use16Outs);
-    static CarlaPlugin* newSFZero(const Initializer& init);
+    static CarlaPluginPtr newJuce(const Initializer& init, const char* format);
+    static CarlaPluginPtr newFluidSynth(const Initializer& init, PluginType ptype, bool use16Outs);
+    static CarlaPluginPtr newSFZero(const Initializer& init);
 
-    static CarlaPlugin* newJackApp(const Initializer& init);
+    static CarlaPluginPtr newJackApp(const Initializer& init);
 #endif
 
     // -------------------------------------------------------------------
@@ -959,14 +993,24 @@ protected:
     // -------------------------------------------------------------------
     // Internal helper functions
 
-public:
-    // FIXME: remove public exception on 2.1 release
+protected:
+    /*!
+     * Clone/copy files from another LV2 plugin into this one..
+     */
+    virtual void cloneLV2Files(const CarlaPlugin& other);
+
     /*!
      * Call LV2 restore.
+     * @param temporary Wherever we are saving into a temporary location
+     *                  (for duplication, renaming or similar)
      */
-    virtual void restoreLV2State() noexcept;
+    virtual void restoreLV2State(bool temporary) noexcept;
 
-protected:
+    /*!
+     * Allow engine to signal that plugin will be deleted soon.
+     */
+    virtual void prepareForDeletion() noexcept;
+
     /*!
      * Give plugin bridges a change to update their custom data sets.
      */
@@ -1012,6 +1056,7 @@ protected:
         CARLA_DECLARE_NON_COPY_CLASS(ScopedSingleProcessLocker)
     };
 
+    friend class CarlaEngine;
     friend class CarlaEngineBridge;
     CARLA_DECLARE_NON_COPY_CLASS(CarlaPlugin)
 };

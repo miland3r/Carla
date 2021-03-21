@@ -18,31 +18,11 @@
 #include "libjack.hpp"
 
 #include "CarlaThread.hpp"
+#include "CarlaJuceUtils.hpp"
 
 #include <signal.h>
 #include <sys/prctl.h>
 #include <sys/time.h>
-
-// ---------------------------------------------------------------------------------------------------------------------
-
-CARLA_EXPORT
-int jack_carla_interposed_action(uint, uint, void*)
-{
-    static bool printWarning = true;
-
-    if (printWarning)
-    {
-        printWarning = false;
-        carla_stderr2("Non-exported jack_carla_interposed_action called, this should not happen!!");
-        carla_stderr("Printing some info:");
-        carla_stderr("\tLD_LIBRARY_PATH: '%s'", std::getenv("LD_LIBRARY_PATH"));
-        carla_stderr("\tLD_PRELOAD:      '%s'", std::getenv("LD_PRELOAD"));
-        std::fflush(stderr);
-    }
-
-    // ::kill(::getpid(), SIGKILL);
-    return 1337;
-}
 
 // ---------------------------------------------------------------------------------------------------------------------
 
@@ -137,6 +117,7 @@ public:
           fDummyMidiOutBuffer(false),
           fMidiInBuffers(nullptr),
           fMidiOutBuffers(nullptr),
+          fInitialized(false),
           fIsOffline(false),
           fIsReady(false),
           fLastPingTime(-1),
@@ -149,13 +130,15 @@ public:
           ,leakDetector_CarlaJackAppClient()
 #endif
     {
-        carla_debug("CarlaJackAppClient::CarlaJackAppClient()");
+        carla_debug("CarlaJackAppClient::CarlaJackAppClient() START");
 
         const char* const shmIds(std::getenv("CARLA_SHM_IDS"));
-        CARLA_SAFE_ASSERT_INT2_RETURN(shmIds != nullptr && std::strlen(shmIds) == 6*4, std::strlen(shmIds), 6*4,);
+        CARLA_SAFE_ASSERT_INT2_RETURN(shmIds != nullptr && std::strlen(shmIds) == 6*4,
+                                      shmIds != nullptr ? static_cast<int>(std::strlen(shmIds)) : -1, 6*4,);
 
         const char* const libjackSetup(std::getenv("CARLA_LIBJACK_SETUP"));
-        CARLA_SAFE_ASSERT_RETURN(libjackSetup != nullptr && std::strlen(libjackSetup) >= 6,);
+        CARLA_SAFE_ASSERT_INT_RETURN(libjackSetup != nullptr && std::strlen(libjackSetup) >= 6,
+                                     libjackSetup != nullptr ? static_cast<int>(std::strlen(libjackSetup)) : -1,);
 
         // make sure we don't get loaded again
         carla_unsetenv("CARLA_SHM_IDS");
@@ -199,31 +182,44 @@ public:
                                      nullptr);
 
         fNonRealtimeThread.startThread(false);
+
+        fInitialized = true;
+        carla_debug("CarlaJackAppClient::CarlaJackAppClient() DONE");
     }
 
     ~CarlaJackAppClient() noexcept override
     {
-        carla_debug("CarlaJackAppClient::~CarlaJackAppClient()");
+        carla_debug("CarlaJackAppClient::~CarlaJackAppClient() START");
 
         fLastPingTime = -1;
 
         fNonRealtimeThread.stopThread(5000);
 
-        const CarlaMutexLocker cms(fRealtimeThreadMutex);
-
-        for (LinkedList<JackClientState*>::Itenerator it = fClients.begin2(); it.valid(); it.next())
         {
-            JackClientState* const jclient(it.getValue(nullptr));
-            CARLA_SAFE_ASSERT_CONTINUE(jclient != nullptr);
+            const CarlaMutexLocker cms(fRealtimeThreadMutex);
 
-            delete jclient;
+            for (LinkedList<JackClientState*>::Itenerator it = fClients.begin2(); it.valid(); it.next())
+            {
+                JackClientState* const jclient(it.getValue(nullptr));
+                CARLA_SAFE_ASSERT_CONTINUE(jclient != nullptr);
+
+                delete jclient;
+            }
+
+            fClients.clear();
+            fNewClients.clear();
         }
 
-        fClients.clear();
+        clearSharedMemory();
+
+        carla_debug("CarlaJackAppClient::~CarlaJackAppClient() DONE");
     }
 
     JackClientState* createClient(const char* const name)
     {
+        if (! fInitialized)
+            return nullptr;
+
         while (fNonRealtimeThread.isThreadRunning() && ! fIsReady)
             carla_sleep(1);
 
@@ -267,6 +263,34 @@ public:
         jclient->activated = false;
         jclient->deactivated = true;
         return true;
+    }
+
+    const char* getClientNameFromUUID(const jack_uuid_t uuid) const noexcept
+    {
+        for (LinkedList<JackClientState*>::Itenerator it = fClients.begin2(); it.valid(); it.next())
+        {
+            JackClientState* const jclient(it.getValue(nullptr));
+            CARLA_SAFE_ASSERT_CONTINUE(jclient != nullptr);
+
+            if (jclient->uuid == uuid)
+                return jclient->name;
+        }
+
+        return nullptr;
+    }
+
+    jack_uuid_t getUUIDForClientName(const char* const name) const noexcept
+    {
+        for (LinkedList<JackClientState*>::Itenerator it = fClients.begin2(); it.valid(); it.next())
+        {
+            JackClientState* const jclient(it.getValue(nullptr));
+            CARLA_SAFE_ASSERT_CONTINUE(jclient != nullptr);
+
+            if (std::strcmp(jclient->name, name) == 0)
+                return jclient->uuid;
+        }
+
+        return JACK_UUID_EMPTY_INITIALIZER;
     }
 
     pthread_t getRealtimeThreadId() const noexcept
@@ -325,6 +349,7 @@ private:
     char fBaseNameNonRtClientControl[6+1];
     char fBaseNameNonRtServerControl[6+1];
 
+    bool fInitialized;
     bool fIsOffline;
     volatile bool fIsReady;
     int64_t fLastPingTime;
@@ -398,7 +423,7 @@ bool CarlaJackAppClient::initSharedMemmory()
     CARLA_SAFE_ASSERT_RETURN(opcode == kPluginBridgeNonRtClientVersion, false);
 
     const uint32_t apiVersion = fShmNonRtClientControl.readUInt();
-    CARLA_SAFE_ASSERT_RETURN(apiVersion == CARLA_PLUGIN_BRIDGE_API_VERSION, false);
+    CARLA_SAFE_ASSERT_RETURN(apiVersion == CARLA_PLUGIN_BRIDGE_API_VERSION_CURRENT, false);
 
     const uint32_t shmRtClientDataSize = fShmNonRtClientControl.readUInt();
     CARLA_SAFE_ASSERT_INT2(shmRtClientDataSize == sizeof(BridgeRtClientData), shmRtClientDataSize, sizeof(BridgeRtClientData));
@@ -606,16 +631,129 @@ bool CarlaJackAppClient::handleRtData()
         }   break;
 
         case kPluginBridgeRtClientControlEventParameter:
-        case kPluginBridgeRtClientControlEventMidiBank:
-        case kPluginBridgeRtClientControlEventMidiProgram:
-        case kPluginBridgeRtClientControlEventAllSoundOff:
-        case kPluginBridgeRtClientControlEventAllNotesOff:
             break;
 
+        case kPluginBridgeRtClientControlEventMidiBank: {
+            const uint32_t time    = fShmRtClientControl.readUInt();
+            const uint8_t  channel = fShmRtClientControl.readByte();
+            const uint16_t value   = fShmRtClientControl.readUShort();
+
+            if (fServer.numMidiIns > 0 && fRealtimeThreadMutex.tryLock())
+            {
+                JackMidiPortBufferOnStack& midiPortBuf(fMidiInBuffers[0]);
+
+                if (midiPortBuf.count+1U < JackMidiPortBufferBase::kMaxEventCount &&
+                    midiPortBuf.bufferPoolPos + 6U < JackMidiPortBufferBase::kBufferPoolSize)
+                {
+                    jack_midi_event_t& ev1(midiPortBuf.events[midiPortBuf.count++]);
+                    ev1.time   = time;
+                    ev1.size   = 3;
+                    ev1.buffer = midiPortBuf.bufferPool + midiPortBuf.bufferPoolPos;
+                    ev1.buffer[0] = jack_midi_data_t(MIDI_STATUS_CONTROL_CHANGE | (channel & MIDI_CHANNEL_BIT));
+                    ev1.buffer[1] = MIDI_CONTROL_BANK_SELECT;
+                    ev1.buffer[2] = 0;
+                    midiPortBuf.bufferPoolPos += 3;
+
+                    jack_midi_event_t& ev2(midiPortBuf.events[midiPortBuf.count++]);
+                    ev2.time   = time;
+                    ev2.size   = 3;
+                    ev2.buffer = midiPortBuf.bufferPool + midiPortBuf.bufferPoolPos;
+                    ev2.buffer[0] = jack_midi_data_t(MIDI_STATUS_CONTROL_CHANGE | (channel & MIDI_CHANNEL_BIT));
+                    ev2.buffer[1] = MIDI_CONTROL_BANK_SELECT__LSB;
+                    ev2.buffer[2] = jack_midi_data_t(value);
+                    midiPortBuf.bufferPoolPos += 3;
+                }
+
+                fRealtimeThreadMutex.unlock(true);
+            }
+            break;
+        }
+
+        case kPluginBridgeRtClientControlEventMidiProgram: {
+            const uint32_t time    = fShmRtClientControl.readUInt();
+            const uint8_t  channel = fShmRtClientControl.readByte();
+            const uint16_t value   = fShmRtClientControl.readUShort();
+
+            if (fServer.numMidiIns > 0 && fRealtimeThreadMutex.tryLock())
+            {
+                JackMidiPortBufferOnStack& midiPortBuf(fMidiInBuffers[0]);
+
+                if (midiPortBuf.count < JackMidiPortBufferBase::kMaxEventCount &&
+                    midiPortBuf.bufferPoolPos + 2U < JackMidiPortBufferBase::kBufferPoolSize)
+                {
+                    jack_midi_event_t& ev(midiPortBuf.events[midiPortBuf.count++]);
+
+                    ev.time   = time;
+                    ev.size   = 2;
+                    ev.buffer = midiPortBuf.bufferPool + midiPortBuf.bufferPoolPos;
+                    ev.buffer[0] = jack_midi_data_t(MIDI_STATUS_PROGRAM_CHANGE | (channel & MIDI_CHANNEL_BIT));
+                    ev.buffer[1] = jack_midi_data_t(value);
+                    midiPortBuf.bufferPoolPos += 2;
+                }
+
+                fRealtimeThreadMutex.unlock(true);
+            }
+            break;
+        }
+
+        case kPluginBridgeRtClientControlEventAllSoundOff: {
+            const uint32_t time    = fShmRtClientControl.readUInt();
+            const uint8_t  channel = fShmRtClientControl.readByte();
+
+            if (fServer.numMidiIns > 0 && fRealtimeThreadMutex.tryLock())
+            {
+                JackMidiPortBufferOnStack& midiPortBuf(fMidiInBuffers[0]);
+
+                if (midiPortBuf.count < JackMidiPortBufferBase::kMaxEventCount &&
+                    midiPortBuf.bufferPoolPos + 3U < JackMidiPortBufferBase::kBufferPoolSize)
+                {
+                    jack_midi_event_t& ev(midiPortBuf.events[midiPortBuf.count++]);
+
+                    ev.time   = time;
+                    ev.size   = 3;
+                    ev.buffer = midiPortBuf.bufferPool + midiPortBuf.bufferPoolPos;
+                    ev.buffer[0] = jack_midi_data_t(MIDI_STATUS_CONTROL_CHANGE | (channel & MIDI_CHANNEL_BIT));
+                    ev.buffer[1] = MIDI_CONTROL_ALL_SOUND_OFF;
+                    ev.buffer[2] = 0;
+                    midiPortBuf.bufferPoolPos += 3;
+                }
+
+                fRealtimeThreadMutex.unlock(true);
+            }
+            break;
+        }
+
+        case kPluginBridgeRtClientControlEventAllNotesOff: {
+            const uint32_t time    = fShmRtClientControl.readUInt();
+            const uint8_t  channel = fShmRtClientControl.readByte();
+
+            if (fServer.numMidiIns > 0 && fRealtimeThreadMutex.tryLock())
+            {
+                JackMidiPortBufferOnStack& midiPortBuf(fMidiInBuffers[0]);
+
+                if (midiPortBuf.count < JackMidiPortBufferBase::kMaxEventCount &&
+                    midiPortBuf.bufferPoolPos + 3U < JackMidiPortBufferBase::kBufferPoolSize)
+                {
+                    jack_midi_event_t& ev(midiPortBuf.events[midiPortBuf.count++]);
+
+                    ev.time   = time;
+                    ev.size   = 3;
+                    ev.buffer = midiPortBuf.bufferPool + midiPortBuf.bufferPoolPos;
+                    ev.buffer[0] = jack_midi_data_t(MIDI_STATUS_CONTROL_CHANGE | (channel & MIDI_CHANNEL_BIT));
+                    ev.buffer[1] = MIDI_CONTROL_ALL_NOTES_OFF;
+                    ev.buffer[2] = 0;
+                    midiPortBuf.bufferPoolPos += 3;
+                }
+
+                fRealtimeThreadMutex.unlock(true);
+            }
+            break;
+        }
+
         case kPluginBridgeRtClientMidiEvent: {
-            const uint32_t time(fShmRtClientControl.readUInt());
-            const uint8_t  port(fShmRtClientControl.readByte());
-            const uint8_t  size(fShmRtClientControl.readByte());
+            const uint32_t time = fShmRtClientControl.readUInt();
+            const uint8_t  port = fShmRtClientControl.readByte();
+            const uint8_t  size = fShmRtClientControl.readByte();
             CARLA_SAFE_ASSERT_BREAK(size > 0);
 
             if (port >= fServer.numMidiIns || size > JackMidiPortBufferBase::kMaxEventSize || ! fRealtimeThreadMutex.tryLock())
@@ -1021,7 +1159,8 @@ bool CarlaJackAppClient::handleNonRtData()
 
         case kPluginBridgeNonRtClientVersion: {
             const uint apiVersion = fShmNonRtServerControl.readUInt();
-            CARLA_SAFE_ASSERT_UINT2(apiVersion == CARLA_PLUGIN_BRIDGE_API_VERSION, apiVersion, CARLA_PLUGIN_BRIDGE_API_VERSION);
+            CARLA_SAFE_ASSERT_UINT2(apiVersion == CARLA_PLUGIN_BRIDGE_API_VERSION_CURRENT,
+                                    apiVersion, CARLA_PLUGIN_BRIDGE_API_VERSION_CURRENT);
         }   break;
 
         case kPluginBridgeNonRtClientPing: {
@@ -1049,16 +1188,22 @@ bool CarlaJackAppClient::handleNonRtData()
 
         case kPluginBridgeNonRtClientSetParameterValue:
         case kPluginBridgeNonRtClientSetParameterMidiChannel:
-        case kPluginBridgeNonRtClientSetParameterMidiCC:
+        case kPluginBridgeNonRtClientSetParameterMappedControlIndex:
+        case kPluginBridgeNonRtClientSetParameterMappedRange:
         case kPluginBridgeNonRtClientSetProgram:
         case kPluginBridgeNonRtClientSetMidiProgram:
         case kPluginBridgeNonRtClientSetCustomData:
         case kPluginBridgeNonRtClientSetChunkDataFile:
+        case kPluginBridgeNonRtClientSetWindowTitle:
             break;
 
         case kPluginBridgeNonRtClientSetOption:
             fShmNonRtClientControl.readUInt();
             fShmNonRtClientControl.readBool();
+            break;
+
+        case kPluginBridgeNonRtClientSetOptions:
+            fShmNonRtClientControl.readUInt();
             break;
 
         case kPluginBridgeNonRtClientSetCtrlChannel:
@@ -1366,6 +1511,73 @@ int jack_deactivate(jack_client_t* client)
     CARLA_SAFE_ASSERT_RETURN(jclient != nullptr, 1);
 
     return gClient.deactivateClient(jclient) ? 0 : 1;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+
+CARLA_EXPORT
+char* jack_get_client_name_by_uuid(jack_client_t* const client, const char* const uuidstr)
+{
+    carla_debug("%s(%p, %s)", __FUNCTION__, client, uuidstr);
+
+    jack_uuid_t uuid = JACK_UUID_EMPTY_INITIALIZER;
+    CARLA_SAFE_ASSERT_RETURN(jack_uuid_parse(uuidstr, &uuid) == 0, nullptr);
+
+    JackClientState* const jclient = (JackClientState*)client;
+    CARLA_SAFE_ASSERT_RETURN(jclient != nullptr, nullptr);
+
+    const char* clientName;
+
+    if (jclient->server.uuid == uuid)
+        return strdup("system");
+
+    if (jclient->uuid == uuid)
+    {
+        clientName = jclient->name;
+        CARLA_SAFE_ASSERT_RETURN(clientName != nullptr, nullptr);
+    }
+    else
+    {
+        CarlaJackAppClient* const jackAppPtr = jclient->server.jackAppPtr;
+        CARLA_SAFE_ASSERT_RETURN(jackAppPtr != nullptr && jackAppPtr == &gClient, nullptr);
+
+        clientName = jackAppPtr->getClientNameFromUUID(uuid);
+        CARLA_SAFE_ASSERT_RETURN(clientName != nullptr, nullptr);
+    }
+
+    return strdup(clientName);
+}
+
+CARLA_EXPORT
+char* jack_get_uuid_for_client_name(jack_client_t* client, const char* name)
+{
+    carla_debug("%s(%p, %s)", __FUNCTION__, client, name);
+
+    JackClientState* const jclient = (JackClientState*)client;
+    CARLA_SAFE_ASSERT_RETURN(jclient != nullptr, nullptr);
+
+    if (std::strcmp(name, "system") == 0)
+    {
+        char* const uuidstr = static_cast<char*>(std::malloc(JACK_UUID_STRING_SIZE));
+        CARLA_SAFE_ASSERT_RETURN(uuidstr != nullptr, nullptr);
+
+        jack_uuid_unparse(jclient->server.uuid, uuidstr);
+        return uuidstr;
+    }
+    else
+    {
+        CarlaJackAppClient* const jackAppPtr = jclient->server.jackAppPtr;
+        CARLA_SAFE_ASSERT_RETURN(jackAppPtr != nullptr && jackAppPtr == &gClient, nullptr);
+
+        const jack_uuid_t uuid = jackAppPtr->getUUIDForClientName(name);
+        CARLA_SAFE_ASSERT_RETURN(uuid != JACK_UUID_EMPTY_INITIALIZER, nullptr);
+
+        char* const uuidstr = static_cast<char*>(std::malloc(JACK_UUID_STRING_SIZE));
+        CARLA_SAFE_ASSERT_RETURN(uuidstr != nullptr, nullptr);
+
+        jack_uuid_unparse(jclient->uuid, uuidstr);
+        return uuidstr;
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 /*
  * Carla Native Plugins
- * Copyright (C) 2013-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2013-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -49,12 +49,26 @@ __cdecl static void cvst_processReplacingCallback(AEffect* effect, float** input
 }
 #endif
 
+static struct CarlaVSTCleanup {
+    std::vector<AEffect*> effects;
+    std::vector<VstObject*> objects;
+
+    CarlaVSTCleanup()
+        : effects(),
+          objects() {}
+
+    ~CarlaVSTCleanup()
+    {
+        for (std::vector<VstObject*>::iterator it=objects.begin(), end=objects.end(); it != end; ++it)
+            delete (*it);
+
+        for (std::vector<AEffect*>::iterator it=effects.begin(), end=effects.end(); it != end; ++it)
+            delete (*it);
+    }
+} gCarlaVSTCleanup;
+
 CARLA_EXPORT __cdecl
-#if defined(CARLA_OS_WIN) || defined(CARLA_OS_MAC)
 const AEffect* VSTPluginMain(audioMasterCallback audioMaster);
-#else
-const AEffect* VSTPluginMain(audioMasterCallback audioMaster) asm ("main");
-#endif
 
 CARLA_EXPORT __cdecl
 const AEffect* VSTPluginMain(audioMasterCallback audioMaster)
@@ -76,6 +90,9 @@ const AEffect* VSTPluginMain(audioMasterCallback audioMaster)
     obj->plugin      = nullptr;
     effect->object   = obj;
 
+    gCarlaVSTCleanup.effects.push_back(effect);
+    gCarlaVSTCleanup.objects.push_back(obj);
+
     // static calls
 #ifdef __WINE__
     effect->dispatcher       = cvst_dispatcherCallback;
@@ -93,6 +110,17 @@ const AEffect* VSTPluginMain(audioMasterCallback audioMaster)
 
     return VSTPluginMainInit(effect);
 }
+
+#if ! (defined(CARLA_OS_MAC) || defined(CARLA_OS_WIN))
+CARLA_EXPORT __cdecl
+const AEffect* VSTPluginMain_asm(audioMasterCallback audioMaster) asm ("main");
+
+CARLA_EXPORT __cdecl
+const AEffect* VSTPluginMain_asm(audioMasterCallback audioMaster)
+{
+    return VSTPluginMain(audioMaster);
+}
+#endif
 
 intptr_t VSTAudioMaster(AEffect* effect, int32_t opcode, int32_t index, intptr_t value, void* ptr, float opt)
 {

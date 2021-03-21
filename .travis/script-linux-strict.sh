@@ -3,8 +3,8 @@
 set -e
 
 # Preparation
-export CC=gcc-8
-export CXX=g++-8
+export CC=gcc-9
+export CXX=g++-9
 export PKG_CONFIG_PATH=/opt/kxstudio/lib/pkgconfig:${PKG_CONFIG_PATH}
 unset CFLAGS
 unset CXXFLAGS
@@ -14,14 +14,14 @@ unset LDFLAGS
 make distclean >/dev/null
 
 # Print available features
-make features
+make USING_JUCE=false features
 
 # Build things that we skip strict tests for
-make 3rd
-make -C source/modules/water posix32
+make USING_JUCE=false 3rd frontend
+make USING_JUCE=false -C source/modules/water posix32
 
 # Build native stuff
-make TESTBUILD=true
+make USING_JUCE=false TESTBUILD=true
 
 # Build 32bit bridges
-make TESTBUILD=true posix32
+make USING_JUCE=false TESTBUILD=true posix32

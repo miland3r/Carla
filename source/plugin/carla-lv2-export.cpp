@@ -32,8 +32,11 @@
 #include "lv2/units.h"
 #include "lv2/urid.h"
 #include "lv2/worker.h"
+#include "lv2/inline-display.h"
 #include "lv2/lv2_external_ui.h"
 #include "lv2/lv2_programs.h"
+
+#include "CarlaString.hpp"
 
 #include "water/files/File.h"
 #include "water/text/StringArray.h"
@@ -105,7 +108,7 @@ static const String nameToSymbol(const String& name, const uint32_t portIndex)
 
 // -----------------------------------------------------------------------
 
-static void writeManifestFile(PluginListManager& plm)
+static void writeManifestFile(PluginListManager& plm, const uint32_t microVersion, const uint32_t minorVersion)
 {
     String text;
 
@@ -113,10 +116,31 @@ static void writeManifestFile(PluginListManager& plm)
     // Header
 
     text += "@prefix atom: <" LV2_ATOM_PREFIX "> .\n";
+    text += "@prefix doap: <http://usefulinc.com/ns/doap#> .\n";
+    text += "@prefix foaf: <http://xmlns.com/foaf/0.1/> .\n";
     text += "@prefix lv2:  <" LV2_CORE_PREFIX "> .\n";
+    text += "@prefix mod:  <http://moddevices.com/ns/mod#> .\n";
     text += "@prefix opts: <" LV2_OPTIONS_PREFIX "> .\n";
     text += "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n";
     text += "@prefix ui:   <" LV2_UI_PREFIX "> .\n";
+    text += "\n";
+
+    // -------------------------------------------------------------------
+    // Project
+
+    text += "<https://kx.studio/carla>\n";
+    text += "    a lv2:Project ;\n";
+    text += "    doap:homepage <https://kx.studio/carla> ;\n";
+    text += "    doap:maintainer [\n";
+    text += "        foaf:homepage <https://falktx.com/> ;\n";
+    text += "        foaf:mbox <mailto:falktx@falktx.com> ;\n";
+    text += "        foaf:name \"Filipe Coelho\" ;\n";
+    text += "    ] ;\n";
+    text += "    doap:name \"Carla\" ;\n";
+    text += "    doap:shortdesc \"fully-featured audio plugin host.\" ;\n";
+    text += "    lv2:microVersion " + String(microVersion) + " ;\n";
+    text += "    lv2:minorVersion " + String(minorVersion) + " ;\n";
+    text += "    lv2:symbol \"carla\" .\n";
     text += "\n";
 
     // -------------------------------------------------------------------
@@ -132,6 +156,7 @@ static void writeManifestFile(PluginListManager& plm)
         text += "<http://kxstudio.sf.net/carla/plugins/" + label + ">\n";
         text += "    a lv2:Plugin ;\n";
         text += "    lv2:binary <carla" PLUGIN_EXT "> ;\n";
+        text += "    lv2:project <https://kx.studio/carla> ;\n";
         text += "    rdfs:seeAlso <" + label + ".ttl> .\n";
         text += "\n";
     }
@@ -146,6 +171,7 @@ static void writeManifestFile(PluginListManager& plm)
     text += "    lv2:extensionData <" LV2_UI__idleInterface "> ,\n";
     text += "                      <" LV2_UI__showInterface "> ,\n";
     text += "                      <" LV2_PROGRAMS__UIInterface "> ;\n";
+    text += "    lv2:optionalFeature <" LV2_UI__idleInterface "> ;\n";
     text += "    lv2:requiredFeature <" LV2_INSTANCE_ACCESS_URI "> ;\n";
     text += "    opts:supportedOption <" LV2_PARAMETERS__sampleRate "> .\n";
     text += "\n";
@@ -169,6 +195,20 @@ static void writeManifestFile(PluginListManager& plm)
     text += "    rdfs:range atom:Path .\n";
     text += "\n";
 
+    text += "<http://kxstudio.sf.net/carla/file/audio>\n";
+    text += "    a lv2:Parameter ;\n";
+    text += "    mod:fileTypes \"audioloop,audiorecording,audiotrack\" ;\n";
+    text += "    rdfs:label \"audio file\" ;\n";
+    text += "    rdfs:range atom:Path .\n";
+    text += "\n";
+
+    text += "<http://kxstudio.sf.net/carla/file/midi>\n";
+    text += "    a lv2:Parameter ;\n";
+    text += "    mod:fileTypes \"midisong\" ;\n";
+    text += "    rdfs:label \"midi file\" ;\n";
+    text += "    rdfs:range atom:Path .\n";
+    text += "\n";
+
     // -------------------------------------------------------------------
     // Write file now
 
@@ -184,7 +224,8 @@ static double   host_getSampleRate(NativeHostHandle) { return 44100.0; }
 static bool     host_isOffline(NativeHostHandle)     { return true;    }
 static intptr_t host_dispatcher(NativeHostHandle, NativeHostDispatcherOpcode, int32_t, intptr_t, void*, float) { return 0; }
 
-static void writePluginFile(const NativePluginDescriptor* const pluginDesc)
+static void writePluginFile(const NativePluginDescriptor* const pluginDesc,
+                            const uint32_t microVersion, const uint32_t minorVersion)
 {
     const String pluginLabel(pluginDesc->label);
     const String pluginFile("carla.lv2/" + pluginLabel + ".ttl");
@@ -282,13 +323,21 @@ static void writePluginFile(const NativePluginDescriptor* const pluginDesc)
 
     // optional
     if (pluginDesc->hints & NATIVE_PLUGIN_IS_RTSAFE)
-        text += "    lv2:optionalFeature <" LV2_CORE__hardRTCapable "> ;\n\n";
+        text += "    lv2:optionalFeature <" LV2_CORE__hardRTCapable "> ;\n";
+    if (pluginDesc->hints & NATIVE_PLUGIN_HAS_INLINE_DISPLAY)
+        text += "    lv2:optionalFeature <" LV2_INLINEDISPLAY__queue_draw "> ;\n";
+    if ((pluginDesc->hints & NATIVE_PLUGIN_USES_STATE) || (pluginDesc->hints & NATIVE_PLUGIN_NEEDS_UI_OPEN_SAVE))
+        text += "    lv2:optionalFeature <" LV2_STATE__threadSafeRestore "> ;\n";
+    text += "\n";
 
     // required
     text += "    lv2:requiredFeature <" LV2_BUF_SIZE__boundedBlockLength "> ,\n";
 
     if (pluginDesc->hints & NATIVE_PLUGIN_NEEDS_FIXED_BUFFERS)
         text += "                        <" LV2_BUF_SIZE__fixedBlockLength "> ,\n";
+
+    if (pluginDesc->hints & NATIVE_PLUGIN_REQUESTS_IDLE)
+        text += "                        <" LV2_WORKER__schedule "> ,\n";
 
     text += "                        <" LV2_OPTIONS__options "> ,\n";
     text += "                        <" LV2_URID__map "> ;\n";
@@ -307,6 +356,9 @@ static void writePluginFile(const NativePluginDescriptor* const pluginDesc)
 
     if (pluginDesc->hints & NATIVE_PLUGIN_HAS_UI)
         text += "    lv2:extensionData <" LV2_WORKER__interface "> ;\n";
+
+    if (pluginDesc->hints & NATIVE_PLUGIN_HAS_INLINE_DISPLAY)
+        text += "    lv2:extensionData <" LV2_INLINEDISPLAY__interface "> ;\n";
 
     text += "\n";
 
@@ -354,6 +406,8 @@ static void writePluginFile(const NativePluginDescriptor* const pluginDesc)
         {
             text += "        atom:supports <" LV2_TIME__Position "> ;\n";
         }
+        if (pluginDesc->hints & NATIVE_PLUGIN_NEEDS_UI_OPEN_SAVE)
+            text += "        atom:supports <" LV2_PATCH__Message "> ;\n";
 
         text += "        lv2:designation lv2:control ;\n";
         text += "        lv2:index " + String(portIndex++) + " ;\n";
@@ -389,7 +443,14 @@ static void writePluginFile(const NativePluginDescriptor* const pluginDesc)
     }
 
     if (pluginDesc->hints & NATIVE_PLUGIN_NEEDS_UI_OPEN_SAVE)
-        text += "    patch:writable <http://kxstudio.sf.net/carla/file> ;\n\n";
+    {
+        /**/ if (pluginLabel == "audiofile")
+            text += "    patch:writable <http://kxstudio.sf.net/carla/file/audio> ;\n\n";
+        else if (pluginLabel == "midifile")
+            text += "    patch:writable <http://kxstudio.sf.net/carla/file/midi> ;\n\n";
+        else
+            text += "    patch:writable <http://kxstudio.sf.net/carla/file> ;\n\n";
+    }
 
     // -------------------------------------------------------------------
     // MIDI inputs
@@ -425,6 +486,8 @@ static void writePluginFile(const NativePluginDescriptor* const pluginDesc)
 
         if (pluginDesc->midiOuts > 0)
             text += "        atom:supports <" LV2_MIDI__MidiEvent "> ;\n";
+        if (pluginDesc->hints & NATIVE_PLUGIN_NEEDS_UI_OPEN_SAVE)
+            text += "        atom:supports <" LV2_PATCH__Message "> ;\n";
 
         text += "        lv2:index " + String(portIndex++) + " ;\n";
 
@@ -671,8 +734,20 @@ static void writePluginFile(const NativePluginDescriptor* const pluginDesc)
             text += "    ] , [\n";
     }
 
-    text += "    doap:name \"" + String(pluginDesc->name) + "\" ;\n";
-    text += "    doap:maintainer [ foaf:name \"" + String(pluginDesc->maker) + "\" ] .\n";
+    text += "    doap:developer [ foaf:name \"" + String(pluginDesc->maker) + "\" ] ;\n";
+
+    if (std::strcmp(pluginDesc->copyright, "GNU GPL v2+") == 0)
+        text += "    doap:license <http://opensource.org/licenses/GPL-2.0> ;\n";
+    if (std::strcmp(pluginDesc->copyright, "LGPL") == 0)
+        text += "    doap:license <http://opensource.org/licenses/LGPL-2.0> ;\n";
+    if (std::strcmp(pluginDesc->copyright, "ISC") == 0)
+        text += "    doap:license <http://opensource.org/licenses/ISC> ;\n";
+
+    text += "    doap:name \"" + String(pluginDesc->name) + "\" ;\n\n";
+
+    text += "    lv2:microVersion " + String(microVersion) + " ;\n";
+    text += "    lv2:minorVersion " + String(minorVersion) + " ;\n";
+    text += "    lv2:symbol \"" + CarlaString(pluginDesc->label).toBasic() + "\" .\n";
 
 #if 0
     // -------------------------------------------------------------------
@@ -757,14 +832,20 @@ int main()
 {
     PluginListManager& plm(PluginListManager::getInstance());
 
-    writeManifestFile(plm);
+    const uint32_t majorVersion = (CARLA_VERSION_HEX & 0xFF0000) >> 16;
+    const uint32_t microVersion = (CARLA_VERSION_HEX & 0x00FF00) >> 8;
+    const uint32_t minorVersion = (CARLA_VERSION_HEX & 0x0000FF) >> 0;
+
+    const uint32_t lv2MicroVersion = majorVersion * 10 + microVersion;
+
+    writeManifestFile(plm, lv2MicroVersion, minorVersion);
 
     for (LinkedList<const NativePluginDescriptor*>::Itenerator it = plm.descs.begin2(); it.valid(); it.next())
     {
         const NativePluginDescriptor* const& pluginDesc(it.getValue(nullptr));
         CARLA_SAFE_ASSERT_CONTINUE(pluginDesc != nullptr);
 
-        writePluginFile(pluginDesc);
+        writePluginFile(pluginDesc, lv2MicroVersion, minorVersion);
     }
 
     carla_stdout("Done.");

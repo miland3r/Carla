@@ -1,6 +1,6 @@
 /*
  * Carla Native Plugins
- * Copyright (C) 2012-2015 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2012-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -57,7 +57,8 @@ public:
         : kPlayer(player),
           fMidiPort(0),
           fStartTime(0),
-          fMutex(),
+          fReadMutex(),
+          fWriteMutex(),
           fData()
     {
         CARLA_SAFE_ASSERT(kPlayer != nullptr);
@@ -175,6 +176,10 @@ public:
 
         carla_copy<uint8_t>(rawEvent->data, data, size);
 
+        // Fix zero-velocity note-ons
+        if (MIDI_IS_STATUS_NOTE_ON(data[0]) && data[2] == 0)
+            rawEvent->data[0] = uint8_t(MIDI_STATUS_NOTE_OFF | (data[0] & MIDI_CHANNEL_BIT));
+
         appendSorted(rawEvent);
     }
 
@@ -183,7 +188,7 @@ public:
 
     void removeRaw(const uint64_t time, const uint8_t* const data, const uint8_t size)
     {
-        const CarlaMutexLocker sl(fMutex);
+        const CarlaMutexLocker cmlw(fWriteMutex);
 
         for (LinkedList<const RawMidiEvent*>::Itenerator it = fData.begin2(); it.valid(); it.next())
         {
@@ -197,9 +202,12 @@ public:
             if (std::memcmp(rawMidiEvent->data, data, size) != 0)
                 continue;
 
-            delete rawMidiEvent;
-            fData.remove(it);
+            {
+                const CarlaMutexLocker cmlr(fReadMutex);
+                fData.remove(it);
+            }
 
+            delete rawMidiEvent;
             return;
         }
 
@@ -211,7 +219,8 @@ public:
 
     void clear() noexcept
     {
-        const CarlaMutexLocker sl(fMutex);
+        const CarlaMutexLocker cmlr(fReadMutex);
+        const CarlaMutexLocker cmlw(fWriteMutex);
 
         for (LinkedList<const RawMidiEvent*>::Itenerator it = fData.begin2(); it.valid(); it.next())
             delete it.getValue(nullptr);
@@ -222,15 +231,19 @@ public:
     // -------------------------------------------------------------------
     // play on time
 
-    void play(const uint64_t timePosFrame, const uint32_t frames)
+    bool play(const uint64_t timePosFrame, const uint32_t frames)
     {
-        play(static_cast<long double>(timePosFrame), static_cast<double>(frames));
+        return play(static_cast<long double>(timePosFrame), static_cast<double>(frames));
     }
 
-    void play(long double timePosFrame, const double frames)
+    bool play(long double timePosFrame, const double frames, const double offset = 0.0)
     {
-        if (! fMutex.tryLock())
-            return;
+        long double ldtime;
+
+        const CarlaMutexTryLocker cmtl(fReadMutex);
+
+        if (cmtl.wasNotLocked())
+            return false;
 
         if (fStartTime != 0)
             timePosFrame += static_cast<long double>(fStartTime);
@@ -240,15 +253,24 @@ public:
             const RawMidiEvent* const rawMidiEvent(it.getValue(nullptr));
             CARLA_SAFE_ASSERT_CONTINUE(rawMidiEvent != nullptr);
 
-            if (timePosFrame > rawMidiEvent->time)
-                continue;
-            if (timePosFrame + frames <= rawMidiEvent->time)
-                continue;
+            ldtime = static_cast<long double>(rawMidiEvent->time);
 
-            kPlayer->writeMidiEvent(fMidiPort, static_cast<long double>(rawMidiEvent->time)-timePosFrame, rawMidiEvent);
+            if (ldtime < timePosFrame)
+                continue;
+            if (ldtime > timePosFrame + frames)
+                break;
+
+            if (carla_isEqual(ldtime, timePosFrame + frames))
+            {
+                // only allow a few events to pass through in this special case
+                if (! MIDI_IS_STATUS_NOTE_OFF(rawMidiEvent->data[0]))
+                    continue;
+            }
+
+            kPlayer->writeMidiEvent(fMidiPort, ldtime + offset - timePosFrame, rawMidiEvent);
         }
 
-        fMutex.unlock();
+        return true;
     }
 
     // -------------------------------------------------------------------
@@ -267,9 +289,9 @@ public:
     // -------------------------------------------------------------------
     // special
 
-    const CarlaMutex& getLock() const noexcept
+    const CarlaMutex& getWriteMutex() const noexcept
     {
-        return fMutex;
+        return fWriteMutex;
     }
 
     LinkedList<const RawMidiEvent*>::Itenerator iteneratorBegin() const noexcept
@@ -286,13 +308,16 @@ public:
         static const std::size_t maxDataSize = 4 + 4*MAX_EVENT_DATA_SIZE; // std::strlen("0xFF:127:127:127");
         static const std::size_t maxMsgSize  = maxTimeSize + 3 /* sep + size + sep */ + maxDataSize + 1 /* newline */;
 
-        const CarlaMutexLocker sl(fMutex);
+        const CarlaMutexLocker cmlw(fWriteMutex);
+
+        char* const data((char*)std::calloc(1, fData.count() * maxMsgSize + 1));
+        CARLA_SAFE_ASSERT_RETURN(data != nullptr, nullptr);
 
         if (fData.count() == 0)
-            return nullptr;
-
-        char* const data((char*)std::calloc(1, fData.count()*maxMsgSize+1));
-        CARLA_SAFE_ASSERT_RETURN(data != nullptr, nullptr);
+        {
+            *data = '\0';
+            return data;
+        }
 
         char* dataWrtn = data;
         int wrtn;
@@ -302,7 +327,7 @@ public:
             const RawMidiEvent* const rawMidiEvent(it.getValue(nullptr));
             CARLA_SAFE_ASSERT_CONTINUE(rawMidiEvent != nullptr);
 
-            wrtn = std::snprintf(dataWrtn, maxTimeSize+4, P_INT64 ":%i:", rawMidiEvent->time, rawMidiEvent->size);
+            wrtn = std::snprintf(dataWrtn, maxTimeSize+6, P_UINT64 ":%u:", rawMidiEvent->time, rawMidiEvent->size);
             CARLA_SAFE_ASSERT_BREAK(wrtn > 0);
             dataWrtn += wrtn;
 
@@ -338,7 +363,8 @@ public:
 
         clear();
 
-        const CarlaMutexLocker sl(fMutex);
+        const CarlaMutexLocker cmlr(fReadMutex);
+        const CarlaMutexLocker cmlw(fWriteMutex);
 
         for (size_t dataPos=0; dataPos < dataLen && *dataRead != '\0';)
         {
@@ -433,17 +459,27 @@ private:
     uint8_t  fMidiPort;
     uint64_t fStartTime;
 
-    CarlaMutex fMutex;
+    CarlaMutex fReadMutex;
+    CarlaMutex fWriteMutex;
     LinkedList<const RawMidiEvent*> fData;
 
     void appendSorted(const RawMidiEvent* const event)
     {
-        const CarlaMutexLocker sl(fMutex);
+        const CarlaMutexLocker cmlw(fWriteMutex);
 
         if (fData.isEmpty())
         {
             fData.append(event);
             return;
+        }
+
+        if (const RawMidiEvent* const lastEvent = fData.getLast(nullptr))
+        {
+            if (event->time >= lastEvent->time)
+            {
+                fData.append(event);
+                return;
+            }
         }
 
         for (LinkedList<const RawMidiEvent*>::Itenerator it = fData.begin2(); it.valid(); it.next())

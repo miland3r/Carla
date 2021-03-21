@@ -28,7 +28,7 @@
 
 #include "../text/StringArray.h"
 
-#include "CarlaJuceUtils.hpp"
+#include "CarlaScopeUtils.hpp"
 
 namespace water {
 
@@ -53,13 +53,6 @@ public:
     */
     ~ChildProcess();
 
-    /** These flags are used by the start() methods. */
-    enum StreamFlags
-    {
-        wantStdOut = 1,
-        wantStdErr = 2
-    };
-
     /** Attempts to launch a child process command.
 
         The command should be the name of the executable file, followed by any arguments
@@ -69,7 +62,7 @@ public:
         The streamFlags is a combinations of values to indicate which of the child's output
         streams should be read and returned by readProcessOutput().
     */
-    bool start (const String& command, int streamFlags = wantStdOut | wantStdErr);
+    bool start (const String& command);
 
     /** Attempts to launch a child process command.
 
@@ -80,27 +73,16 @@ public:
         The streamFlags is a combinations of values to indicate which of the child's output
         streams should be read and returned by readProcessOutput().
     */
-    bool start (const StringArray& arguments, int streamFlags = wantStdOut | wantStdErr);
+    bool start (const StringArray& arguments);
 
     /** Returns true if the child process is alive. */
     bool isRunning() const;
 
-    /** Attempts to read some output from the child process.
-        This will attempt to read up to the given number of bytes of data from the
-        process. It returns the number of bytes that were actually read.
-    */
-    int readProcessOutput (void* destBuffer, int numBytesToRead);
-
-    /** Blocks until the process has finished, and then returns its complete output
-        as a string.
-    */
-    String readAllProcessOutput();
-
     /** Blocks until the process is no longer running. */
-    bool waitForProcessToFinish (int timeoutMs) const;
+    bool waitForProcessToFinish (int timeoutMs);
 
-    /** If the process has finished, this returns its exit code. */
-    uint32 getExitCode() const;
+    /** If the process has finished, this returns its exit code and also clears assigned PID. */
+    uint32 getExitCodeAndClearPID();
 
     /** Attempts to kill the child process.
         Returns true if it succeeded. Trying to read from the process after calling this may
@@ -114,7 +96,7 @@ public:
 private:
     //==============================================================================
     class ActiveProcess;
-    ScopedPointer<ActiveProcess> activeProcess;
+    CarlaScopedPointer<ActiveProcess> activeProcess;
 
     CARLA_DECLARE_NON_COPY_CLASS (ChildProcess)
 };

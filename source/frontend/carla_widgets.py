@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # Carla widgets code
-# Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+# Copyright (C) 2011-2021 Filipe Coelho <falktx@falktx.com>
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License as
@@ -19,9 +19,14 @@
 # ------------------------------------------------------------------------------------------------------------
 # Imports (Global)
 
-from PyQt5.QtCore import pyqtSignal, pyqtSlot, Qt, QByteArray, QSettings, QTimer
-from PyQt5.QtGui import QColor, QCursor, QFontMetrics, QPainter, QPainterPath, QPalette, QPixmap
-from PyQt5.QtWidgets import QDialog, QGroupBox, QInputDialog, QLineEdit, QMenu, QScrollArea, QVBoxLayout, QWidget
+from abc import abstractmethod
+
+# ------------------------------------------------------------------------------------------------------------
+# Imports (PyQt5)
+
+from PyQt5.QtCore import pyqtSignal, pyqtSlot, Qt, QByteArray
+from PyQt5.QtGui import QCursor, QIcon, QPalette, QPixmap
+from PyQt5.QtWidgets import QDialog, QFileDialog, QInputDialog, QMenu, QMessageBox, QScrollArea, QVBoxLayout, QWidget
 
 # ------------------------------------------------------------------------------------------------------------
 # Imports (Custom)
@@ -31,10 +36,63 @@ import ui_carla_about_juce
 import ui_carla_edit
 import ui_carla_parameter
 
-from carla_shared import *
-from carla_utils import *
+from carla_backend import (
+    MACOS, WINDOWS,
+    BINARY_NATIVE,
+    PLUGIN_INTERNAL,
+    PLUGIN_DSSI,
+    PLUGIN_LV2,
+    PLUGIN_VST2,
+    PLUGIN_SF2,
+    PLUGIN_SFZ,
+    PLUGIN_CAN_DRYWET,
+    PLUGIN_CAN_VOLUME,
+    PLUGIN_CAN_BALANCE,
+    PLUGIN_CAN_PANNING,
+    PLUGIN_CATEGORY_SYNTH,
+    PLUGIN_OPTION_FIXED_BUFFERS,
+    PLUGIN_OPTION_FORCE_STEREO,
+    PLUGIN_OPTION_MAP_PROGRAM_CHANGES,
+    PLUGIN_OPTION_USE_CHUNKS,
+    PLUGIN_OPTION_SEND_CONTROL_CHANGES,
+    PLUGIN_OPTION_SEND_CHANNEL_PRESSURE,
+    PLUGIN_OPTION_SEND_NOTE_AFTERTOUCH,
+    PLUGIN_OPTION_SEND_PITCHBEND,
+    PLUGIN_OPTION_SEND_ALL_SOUND_OFF,
+    PLUGIN_OPTION_SEND_PROGRAM_CHANGES,
+    PLUGIN_OPTION_SKIP_SENDING_NOTES,
+    PARAMETER_DRYWET,
+    PARAMETER_VOLUME,
+    PARAMETER_BALANCE_LEFT,
+    PARAMETER_BALANCE_RIGHT,
+    PARAMETER_PANNING,
+    PARAMETER_CTRL_CHANNEL,
+    PARAMETER_IS_ENABLED,
+    PARAMETER_IS_AUTOMABLE,
+    PARAMETER_IS_READ_ONLY,
+    PARAMETER_USES_SCALEPOINTS,
+    PARAMETER_USES_CUSTOM_TEXT,
+    PARAMETER_CAN_BE_CV_CONTROLLED,
+    PARAMETER_INPUT, PARAMETER_OUTPUT,
+    CONTROL_INDEX_NONE,
+    CONTROL_INDEX_MIDI_PITCHBEND,
+    CONTROL_INDEX_MIDI_LEARN,
+    CONTROL_INDEX_CV
+)
+
+from carla_shared import (
+    MIDI_CC_LIST, MAX_MIDI_CC_LIST_ITEM,
+    VERSION,
+    countDecimalPoints,
+    fontMetricsHorizontalAdvance,
+    setUpSignals,
+    gCarla
+)
+
+from carla_utils import getPluginTypeAsString
+#)
+
 from widgets.collapsablewidget import CollapsibleBox
-from widgets.paramspinbox import CustomInputDialog
 from widgets.pixmapkeyboard import PixmapKeyboardHArea
 
 # ------------------------------------------------------------------------------------------------------------
@@ -54,10 +112,6 @@ class CarlaAboutW(QDialog):
         self.ui = ui_carla_about.Ui_CarlaAboutW()
         self.ui.setupUi(self)
 
-        if False:
-            # kdevelop likes this :)
-            host = CarlaHostNull()
-
         if host.isControl:
             extraInfo = " - <b>%s</b>" % self.tr("OSC Bridge Version")
         elif host.isPlugin:
@@ -66,15 +120,15 @@ class CarlaAboutW(QDialog):
             extraInfo = ""
 
         self.ui.l_about.setText(self.tr(""
-                                     "<br>Version %s"
-                                     "<br>Carla is a fully-featured audio plugin host%s.<br>"
-                                     "<br>Copyright (C) 2011-2019 falkTX<br>"
-                                     "" % (VERSION, extraInfo)))
+                                        "<br>Version %s"
+                                        "<br>Carla is a fully-featured audio plugin host%s.<br>"
+                                        "<br>Copyright (C) 2011-2021 falkTX<br>"
+                                        "" % (VERSION, extraInfo)))
 
         if self.ui.about.palette().color(QPalette.Background).blackF() < 0.5:
             self.ui.l_icons.setPixmap(QPixmap(":/bitmaps/carla_about_black.png"))
             self.ui.ico_example_edit.setPixmap(QPixmap(":/bitmaps/button_file-black.png"))
-            self.ui.ico_example_file.setPixmap(QPixmap(":/bitmaps/button_edit-black.png"))
+            self.ui.ico_example_file.setPixmap(QPixmap(":/scalable/button_edit-black.svg"))
             self.ui.ico_example_gui.setPixmap(QPixmap(":/bitmaps/button_gui-black.png"))
 
         if host.isControl:
@@ -91,6 +145,7 @@ class CarlaAboutW(QDialog):
             self.ui.le_osc_url_tcp.setText(self.tr("(Engine not running)"))
             self.ui.le_osc_url_udp.setText(self.tr("(Engine not running)"))
 
+        # pylint: disable=line-too-long
         self.ui.l_osc_cmds.setText("<table>"
                                    "<tr><td>" "/set_active"                 "&nbsp;</td><td>&lt;i-value&gt;</td></tr>"
                                    "<tr><td>" "/set_drywet"                 "&nbsp;</td><td>&lt;f-value&gt;</td></tr>"
@@ -110,6 +165,7 @@ class CarlaAboutW(QDialog):
 
         self.ui.l_example.setText("/Carla/2/set_parameter_value 5 1.0")
         self.ui.l_example_help.setText("<i>(as in this example, \"2\" is the plugin number and \"5\" the parameter)</i>")
+        # pylint: enable=line-too-long
 
         self.ui.l_ladspa.setText(self.tr("Everything! (Including LRDF)"))
         self.ui.l_dssi.setText(self.tr("Everything! (Including CustomData/Chunks)"))
@@ -128,7 +184,6 @@ class CarlaAboutW(QDialog):
                                       "<li>http://lv2plug.in/ns/ext/options</li>"
                                       "<li>http://lv2plug.in/ns/ext/parameters</li>"
                                       #"<li>http://lv2plug.in/ns/ext/patch</li>"
-                                      #"<li>http://lv2plug.in/ns/ext/port-groups</li>"
                                       "<li>http://lv2plug.in/ns/ext/port-props</li>"
                                       "<li>http://lv2plug.in/ns/ext/presets</li>"
                                       "<li>http://lv2plug.in/ns/ext/resize-port</li>"
@@ -151,16 +206,19 @@ class CarlaAboutW(QDialog):
         usingJuce = "juce" in gCarla.utils.get_supported_features()
 
         if usingJuce and (MACOS or WINDOWS):
-            self.ui.l_vst2.setText(self.tr("Using Juce host"))
-            self.ui.l_vst3.setText(self.tr("Using Juce host"))
+            self.ui.l_vst2.setText(self.tr("Using JUCE host"))
         else:
-            self.ui.l_vst2.setText(self.tr("About 85% complete (missing vst bank/presets and some minor stuff)"))
+            self.ui.l_vst2.setText(self.tr("About 85&#37; complete (missing vst bank/presets and some minor stuff)"))
+
+        if usingJuce:
+            self.ui.l_vst3.setText(self.tr("Using JUCE host"))
+        else:
             self.ui.line_vst2.hide()
             self.ui.l_vst3.hide()
             self.ui.lid_vst3.hide()
 
         if MACOS:
-            self.ui.l_au.setText(self.tr("Using Juce host"))
+            self.ui.l_au.setText(self.tr("Using JUCE host"))
         else:
             self.ui.line_vst3.hide()
             self.ui.l_au.hide()
@@ -170,8 +228,8 @@ class CarlaAboutW(QDialog):
         # adjust appropriately
         self.ui.tabWidget.setCurrentIndex(2)
         self.adjustSize()
-
         self.ui.tabWidget.setCurrentIndex(0)
+
         self.setFixedSize(self.size())
 
         flags  = self.windowFlags()
@@ -181,10 +239,6 @@ class CarlaAboutW(QDialog):
             flags |= Qt.MSWindowsFixedSizeDialogHint
 
         self.setWindowFlags(flags)
-
-    def done(self, r):
-        QDialog.done(self, r)
-        self.close()
 
 # ------------------------------------------------------------------------------------------------------------
 # JUCE About dialog
@@ -200,20 +254,22 @@ class JuceAboutW(QDialog):
         self.adjustSize()
         self.setFixedSize(self.size())
 
-        if WINDOWS:
-            self.setWindowFlags(self.windowFlags()|Qt.MSWindowsFixedSizeDialogHint)
+        flags  = self.windowFlags()
+        flags &= ~Qt.WindowContextHelpButtonHint
 
-    def done(self, r):
-        QDialog.done(self, r)
-        self.close()
+        if WINDOWS:
+            flags |= Qt.MSWindowsFixedSizeDialogHint
+
+        self.setWindowFlags(flags)
 
 # ------------------------------------------------------------------------------------------------------------
 # Plugin Parameter
 
 class PluginParameter(QWidget):
-    midiControlChanged = pyqtSignal(int, int)
-    midiChannelChanged = pyqtSignal(int, int)
-    valueChanged       = pyqtSignal(int, float)
+    mappedControlChanged = pyqtSignal(int, int)
+    mappedRangeChanged   = pyqtSignal(int, float, float)
+    midiChannelChanged   = pyqtSignal(int, int)
+    valueChanged         = pyqtSignal(int, float)
 
     def __init__(self, parent, host, pInfo, pluginId, tabIndex):
         QWidget.__init__(self, parent)
@@ -221,19 +277,20 @@ class PluginParameter(QWidget):
         self.ui = ui_carla_parameter.Ui_PluginParameter()
         self.ui.setupUi(self)
 
-        if False:
-            # kdevelop likes this :)
-            host = CarlaHostNull()
-            self.host = host
-
         # -------------------------------------------------------------
         # Internal stuff
 
-        self.fMidiControl = -1
-        self.fMidiChannel = 1
-        self.fParameterId = pInfo['index']
-        self.fPluginId    = pluginId
-        self.fTabIndex    = tabIndex
+        self.fDecimalPoints = max(2, countDecimalPoints(pInfo['step'], pInfo['stepSmall']))
+        self.fCanBeInCV     = pInfo['hints'] & PARAMETER_CAN_BE_CV_CONTROLLED
+        self.fMappedCtrl    = pInfo['mappedControlIndex']
+        self.fMappedMinimum = pInfo['mappedMinimum']
+        self.fMappedMaximum = pInfo['mappedMaximum']
+        self.fMinimum       = pInfo['minimum']
+        self.fMaximum       = pInfo['maximum']
+        self.fMidiChannel   = pInfo['midiChannel']
+        self.fParameterId   = pInfo['index']
+        self.fPluginId      = pluginId
+        self.fTabIndex      = tabIndex
 
         # -------------------------------------------------------------
         # Set-up GUI
@@ -241,7 +298,7 @@ class PluginParameter(QWidget):
         pType  = pInfo['type']
         pHints = pInfo['hints']
 
-        self.ui.label.setText(pInfo['name'])
+        self.ui.l_name.setText(pInfo['name'])
         self.ui.widget.setName(pInfo['name'])
         self.ui.widget.setMinimum(pInfo['minimum'])
         self.ui.widget.setMaximum(pInfo['maximum'])
@@ -253,31 +310,33 @@ class PluginParameter(QWidget):
         self.ui.widget.setScalePoints(pInfo['scalePoints'], bool(pHints & PARAMETER_USES_SCALEPOINTS))
 
         if pInfo['comment']:
-            self.ui.label.setToolTip(pInfo['comment'])
+            self.ui.l_name.setToolTip(pInfo['comment'])
             self.ui.widget.setToolTip(pInfo['comment'])
 
         if pType == PARAMETER_INPUT:
             if not pHints & PARAMETER_IS_ENABLED:
-                self.ui.label.setEnabled(False)
+                self.ui.l_name.setEnabled(False)
+                self.ui.l_status.setEnabled(False)
                 self.ui.widget.setEnabled(False)
                 self.ui.widget.setReadOnly(True)
-                self.ui.sb_control.setEnabled(False)
-                self.ui.sb_channel.setEnabled(False)
+                self.ui.tb_options.setEnabled(False)
 
             elif not pHints & PARAMETER_IS_AUTOMABLE:
-                self.ui.sb_control.setEnabled(False)
-                self.ui.sb_channel.setEnabled(False)
+                self.ui.l_status.setEnabled(False)
+                self.ui.tb_options.setEnabled(False)
 
             if pHints & PARAMETER_IS_READ_ONLY:
+                self.ui.l_status.setEnabled(False)
                 self.ui.widget.setReadOnly(True)
+                self.ui.tb_options.setEnabled(False)
 
         elif pType == PARAMETER_OUTPUT:
             self.ui.widget.setReadOnly(True)
 
         else:
+            self.ui.l_status.setVisible(False)
             self.ui.widget.setVisible(False)
-            self.ui.sb_control.setVisible(False)
-            self.ui.sb_channel.setVisible(False)
+            self.ui.tb_options.setVisible(False)
 
         # Only set value after all hints are handled
         self.ui.widget.setValue(pInfo['current'])
@@ -285,19 +344,20 @@ class PluginParameter(QWidget):
         if pHints & PARAMETER_USES_CUSTOM_TEXT and not host.isPlugin:
             self.ui.widget.setTextCallback(self._textCallBack)
 
+        self.ui.l_status.setFixedWidth(fontMetricsHorizontalAdvance(self.ui.l_status.fontMetrics(),
+                                                                    self.tr("CC%i Ch%i" % (119,16))))
+
         self.ui.widget.setValueCallback(self._valueCallBack)
         self.ui.widget.updateAll()
 
-        self.setMidiControl(pInfo['midiCC'])
+        self.setMappedControlIndex(pInfo['mappedControlIndex'])
         self.setMidiChannel(pInfo['midiChannel'])
+        self.updateStatusLabel()
 
         # -------------------------------------------------------------
         # Set-up connections
 
-        self.ui.sb_control.customContextMenuRequested.connect(self.slot_controlSpinboxCustomMenu)
-        self.ui.sb_channel.customContextMenuRequested.connect(self.slot_channelSpinboxCustomMenu)
-        self.ui.sb_control.valueChanged.connect(self.slot_controlSpinboxChanged)
-        self.ui.sb_channel.valueChanged.connect(self.slot_channelSpinboxChanged)
+        self.ui.tb_options.clicked.connect(self.slot_optionsCustomMenu)
         self.ui.widget.dragStateChanged.connect(self.slot_parameterDragStateChanged)
 
         # -------------------------------------------------------------
@@ -319,75 +379,219 @@ class PluginParameter(QWidget):
         self.ui.widget.setValue(value)
         self.ui.widget.blockSignals(False)
 
-    def setMidiControl(self, control):
-        self.fMidiControl = control
-        self.ui.sb_control.blockSignals(True)
-        self.ui.sb_control.setValue(control)
-        self.ui.sb_control.blockSignals(False)
+    def setMappedControlIndex(self, control):
+        self.fMappedCtrl = control
+        self.updateStatusLabel()
+
+    def setMappedRange(self, minimum, maximum):
+        self.fMappedMinimum = minimum
+        self.fMappedMaximum = maximum
 
     def setMidiChannel(self, channel):
         self.fMidiChannel = channel
-        self.ui.sb_channel.blockSignals(True)
-        self.ui.sb_channel.setValue(channel)
-        self.ui.sb_channel.blockSignals(False)
+        self.updateStatusLabel()
 
     def setLabelWidth(self, width):
-        self.ui.label.setFixedWidth(width)
+        self.ui.l_name.setFixedWidth(width)
 
-    @pyqtSlot()
-    def slot_controlSpinboxCustomMenu(self):
-        menu = QMenu(self)
-
-        actNone = menu.addAction(self.tr("None"))
-
-        if self.fMidiControl == -1:
-            actNone.setCheckable(True)
-            actNone.setChecked(True)
-
-        for cc in MIDI_CC_LIST:
-            action = menu.addAction(cc)
-
-            if self.fMidiControl != -1 and int(cc.split(" ", 1)[0], 16) == self.fMidiControl:
-                action.setCheckable(True)
-                action.setChecked(True)
-
-        actSel = menu.exec_(QCursor.pos())
-
-        if not actSel:
-            pass
-        elif actSel == actNone:
-            self.ui.sb_control.setValue(-1)
+    def updateStatusLabel(self):
+        if self.fMappedCtrl == CONTROL_INDEX_NONE:
+            text = self.tr("Unmapped")
+        elif self.fMappedCtrl == CONTROL_INDEX_CV:
+            text = self.tr("CV export")
+        elif self.fMappedCtrl == CONTROL_INDEX_MIDI_PITCHBEND:
+            text = self.tr("PBend Ch%i" % (self.fMidiChannel,))
+        elif self.fMappedCtrl == CONTROL_INDEX_MIDI_LEARN:
+            text = self.tr("MIDI Learn")
         else:
-            selControlStr = actSel.text()
-            selControl    = int(selControlStr.split(" ", 1)[0].replace("&",""), 16)
-            self.ui.sb_control.setValue(selControl)
+            text = self.tr("CC%i Ch%i" % (self.fMappedCtrl, self.fMidiChannel))
+
+        self.ui.l_status.setText(text)
 
     @pyqtSlot()
-    def slot_channelSpinboxCustomMenu(self):
+    def slot_optionsCustomMenu(self):
         menu = QMenu(self)
 
+        if self.fMappedCtrl == CONTROL_INDEX_NONE:
+            title = self.tr("Unmapped")
+        elif self.fMappedCtrl == CONTROL_INDEX_CV:
+            title = self.tr("Exposed as CV port")
+        elif self.fMappedCtrl == CONTROL_INDEX_MIDI_PITCHBEND:
+            title = self.tr("Mapped to MIDI Pitchbend, channel %i" % (self.fMidiChannel,))
+        elif self.fMappedCtrl == CONTROL_INDEX_MIDI_LEARN:
+            title = self.tr("MIDI Learn active")
+        else:
+            title = self.tr("Mapped to MIDI control %i, channel %i" % (self.fMappedCtrl, self.fMidiChannel))
+
+        if self.fMappedCtrl != CONTROL_INDEX_NONE:
+            title += " (range: %g-%g)" % (self.fMappedMinimum, self.fMappedMaximum)
+
+        actTitle = menu.addAction(title)
+        actTitle.setEnabled(False)
+
+        menu.addSeparator()
+
+        actUnmap = menu.addAction(self.tr("Unmap"))
+
+        if self.fMappedCtrl == CONTROL_INDEX_NONE:
+            actUnmap.setCheckable(True)
+            actUnmap.setChecked(True)
+
+        if self.fCanBeInCV:
+            menu.addSection("CV")
+            actCV = menu.addAction(self.tr("Expose as CV port"))
+            if self.fMappedCtrl == CONTROL_INDEX_CV:
+                actCV.setCheckable(True)
+                actCV.setChecked(True)
+        else:
+            actCV = None
+
+        menu.addSection("MIDI")
+
+        if not self.ui.widget.isReadOnly():
+            actLearn = menu.addAction(self.tr("MIDI Learn"))
+
+            if self.fMappedCtrl == CONTROL_INDEX_MIDI_LEARN:
+                actLearn.setCheckable(True)
+                actLearn.setChecked(True)
+        else:
+            actLearn = None
+
+        menuMIDI = menu.addMenu(self.tr("MIDI Control"))
+
+        if self.fMappedCtrl not in (CONTROL_INDEX_NONE,
+                                    CONTROL_INDEX_CV,
+                                    CONTROL_INDEX_MIDI_PITCHBEND,
+                                    CONTROL_INDEX_MIDI_LEARN):
+            action = menuMIDI.menuAction()
+            action.setCheckable(True)
+            action.setChecked(True)
+
+        inlist = False
+        actCCs = []
+        for cc in MIDI_CC_LIST:
+            action = menuMIDI.addAction(cc)
+            actCCs.append(action)
+
+            if self.fMappedCtrl >= 0 and self.fMappedCtrl <= MAX_MIDI_CC_LIST_ITEM:
+                ccx = int(cc.split(" [", 1)[0], 10)
+
+                if ccx > self.fMappedCtrl and not inlist:
+                    inlist = True
+                    action = menuMIDI.addAction(self.tr("%02i [0x%02X] (Custom)" % (self.fMappedCtrl,
+                                                                                    self.fMappedCtrl)))
+                    action.setCheckable(True)
+                    action.setChecked(True)
+                    actCCs.append(action)
+
+                elif ccx == self.fMappedCtrl:
+                    inlist = True
+                    action.setCheckable(True)
+                    action.setChecked(True)
+
+        if self.fMappedCtrl > MAX_MIDI_CC_LIST_ITEM and self.fMappedCtrl <= 0x77:
+            action = menuMIDI.addAction(self.tr("%02i [0x%02X] (Custom)" % (self.fMappedCtrl, self.fMappedCtrl)))
+            action.setCheckable(True)
+            action.setChecked(True)
+            actCCs.append(action)
+
+        actCustomCC = menuMIDI.addAction(self.tr("Custom..."))
+
+        # TODO
+        #actPitchbend = menu.addAction(self.tr("MIDI Pitchbend"))
+
+        #if self.fMappedCtrl == CONTROL_INDEX_MIDI_PITCHBEND:
+            #actPitchbend.setCheckable(True)
+            #actPitchbend.setChecked(True)
+
+        menuChannel = menu.addMenu(self.tr("MIDI Channel"))
+
+        actChannels = []
         for i in range(1, 16+1):
-            action = menu.addAction("%i" % i)
+            action = menuChannel.addAction("%i" % i)
+            actChannels.append(action)
 
             if self.fMidiChannel == i:
                 action.setCheckable(True)
                 action.setChecked(True)
 
+        if self.fMappedCtrl != CONTROL_INDEX_NONE:
+            if self.fMappedCtrl == CONTROL_INDEX_CV:
+                menu.addSection("Range (Scaled CV input)")
+            else:
+                menu.addSection("Range (MIDI bounds)")
+            actRangeMinimum = menu.addAction(self.tr("Set minimum... (%g)" % self.fMappedMinimum))
+            actRangeMaximum = menu.addAction(self.tr("Set maximum... (%g)" % self.fMappedMaximum))
+        else:
+            actRangeMinimum = actRangeMaximum = None
+
         actSel = menu.exec_(QCursor.pos())
 
-        if actSel:
-            selChannel = int(actSel.text())
-            self.ui.sb_channel.setValue(selChannel)
+        if not actSel:
+            return
 
-    @pyqtSlot(int)
-    def slot_controlSpinboxChanged(self, control):
-        self.fMidiControl = control
-        self.midiControlChanged.emit(self.fParameterId, control)
+        if actSel in actChannels:
+            channel = int(actSel.text())
+            self.fMidiChannel = channel
+            self.updateStatusLabel()
+            self.midiChannelChanged.emit(self.fParameterId, channel)
+            return
 
-    @pyqtSlot(int)
-    def slot_channelSpinboxChanged(self, channel):
-        self.fMidiChannel = channel
-        self.midiChannelChanged.emit(self.fParameterId, channel)
+        if actSel == actRangeMinimum:
+            value, ok = QInputDialog.getDouble(self,
+                                               self.tr("Custom Minimum"),
+                                               "Custom minimum value to use:",
+                                               self.fMappedMinimum,
+                                               self.fMinimum if self.fMappedCtrl != CONTROL_INDEX_CV else -9e6,
+                                               self.fMaximum if self.fMappedCtrl != CONTROL_INDEX_CV else 9e6,
+                                               self.fDecimalPoints)
+            if not ok:
+                return
+
+            self.fMappedMinimum = value
+            self.mappedRangeChanged.emit(self.fParameterId, self.fMappedMinimum, self.fMappedMaximum)
+            return
+
+        if actSel == actRangeMaximum:
+            value, ok = QInputDialog.getDouble(self,
+                                               self.tr("Custom Maximum"),
+                                               "Custom maximum value to use:",
+                                               self.fMappedMaximum,
+                                               self.fMinimum if self.fMappedCtrl != CONTROL_INDEX_CV else -9e6,
+                                               self.fMaximum if self.fMappedCtrl != CONTROL_INDEX_CV else 9e6,
+                                               self.fDecimalPoints)
+            if not ok:
+                return
+
+            self.fMappedMaximum = value
+            self.mappedRangeChanged.emit(self.fParameterId, self.fMappedMinimum, self.fMappedMaximum)
+            return
+
+        if actSel == actUnmap:
+            ctrl = CONTROL_INDEX_NONE
+        elif actSel == actCV:
+            ctrl = CONTROL_INDEX_CV
+        elif actSel == actCustomCC:
+            value = self.fMappedCtrl if self.fMappedCtrl >= 0x01 and self.fMappedCtrl <= 0x77 else 1
+            ctrl, ok = QInputDialog.getInt(self,
+                                           self.tr("Custom CC"),
+                                           "Custom MIDI CC to use:",
+                                           value,
+                                           0x01, 0x77, 1)
+            if not ok:
+                return
+        #elif actSel == actPitchbend:
+            #ctrl = CONTROL_INDEX_MIDI_PITCHBEND
+        elif actSel == actLearn:
+            ctrl = CONTROL_INDEX_MIDI_LEARN
+        elif actSel in actCCs:
+            ctrl = int(actSel.text().split(" ", 1)[0].replace("&",""), 10)
+        else:
+            return
+
+        self.fMappedCtrl = ctrl
+        self.updateStatusLabel()
+        self.mappedControlChanged.emit(self.fParameterId, ctrl)
 
     @pyqtSlot(bool)
     def slot_parameterDragStateChanged(self, touch):
@@ -450,12 +654,6 @@ class PluginEdit(QDialog):
         self.ui = ui_carla_edit.Ui_PluginEdit()
         self.ui.setupUi(self)
 
-        if False:
-            # kdevelop likes this :)
-            parent = PluginEditParentMeta()
-            host = CarlaHostNull()
-            self.host = host
-
         # -------------------------------------------------------------
         # Internal stuff
 
@@ -473,8 +671,8 @@ class PluginEdit(QDialog):
 
         self.fPlayingNotes = [] # (channel, note)
 
-        self.fTabIconOff    = QIcon(":/bitmaps/led_off.png")
-        self.fTabIconOn     = QIcon(":/bitmaps/led_yellow.png")
+        self.fTabIconOff    = QIcon(":/scalable/led_off.svg")
+        self.fTabIconOn     = QIcon(":/scalable/led_yellow.svg")
         self.fTabIconTimers = []
 
         # used during testing
@@ -489,35 +687,35 @@ class PluginEdit(QDialog):
         self.ui.label_plugin.setFont(labelPluginFont)
 
         self.ui.dial_drywet.setCustomPaintMode(self.ui.dial_drywet.CUSTOM_PAINT_MODE_CARLA_WET)
-        self.ui.dial_drywet.setPixmap(3)
+        self.ui.dial_drywet.setImage(3)
         self.ui.dial_drywet.setLabel("Dry/Wet")
         self.ui.dial_drywet.setMinimum(0.0)
         self.ui.dial_drywet.setMaximum(1.0)
         self.ui.dial_drywet.setValue(host.get_internal_parameter_value(pluginId, PARAMETER_DRYWET))
 
         self.ui.dial_vol.setCustomPaintMode(self.ui.dial_vol.CUSTOM_PAINT_MODE_CARLA_VOL)
-        self.ui.dial_vol.setPixmap(3)
+        self.ui.dial_vol.setImage(3)
         self.ui.dial_vol.setLabel("Volume")
         self.ui.dial_vol.setMinimum(0.0)
         self.ui.dial_vol.setMaximum(1.27)
         self.ui.dial_vol.setValue(host.get_internal_parameter_value(pluginId, PARAMETER_VOLUME))
 
         self.ui.dial_b_left.setCustomPaintMode(self.ui.dial_b_left.CUSTOM_PAINT_MODE_CARLA_L)
-        self.ui.dial_b_left.setPixmap(4)
+        self.ui.dial_b_left.setImage(4)
         self.ui.dial_b_left.setLabel("L")
         self.ui.dial_b_left.setMinimum(-1.0)
         self.ui.dial_b_left.setMaximum(1.0)
         self.ui.dial_b_left.setValue(host.get_internal_parameter_value(pluginId, PARAMETER_BALANCE_LEFT))
 
         self.ui.dial_b_right.setCustomPaintMode(self.ui.dial_b_right.CUSTOM_PAINT_MODE_CARLA_R)
-        self.ui.dial_b_right.setPixmap(4)
+        self.ui.dial_b_right.setImage(4)
         self.ui.dial_b_right.setLabel("R")
         self.ui.dial_b_right.setMinimum(-1.0)
         self.ui.dial_b_right.setMaximum(1.0)
         self.ui.dial_b_right.setValue(host.get_internal_parameter_value(pluginId, PARAMETER_BALANCE_RIGHT))
 
         self.ui.dial_pan.setCustomPaintMode(self.ui.dial_b_right.CUSTOM_PAINT_MODE_CARLA_PAN)
-        self.ui.dial_pan.setPixmap(4)
+        self.ui.dial_pan.setImage(4)
         self.ui.dial_pan.setLabel("Pan")
         self.ui.dial_pan.setMinimum(-1.0)
         self.ui.dial_pan.setMaximum(1.0)
@@ -554,6 +752,7 @@ class PluginEdit(QDialog):
         self.ui.ch_force_stereo.clicked.connect(self.slot_optionChanged)
         self.ui.ch_map_program_changes.clicked.connect(self.slot_optionChanged)
         self.ui.ch_use_chunks.clicked.connect(self.slot_optionChanged)
+        self.ui.ch_send_notes.clicked.connect(self.slot_optionChanged)
         self.ui.ch_send_program_changes.clicked.connect(self.slot_optionChanged)
         self.ui.ch_send_control_changes.clicked.connect(self.slot_optionChanged)
         self.ui.ch_send_channel_pressure.clicked.connect(self.slot_optionChanged)
@@ -596,7 +795,8 @@ class PluginEdit(QDialog):
 
     @pyqtSlot(int, int, int, int)
     def slot_handleNoteOnCallback(self, pluginId, channel, note, velocity):
-        if self.fPluginId != pluginId: return
+        if self.fPluginId != pluginId:
+            return
 
         if self.fControlChannel == channel:
             self.ui.keyboard.sendNoteOn(note, False)
@@ -611,7 +811,8 @@ class PluginEdit(QDialog):
 
     @pyqtSlot(int, int, int)
     def slot_handleNoteOffCallback(self, pluginId, channel, note):
-        if self.fPluginId != pluginId: return
+        if self.fPluginId != pluginId:
+            return
 
         if self.fControlChannel == channel:
             self.ui.keyboard.sendNoteOff(note, False)
@@ -621,7 +822,7 @@ class PluginEdit(QDialog):
         if playItem in self.fPlayingNotes:
             self.fPlayingNotes.remove(playItem)
 
-        if len(self.fPlayingNotes) == 0 and self.fParent is not None:
+        if self.fPlayingNotes and self.fParent is not None:
             self.fParent.editDialogMidiActivityChanged(self.fPluginId, False)
 
     @pyqtSlot(int)
@@ -672,7 +873,7 @@ class PluginEdit(QDialog):
                 self.ui.cb_midi_programs.setItemText(mpIndex, "%03i:%03i - %s" % (mpBank+1, mpProg+1, mpName))
 
         # Update all parameter values
-        for paramType, paramId, paramWidget in self.fParameterList:
+        for _, paramId, paramWidget in self.fParameterList:
             paramWidget.blockSignals(True)
             paramWidget.setValue(self.host.get_current_parameter_value(self.fPluginId, paramId))
             paramWidget.blockSignals(False)
@@ -768,29 +969,34 @@ class PluginEdit(QDialog):
         self.ui.dial_b_right.setEnabled(pluginHints & PLUGIN_CAN_BALANCE)
         self.ui.dial_pan.setEnabled(pluginHints & PLUGIN_CAN_PANNING)
 
-        self.ui.ch_use_chunks.setEnabled(self.fPluginInfo['optionsAvailable'] & PLUGIN_OPTION_USE_CHUNKS)
-        self.ui.ch_use_chunks.setChecked(self.fPluginInfo['optionsEnabled'] & PLUGIN_OPTION_USE_CHUNKS)
-        self.ui.ch_fixed_buffer.setEnabled(self.fPluginInfo['optionsAvailable'] & PLUGIN_OPTION_FIXED_BUFFERS)
-        self.ui.ch_fixed_buffer.setChecked(self.fPluginInfo['optionsEnabled'] & PLUGIN_OPTION_FIXED_BUFFERS)
-        self.ui.ch_force_stereo.setEnabled(self.fPluginInfo['optionsAvailable'] & PLUGIN_OPTION_FORCE_STEREO)
-        self.ui.ch_force_stereo.setChecked(self.fPluginInfo['optionsEnabled'] & PLUGIN_OPTION_FORCE_STEREO)
-        self.ui.ch_map_program_changes.setEnabled(self.fPluginInfo['optionsAvailable'] & PLUGIN_OPTION_MAP_PROGRAM_CHANGES)
-        self.ui.ch_map_program_changes.setChecked(self.fPluginInfo['optionsEnabled'] & PLUGIN_OPTION_MAP_PROGRAM_CHANGES)
-        self.ui.ch_send_control_changes.setEnabled(self.fPluginInfo['optionsAvailable'] & PLUGIN_OPTION_SEND_CONTROL_CHANGES)
-        self.ui.ch_send_control_changes.setChecked(self.fPluginInfo['optionsEnabled'] & PLUGIN_OPTION_SEND_CONTROL_CHANGES)
-        self.ui.ch_send_channel_pressure.setEnabled(self.fPluginInfo['optionsAvailable'] & PLUGIN_OPTION_SEND_CHANNEL_PRESSURE)
-        self.ui.ch_send_channel_pressure.setChecked(self.fPluginInfo['optionsEnabled'] & PLUGIN_OPTION_SEND_CHANNEL_PRESSURE)
-        self.ui.ch_send_note_aftertouch.setEnabled(self.fPluginInfo['optionsAvailable'] & PLUGIN_OPTION_SEND_NOTE_AFTERTOUCH)
-        self.ui.ch_send_note_aftertouch.setChecked(self.fPluginInfo['optionsEnabled'] & PLUGIN_OPTION_SEND_NOTE_AFTERTOUCH)
-        self.ui.ch_send_pitchbend.setEnabled(self.fPluginInfo['optionsAvailable'] & PLUGIN_OPTION_SEND_PITCHBEND)
-        self.ui.ch_send_pitchbend.setChecked(self.fPluginInfo['optionsEnabled'] & PLUGIN_OPTION_SEND_PITCHBEND)
-        self.ui.ch_send_all_sound_off.setEnabled(self.fPluginInfo['optionsAvailable'] & PLUGIN_OPTION_SEND_ALL_SOUND_OFF)
-        self.ui.ch_send_all_sound_off.setChecked(self.fPluginInfo['optionsEnabled'] & PLUGIN_OPTION_SEND_ALL_SOUND_OFF)
+        optsAvailable = self.fPluginInfo['optionsAvailable']
+        optsEnabled = self.fPluginInfo['optionsEnabled']
+        self.ui.ch_use_chunks.setEnabled(optsAvailable & PLUGIN_OPTION_USE_CHUNKS)
+        self.ui.ch_use_chunks.setChecked(optsEnabled & PLUGIN_OPTION_USE_CHUNKS)
+        self.ui.ch_fixed_buffer.setEnabled(optsAvailable & PLUGIN_OPTION_FIXED_BUFFERS)
+        self.ui.ch_fixed_buffer.setChecked(optsEnabled & PLUGIN_OPTION_FIXED_BUFFERS)
+        self.ui.ch_force_stereo.setEnabled(optsAvailable & PLUGIN_OPTION_FORCE_STEREO)
+        self.ui.ch_force_stereo.setChecked(optsEnabled & PLUGIN_OPTION_FORCE_STEREO)
+        self.ui.ch_map_program_changes.setEnabled(optsAvailable & PLUGIN_OPTION_MAP_PROGRAM_CHANGES)
+        self.ui.ch_map_program_changes.setChecked(optsEnabled & PLUGIN_OPTION_MAP_PROGRAM_CHANGES)
+        self.ui.ch_send_notes.setEnabled(optsAvailable & PLUGIN_OPTION_SKIP_SENDING_NOTES)
+        self.ui.ch_send_notes.setChecked((self.ui.ch_send_notes.isEnabled() and
+                                          (optsEnabled & PLUGIN_OPTION_SKIP_SENDING_NOTES) == 0x0))
+        self.ui.ch_send_control_changes.setEnabled(optsAvailable & PLUGIN_OPTION_SEND_CONTROL_CHANGES)
+        self.ui.ch_send_control_changes.setChecked(optsEnabled & PLUGIN_OPTION_SEND_CONTROL_CHANGES)
+        self.ui.ch_send_channel_pressure.setEnabled(optsAvailable & PLUGIN_OPTION_SEND_CHANNEL_PRESSURE)
+        self.ui.ch_send_channel_pressure.setChecked(optsEnabled & PLUGIN_OPTION_SEND_CHANNEL_PRESSURE)
+        self.ui.ch_send_note_aftertouch.setEnabled(optsAvailable & PLUGIN_OPTION_SEND_NOTE_AFTERTOUCH)
+        self.ui.ch_send_note_aftertouch.setChecked(optsEnabled & PLUGIN_OPTION_SEND_NOTE_AFTERTOUCH)
+        self.ui.ch_send_pitchbend.setEnabled(optsAvailable & PLUGIN_OPTION_SEND_PITCHBEND)
+        self.ui.ch_send_pitchbend.setChecked(optsEnabled & PLUGIN_OPTION_SEND_PITCHBEND)
+        self.ui.ch_send_all_sound_off.setEnabled(optsAvailable & PLUGIN_OPTION_SEND_ALL_SOUND_OFF)
+        self.ui.ch_send_all_sound_off.setChecked(optsEnabled & PLUGIN_OPTION_SEND_ALL_SOUND_OFF)
 
-        canSendPrograms = bool((self.fPluginInfo['optionsAvailable'] & PLUGIN_OPTION_SEND_PROGRAM_CHANGES) != 0 and
-                               (self.fPluginInfo['optionsEnabled'] & PLUGIN_OPTION_MAP_PROGRAM_CHANGES) == 0)
+        canSendPrograms = bool((optsAvailable & PLUGIN_OPTION_SEND_PROGRAM_CHANGES) != 0 and
+                               (optsEnabled & PLUGIN_OPTION_MAP_PROGRAM_CHANGES) == 0)
         self.ui.ch_send_program_changes.setEnabled(canSendPrograms)
-        self.ui.ch_send_program_changes.setChecked(self.fPluginInfo['optionsEnabled'] & PLUGIN_OPTION_SEND_PROGRAM_CHANGES)
+        self.ui.ch_send_program_changes.setChecked(optsEnabled & PLUGIN_OPTION_SEND_PROGRAM_CHANGES)
 
         self.ui.sw_programs.setCurrentIndex(0 if self.fPluginInfo['type'] in (PLUGIN_VST2, PLUGIN_SFZ) else 1)
 
@@ -809,8 +1015,14 @@ class PluginEdit(QDialog):
         self.fParametersToUpdate = []
         self.fTabIconTimers      = []
 
+        # Save current tab state
+        tabIndex  = self.ui.tabWidget.currentIndex()
+        tabWidget = self.ui.tabWidget.currentWidget()
+        scrollVal = tabWidget.verticalScrollBar().value() if isinstance(tabWidget, QScrollArea) else None
+        del tabWidget
+
         # Remove all previous parameters
-        for x in range(self.ui.tabWidget.count()-1):
+        for _ in range(self.ui.tabWidget.count()-1):
             self.ui.tabWidget.widget(1).deleteLater()
             self.ui.tabWidget.removeTab(1)
 
@@ -856,7 +1068,9 @@ class PluginEdit(QDialog):
                 'step':    paramRanges['step'],
                 'stepSmall': paramRanges['stepSmall'],
                 'stepLarge': paramRanges['stepLarge'],
-                'midiCC':    paramData['midiCC'],
+                'mappedControlIndex': paramData['mappedControlIndex'],
+                'mappedMinimum': paramData['mappedMinimum'],
+                'mappedMaximum': paramData['mappedMaximum'],
                 'midiChannel': paramData['midiChannel']+1,
 
                 'comment':   paramInfo['comment'],
@@ -879,7 +1093,7 @@ class PluginEdit(QDialog):
             # Get width values, in packs of 20
 
             if parameter['type'] == PARAMETER_INPUT:
-                paramInputWidthTMP = self.fontMetrics().width(parameter['name'])
+                paramInputWidthTMP = fontMetricsHorizontalAdvance(self.fontMetrics(), parameter['name'])
 
                 if paramInputWidthTMP > paramInputWidth:
                     paramInputWidth = paramInputWidthTMP
@@ -887,7 +1101,7 @@ class PluginEdit(QDialog):
                 paramInputList.append(parameter)
 
             else:
-                paramOutputWidthTMP = self.fontMetrics().width(parameter['name'])
+                paramOutputWidthTMP = fontMetricsHorizontalAdvance(self.fontMetrics(), parameter['name'])
 
                 if paramOutputWidthTMP > paramOutputWidth:
                     paramOutputWidth = paramOutputWidthTMP
@@ -900,6 +1114,12 @@ class PluginEdit(QDialog):
         # Create parameter tabs + widgets
         self._createParameterWidgets(PARAMETER_INPUT,  paramInputListFull,  self.tr("Parameters"))
         self._createParameterWidgets(PARAMETER_OUTPUT, paramOutputListFull, self.tr("Outputs"))
+
+        # Restore tab state
+        if tabIndex < self.ui.tabWidget.count():
+            self.ui.tabWidget.setCurrentIndex(tabIndex)
+            if scrollVal is not None:
+                self.ui.tabWidget.currentWidget().verticalScrollBar().setValue(scrollVal)
 
     def reloadPrograms(self):
         # Programs
@@ -960,8 +1180,8 @@ class PluginEdit(QDialog):
     #------------------------------------------------------------------
 
     def clearNotes(self):
-         self.fPlayingNotes = []
-         self.ui.keyboard.allNotesOff()
+        self.fPlayingNotes = []
+        self.ui.keyboard.allNotesOff()
 
     def noteOn(self, channel, note, velocity):
         if self.fControlChannel == channel:
@@ -995,19 +1215,25 @@ class PluginEdit(QDialog):
             self.fParametersToUpdate.append([parameterId, value])
 
     def setParameterDefault(self, parameterId, value):
-        for paramType, paramId, paramWidget in self.fParameterList:
+        for _, paramId, paramWidget in self.fParameterList:
             if paramId == parameterId:
                 paramWidget.setDefault(value)
                 break
 
-    def setParameterMidiControl(self, parameterId, control):
-        for paramType, paramId, paramWidget in self.fParameterList:
+    def setParameterMappedControlIndex(self, parameterId, control):
+        for _, paramId, paramWidget in self.fParameterList:
             if paramId == parameterId:
-                paramWidget.setMidiControl(control)
+                paramWidget.setMappedControlIndex(control)
+                break
+
+    def setParameterMappedRange(self, parameterId, minimum, maximum):
+        for _, paramId, paramWidget in self.fParameterList:
+            if paramId == parameterId:
+                paramWidget.setMappedRange(minimum, maximum)
                 break
 
     def setParameterMidiChannel(self, parameterId, channel):
-        for paramType, paramId, paramWidget in self.fParameterList:
+        for _, paramId, paramWidget in self.fParameterList:
             if paramId == parameterId:
                 paramWidget.setMidiChannel(channel+1)
                 break
@@ -1033,6 +1259,9 @@ class PluginEdit(QDialog):
             widget = self.ui.ch_force_stereo
         elif option == PLUGIN_OPTION_MAP_PROGRAM_CHANGES:
             widget = self.ui.ch_map_program_changes
+        elif option == PLUGIN_OPTION_SKIP_SENDING_NOTES:
+            widget = self.ui.ch_send_notes
+            yesNo = not yesNo
         elif option == PLUGIN_OPTION_SEND_PROGRAM_CHANGES:
             widget = self.ui.ch_send_program_changes
         elif option == PLUGIN_OPTION_SEND_CONTROL_CHANGES:
@@ -1153,7 +1382,10 @@ class PluginEdit(QDialog):
             return
 
         if self.fCurrentStateFilename:
-            askTry = QMessageBox.question(self, self.tr("Overwrite?"), self.tr("Overwrite previously created file?"), QMessageBox.Ok|QMessageBox.Cancel)
+            askTry = QMessageBox.question(self,
+                                          self.tr("Overwrite?"),
+                                          self.tr("Overwrite previously created file?"),
+                                          QMessageBox.Ok|QMessageBox.Cancel)
 
             if askTry == QMessageBox.Ok:
                 self.host.save_plugin_state(self.fPluginId, self.fCurrentStateFilename)
@@ -1162,7 +1394,7 @@ class PluginEdit(QDialog):
             self.fCurrentStateFilename = None
 
         fileFilter = self.tr("Carla State File (*.carxs)")
-        filename, ok = QFileDialog.getSaveFileName(self, self.tr("Save Plugin State File"), filter=fileFilter)
+        filename, _ = QFileDialog.getSaveFileName(self, self.tr("Save Plugin State File"), filter=fileFilter)
 
         # FIXME use ok value, test if it works as expected
         if not filename:
@@ -1182,7 +1414,10 @@ class PluginEdit(QDialog):
             for i in range(self.host.get_program_count(self.fPluginId)):
                 presetList.append("%03i - %s" % (i+1, self.host.get_program_name(self.fPluginId, i)))
 
-            ret = QInputDialog.getItem(self, self.tr("Open LV2 Preset"), self.tr("Select an LV2 Preset:"), presetList, 0, False)
+            ret = QInputDialog.getItem(self,
+                                       self.tr("Open LV2 Preset"),
+                                       self.tr("Select an LV2 Preset:"),
+                                       presetList, 0, False)
 
             if ret[1]:
                 index = int(ret[0].split(" - ", 1)[0])-1
@@ -1192,7 +1427,7 @@ class PluginEdit(QDialog):
             return
 
         fileFilter = self.tr("Carla State File (*.carxs)")
-        filename, ok = QFileDialog.getOpenFileName(self, self.tr("Open Plugin State File"), filter=fileFilter)
+        filename, _ = QFileDialog.getOpenFileName(self, self.tr("Open Plugin State File"), filter=fileFilter)
 
         # FIXME use ok value, test if it works as expected
         if not filename:
@@ -1215,6 +1450,9 @@ class PluginEdit(QDialog):
             option = PLUGIN_OPTION_FORCE_STEREO
         elif sender == self.ui.ch_map_program_changes:
             option = PLUGIN_OPTION_MAP_PROGRAM_CHANGES
+        elif sender == self.ui.ch_send_notes:
+            option = PLUGIN_OPTION_SKIP_SENDING_NOTES
+            clicked = not clicked
         elif sender == self.ui.ch_send_program_changes:
             option = PLUGIN_OPTION_SEND_PROGRAM_CHANGES
         elif sender == self.ui.ch_send_control_changes:
@@ -1249,7 +1487,8 @@ class PluginEdit(QDialog):
         # handle map-program-changes and send-program-changes conflict
 
         if option == PLUGIN_OPTION_MAP_PROGRAM_CHANGES and not clicked:
-            self.ui.ch_send_program_changes.setEnabled(self.fPluginInfo['optionsAvailable'] & PLUGIN_OPTION_SEND_PROGRAM_CHANGES)
+            self.ui.ch_send_program_changes.setEnabled(
+                self.fPluginInfo['optionsAvailable'] & PLUGIN_OPTION_SEND_PROGRAM_CHANGES)
 
             # restore send-program-changes if needed
             if self.ui.ch_send_program_changes.isChecked():
@@ -1310,8 +1549,12 @@ class PluginEdit(QDialog):
             self.fParent.editDialogParameterValueChanged(self.fPluginId, parameterId, value)
 
     @pyqtSlot(int, int)
-    def slot_parameterMidiControlChanged(self, parameterId, control):
-        self.host.set_parameter_midi_cc(self.fPluginId, parameterId, control)
+    def slot_parameterMappedControlChanged(self, parameterId, control):
+        self.host.set_parameter_mapped_control_index(self.fPluginId, parameterId, control)
+
+    @pyqtSlot(int, float, float)
+    def slot_parameterMappedRangeChanged(self, parameterId, minimum, maximum):
+        self.host.set_parameter_mapped_range(self.fPluginId, parameterId, minimum, maximum)
 
     @pyqtSlot(int, int)
     def slot_parameterMidiChannelChanged(self, parameterId, channel):
@@ -1416,8 +1659,15 @@ class PluginEdit(QDialog):
 
         if actSelected == actSet:
             current   = minimum + (maximum-minimum)*(float(sender.value())/10000)
-            value, ok = QInputDialog.getInt(self, self.tr("Set value"), label, round(current*100.0), round(minimum*100.0), round(maximum*100.0), 1)
-            if ok: value = float(value)/100.0
+            value, ok = QInputDialog.getInt(self,
+                                            self.tr("Set value"),
+                                            label,
+                                            round(current*100.0),
+                                            round(minimum*100.0),
+                                            round(maximum*100.0),
+                                            1)
+            if ok:
+                value = float(value)/100.0
 
             if not ok:
                 return
@@ -1470,7 +1720,7 @@ class PluginEdit(QDialog):
         groupWidgets = {}
 
         for paramList, width in paramListFull:
-            if len(paramList) == 0:
+            if not paramList:
                 break
 
             tabIndex = self.ui.tabWidget.count()
@@ -1514,7 +1764,8 @@ class PluginEdit(QDialog):
                 if paramType == PARAMETER_INPUT:
                     paramWidget.valueChanged.connect(self.slot_parameterValueChanged)
 
-                paramWidget.midiControlChanged.connect(self.slot_parameterMidiControlChanged)
+                paramWidget.mappedControlChanged.connect(self.slot_parameterMappedControlChanged)
+                paramWidget.mappedRangeChanged.connect(self.slot_parameterMappedRangeChanged)
                 paramWidget.midiChannelChanged.connect(self.slot_parameterMidiChannelChanged)
 
             scrollAreaLayout.addStretch()
@@ -1531,7 +1782,9 @@ class PluginEdit(QDialog):
     def _updateCtrlPrograms(self):
         self.ui.keyboard.setEnabled(self.fControlChannel >= 0)
 
-        if self.fPluginInfo['category'] != PLUGIN_CATEGORY_SYNTH or self.fPluginInfo['type'] not in (PLUGIN_INTERNAL, PLUGIN_SF2):
+        if self.fPluginInfo['category'] != PLUGIN_CATEGORY_SYNTH:
+            return
+        if self.fPluginInfo['type'] not in (PLUGIN_INTERNAL, PLUGIN_SF2):
             return
 
         if self.fControlChannel < 0:
@@ -1553,7 +1806,7 @@ class PluginEdit(QDialog):
             self.setMidiProgram(mpIndex)
 
     def _updateParameterValues(self):
-        for paramType, paramId, paramWidget in self.fParameterList:
+        for _, paramId, paramWidget in self.fParameterList:
             paramWidget.blockSignals(True)
             paramWidget.setValue(self.host.get_current_parameter_value(self.fPluginId, paramId))
             paramWidget.blockSignals(False)
@@ -1569,7 +1822,7 @@ class PluginEdit(QDialog):
 
     def testTimerClose(self):
         self.close()
-        app.quit()
+        _app.quit()
 
     #------------------------------------------------------------------
 
@@ -1589,30 +1842,26 @@ class PluginEdit(QDialog):
 
         QDialog.timerEvent(self, event)
 
-    def done(self, r):
-        QDialog.done(self, r)
-        self.close()
-
 # ------------------------------------------------------------------------------------------------------------
 # Main
 
 if __name__ == '__main__':
     from carla_app import CarlaApplication
-    from carla_host import initHost, loadHostSettings
+    from carla_host import initHost as _initHost, loadHostSettings as _loadHostSettings
 
-    app  = CarlaApplication()
-    host = initHost("Widgets", None, False, False, False)
-    loadHostSettings(host)
+    _app  = CarlaApplication()
+    _host = _initHost("Widgets", None, False, False, False)
+    _loadHostSettings(_host)
 
-    host.engine_init("JACK", "Carla-Widgets")
-    host.add_plugin(BINARY_NATIVE, PLUGIN_DSSI, "/usr/lib/dssi/karplong.so", "karplong", "karplong", 0, None, 0x0)
-    host.set_active(0, True)
+    _host.engine_init("JACK", "Carla-Widgets")
+    _host.add_plugin(BINARY_NATIVE, PLUGIN_DSSI, "/usr/lib/dssi/karplong.so", "karplong", "karplong", 0, None, 0x0)
+    _host.set_active(0, True)
 
-    gui1 = CarlaAboutW(None, host)
+    gui1 = CarlaAboutW(None, _host)
     gui1.show()
 
-    gui2 = PluginEdit(None, host, 0)
+    gui2 = PluginEdit(None, _host, 0)
     gui2.testTimer()
     gui2.show()
 
-    app.exit_exec()
+    _app.exit_exec()

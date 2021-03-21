@@ -1,6 +1,6 @@
 /*
  * Carla Plugin Host
- * Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -21,6 +21,7 @@
 # error This file should not be compiled if building alternative-arch bridges
 #endif
 
+#include "CarlaEngineInit.hpp"
 #include "CarlaEngineInternal.hpp"
 #include "CarlaPlugin.hpp"
 
@@ -46,7 +47,7 @@
 # endif
 # include "AppConfig.h"
 # include "juce_events/juce_events.h"
-# define USE_JUCE_MESSAGE_THREAD
+# define USE_REFCOUNTER_JUCE_MESSAGE_MANAGER
 # if defined(__GNUC__) && (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6))
 #  pragma GCC diagnostic pop
 # endif
@@ -68,35 +69,32 @@ CARLA_BACKEND_START_NAMESPACE
 static const uint32_t kNumInParams = 100;
 static const uint32_t kNumOutParams = 10;
 
+static const uint16_t kUiWidth = 1024;
+static const uint16_t kUiHeight = 712;
+
 // -----------------------------------------------------------------------
 
-#ifdef USE_JUCE_MESSAGE_THREAD
+#ifdef USE_REFCOUNTER_JUCE_MESSAGE_MANAGER
 static int numScopedInitInstances = 0;
 
-class SharedJuceMessageThread : public juce::Thread
+struct ReferenceCountedJuceMessageMessager
 {
-public:
-    SharedJuceMessageThread()
-      : juce::Thread ("SharedJuceMessageThread"),
-        initialised (false) {}
-
-    ~SharedJuceMessageThread()
+    ReferenceCountedJuceMessageMessager()
     {
         CARLA_SAFE_ASSERT(numScopedInitInstances == 0);
+    }
 
-        // in case something fails
-        juce::MessageManager::getInstance()->stopDispatchLoop();
-        waitForThreadToExit (5000);
+    ~ReferenceCountedJuceMessageMessager()
+    {
+        CARLA_SAFE_ASSERT(numScopedInitInstances == 0);
     }
 
     void incRef()
     {
         if (numScopedInitInstances++ == 0)
         {
-            startThread (7);
-
-            while (! initialised)
-                juce::Thread::sleep (1);
+            juce::initialiseJuce_GUI();
+            juce::MessageManager::getInstance()->setCurrentThreadAsMessageThread();
         }
     }
 
@@ -104,26 +102,9 @@ public:
     {
         if (--numScopedInitInstances == 0)
         {
-            juce::MessageManager::getInstance()->stopDispatchLoop();
-            waitForThreadToExit (5000);
+            juce::shutdownJuce_GUI();
         }
     }
-
-protected:
-    void run() override
-    {
-        const juce::ScopedJuceInitialiser_GUI juceInitialiser;
-
-        juce::MessageManager::getInstance()->setCurrentThreadAsMessageThread();
-        initialised = true;
-
-        juce::MessageManager::getInstance()->runDispatchLoop();
-    }
-
-private:
-    volatile bool initialised;
-
-    CARLA_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SharedJuceMessageThread);
 };
 #endif
 
@@ -151,8 +132,9 @@ protected:
 private:
     CarlaEngineNative* const fEngine;
 
-    void _updateParamValues(CarlaPlugin* const plugin, const uint32_t pluginId,
-                            const bool sendCallback, const bool sendPluginHost) const noexcept;
+    void _updateParamValues(const CarlaPluginPtr& plugin,
+                            uint32_t pluginId,
+                            bool sendCallback, bool sendPluginHost) const noexcept;
 
     CARLA_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CarlaEngineNativeUI)
 };
@@ -167,26 +149,30 @@ public:
                       const uint32_t cvIns = 0, const uint32_t cvOuts = 0)
         : CarlaEngine(),
           pHost(host),
-#ifdef USE_JUCE_MESSAGE_THREAD
+#ifdef USE_REFCOUNTER_JUCE_MESSAGE_MANAGER
           // if not running inside Carla, we will have to run event loop ourselves
-          kNeedsJuceMsgThread(host->dispatcher(pHost->handle,
-                                               NATIVE_HOST_OPCODE_INTERNAL_PLUGIN, 0, 0, nullptr, 0.0f) == 0),
-          fJuceMsgThread(),
+          kNeedsJuceEvents(host->dispatcher(pHost->handle,
+                                            NATIVE_HOST_OPCODE_INTERNAL_PLUGIN, 0, 0, nullptr, 0.0f) == 0),
+          fJuceMsgMgr(),
+          fJuceMsgMutex(),
 #endif
           kIsPatchbay(isPatchbay),
           kHasMidiOut(withMidiOut),
           fIsActive(false),
           fIsRunning(false),
           fUiServer(this),
+          fLastScaleFactor(1.0f),
+          fLastProjectFolder(),
+          fPluginDeleterMutex(),
           fOptionsForced(false)
     {
         carla_debug("CarlaEngineNative::CarlaEngineNative()");
 
         carla_zeroFloats(fParameters, kNumInParams+kNumOutParams);
 
-#ifdef USE_JUCE_MESSAGE_THREAD
-        if (kNeedsJuceMsgThread)
-            fJuceMsgThread->incRef();
+#ifdef USE_REFCOUNTER_JUCE_MESSAGE_MANAGER
+        if (kNeedsJuceEvents)
+            fJuceMsgMgr->incRef();
 #endif
 
         pData->bufferSize = pHost->get_buffer_size(pHost->handle);
@@ -232,11 +218,10 @@ public:
         if (pData->options.binaryDir != nullptr)
             delete[] pData->options.binaryDir;
 
-        pData->options.resourceDir = carla_strdup(pHost->resourceDir);
-        pData->options.binaryDir   = carla_strdup(carla_get_library_folder());
+        const water::String binaryDir(File(File::getSpecialLocation(File::currentExecutableFile).getParentDirectory()).getFullPathName());
 
-        setCallback(_ui_server_callback, this);
-        setFileCallback(_ui_file_callback, this);
+        pData->options.resourceDir = carla_strdup(pHost->resourceDir);
+        pData->options.binaryDir   = carla_strdup(binaryDir.toRawUTF8());
     }
 
     ~CarlaEngineNative() override
@@ -247,15 +232,20 @@ public:
         pData->aboutToClose = true;
         fIsRunning = false;
 
-        removeAllPlugins();
-        //runPendingRtEvents();
-        close();
+        {
+#ifdef USE_REFCOUNTER_JUCE_MESSAGE_MANAGER
+            const ScopedJuceMessageThreadRunner sjmtr(*this, true);
+#endif
+            removeAllPlugins();
+            //runPendingRtEvents();
+            close();
 
-        pData->graph.destroy();
+            pData->graph.destroy();
+        }
 
-#ifdef USE_JUCE_MESSAGE_THREAD
-        if (kNeedsJuceMsgThread)
-            fJuceMsgThread->decRef();
+#ifdef USE_REFCOUNTER_JUCE_MESSAGE_MANAGER
+        if (kNeedsJuceEvents)
+            fJuceMsgMgr->decRef();
 #endif
 
         carla_debug("CarlaEngineNative::~CarlaEngineNative() - END");
@@ -316,6 +306,21 @@ public:
         return "Plugin";
     }
 
+    const char* getCurrentProjectFolder() const noexcept override
+    {
+        CARLA_SAFE_ASSERT_RETURN(pHost != nullptr, nullptr);
+
+        static char filetype[] = "carla\0";
+
+        try {
+            return (const char*)(uintptr_t)pHost->dispatcher(pHost->handle,
+                                                             NATIVE_HOST_OPCODE_GET_FILE_PATH,
+                                                             0, 0,
+                                                             (void*)filetype,
+                                                             0.0f);
+        } CARLA_SAFE_EXCEPTION_RETURN("get_file_path", nullptr);
+    }
+
     void callback(const bool sendHost, const bool sendOsc,
                   const EngineCallbackOpcode action, const uint pluginId,
                   const int value1, const int value2, const int value3,
@@ -323,11 +328,68 @@ public:
     {
         CarlaEngine::callback(sendHost, sendOsc, action, pluginId, value1, value2, value3, valuef, valueStr);
 
-        if (action == ENGINE_CALLBACK_IDLE && ! pData->aboutToClose) {
-            pHost->dispatcher(pHost->handle,
-                              NATIVE_HOST_OPCODE_HOST_IDLE,
-                              0, 0, nullptr, 0.0f);
+        if (sendHost)
+            uiServerCallback(action, pluginId, value1, value2, value3, valuef, valueStr);
+
+        switch (action)
+        {
+        case ENGINE_CALLBACK_IDLE:
+            if (! pData->aboutToClose)
+                pHost->dispatcher(pHost->handle, NATIVE_HOST_OPCODE_HOST_IDLE, 0, 0, nullptr, 0.0f);
+            break;
+
+        case ENGINE_CALLBACK_PARAMETER_VALUE_CHANGED:
+            if (sendHost && value1 >= 0)
+            {
+                uint32_t rindex = static_cast<uint32_t>(value1);
+                if (_getRealIndexForPluginParameter(pluginId, rindex))
+                {
+                    fParameters[rindex] = valuef;
+
+                    if (fUiServer.isPipeRunning())
+                    {
+                        pHost->ui_parameter_changed(pHost->handle, rindex, valuef);
+                    }
+                    else
+                    {
+                        static uint last_pluginId = pluginId;
+                        static int last_value1 = value1;
+                        static bool init = true;
+
+                        if (init || last_pluginId != pluginId || last_value1 != value1)
+                        {
+                            init = false;
+                            last_pluginId = pluginId;
+                            last_value1 = value1;
+                            carla_stdout("Plugin with id %d triggered parameter %d update while UI is hidden",
+                                         pluginId, value1);
+                        }
+                    }
+                }
+            }
+            break;
+
+        default:
+            break;
         }
+    }
+
+    const char* runFileCallback(FileCallbackOpcode action,
+                                bool isDir, const char* title, const char* filter) noexcept override
+    {
+        switch (action)
+        {
+        case FILE_CALLBACK_DEBUG:
+            return nullptr;
+
+        case FILE_CALLBACK_OPEN:
+            return pHost->ui_open_file(pHost->handle, isDir, title, filter);
+
+        case FILE_CALLBACK_SAVE:
+            return pHost->ui_save_file(pHost->handle, isDir, title, filter);
+        }
+
+        return nullptr;
     }
 
     // -------------------------------------------------------------------
@@ -341,29 +403,31 @@ public:
 
     void setParameterValueFromUI(const uint32_t pluginId, const uint32_t index, const float value)
     {
-        if (pluginId != 0)
-            return;
-
-        fParameters[index] = value;
-        pHost->ui_parameter_changed(pHost->handle, index, value);
+        uint32_t rindex = index;
+        if (_getRealIndexForPluginParameter(pluginId, rindex))
+        {
+            fParameters[rindex] = value;
+            pHost->ui_parameter_changed(pHost->handle, rindex, value);
+        }
     }
 
     void setParameterTouchFromUI(const uint32_t pluginId, const uint32_t index, const bool touch)
     {
-        if (pluginId != 0)
-            return;
-
-        pHost->dispatcher(pHost->handle,
-                          NATIVE_HOST_OPCODE_UI_TOUCH_PARAMETER,
-                          static_cast<int32_t>(index),
-                          touch ? 1 : 0,
-                          nullptr, 0.0f);
+        uint32_t rindex = index;
+        if (_getRealIndexForPluginParameter(pluginId, rindex))
+        {
+            pHost->dispatcher(pHost->handle,
+                              NATIVE_HOST_OPCODE_UI_TOUCH_PARAMETER,
+                              static_cast<int32_t>(rindex),
+                              touch ? 1 : 0,
+                              nullptr, 0.0f);
+        }
     }
 
     void reloadFromUI()
     {
         carla_zeroFloats(fParameters, kNumInParams+kNumOutParams);
-        pHost->dispatcher(pHost->handle, NATIVE_HOST_OPCODE_RELOAD_ALL, 0, 0, nullptr, 0.0f);
+        pHost->dispatcher(pHost->handle, NATIVE_HOST_OPCODE_RELOAD_PARAMETERS, 0, 0, nullptr, 0.0f);
     }
 
 protected:
@@ -377,7 +441,7 @@ protected:
         {
             const CarlaMutexLocker cml(fUiServer.getPipeLock());
 
-            if (fUiServer.writeAndFixMessage("buffer-size"))
+            if (fUiServer.writeMessage("buffer-size\n"))
             {
                 char tmpBuf[STR_MAX+1];
                 carla_zeroChars(tmpBuf, STR_MAX+1);
@@ -401,14 +465,14 @@ protected:
         {
             const CarlaMutexLocker cml(fUiServer.getPipeLock());
 
-            if (fUiServer.writeAndFixMessage("sample-rate"))
+            if (fUiServer.writeMessage("sample-rate\n"))
             {
                 char tmpBuf[STR_MAX+1];
                 carla_zeroChars(tmpBuf, STR_MAX+1);
 
                 {
                     const CarlaScopedLocale csl;
-                    std::snprintf(tmpBuf, STR_MAX, "%f\n", newSampleRate);
+                    std::snprintf(tmpBuf, STR_MAX, "%.12g\n", newSampleRate);
                 }
 
                 if (fUiServer.writeMessage(tmpBuf))
@@ -422,7 +486,7 @@ protected:
 
     // -------------------------------------------------------------------
 
-    void uiServerSendPluginInfo(CarlaPlugin* const plugin)
+    void uiServerSendPluginInfo(const CarlaPluginPtr& plugin)
     {
         char tmpBuf[STR_MAX+1];
         carla_zeroChars(tmpBuf, STR_MAX+1);
@@ -442,8 +506,7 @@ protected:
 
         if (const char* const filename = plugin->getFilename())
         {
-            std::snprintf(tmpBuf, STR_MAX, "%s", filename);
-            CARLA_SAFE_ASSERT_RETURN(fUiServer.writeAndFixMessage(tmpBuf),);
+            CARLA_SAFE_ASSERT_RETURN(fUiServer.writeAndFixMessage(filename),);
         }
         else
         {
@@ -452,8 +515,7 @@ protected:
 
         if (const char* const name = plugin->getName())
         {
-            std::snprintf(tmpBuf, STR_MAX, "%s", name);
-            CARLA_SAFE_ASSERT_RETURN(fUiServer.writeAndFixMessage(tmpBuf),);
+            CARLA_SAFE_ASSERT_RETURN(fUiServer.writeAndFixMessage(name),);
         }
         else
         {
@@ -462,8 +524,7 @@ protected:
 
         if (const char* const iconName = plugin->getIconName())
         {
-            std::snprintf(tmpBuf, STR_MAX, "%s", iconName);
-            CARLA_SAFE_ASSERT_RETURN(fUiServer.writeAndFixMessage(tmpBuf),);
+            CARLA_SAFE_ASSERT_RETURN(fUiServer.writeAndFixMessage(iconName),);
         }
         else
         {
@@ -494,16 +555,18 @@ protected:
             CARLA_SAFE_ASSERT_RETURN(fUiServer.writeEmptyMessage(),);
         }
 
-        std::snprintf(tmpBuf, STR_MAX, "AUDIO_COUNT_%i:%i:%i\n", pluginId, plugin->getAudioInCount(), plugin->getAudioOutCount());
+        std::snprintf(tmpBuf, STR_MAX, "AUDIO_COUNT_%i:%i:%i\n",
+                      pluginId, plugin->getAudioInCount(), plugin->getAudioOutCount());
         CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
 
-        std::snprintf(tmpBuf, STR_MAX, "MIDI_COUNT_%i:%i:%i\n", pluginId, plugin->getMidiInCount(), plugin->getMidiOutCount());
+        std::snprintf(tmpBuf, STR_MAX, "MIDI_COUNT_%i:%i:%i\n",
+                      pluginId, plugin->getMidiInCount(), plugin->getMidiOutCount());
         CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
 
         fUiServer.flushMessages();
     }
 
-    void uiServerSendPluginParameters(CarlaPlugin* const plugin)
+    void uiServerSendPluginParameters(const CarlaPluginPtr& plugin)
     {
         char tmpBuf[STR_MAX+1];
         carla_zeroChars(tmpBuf, STR_MAX+1);
@@ -515,10 +578,10 @@ protected:
 
         for (int32_t i=PARAMETER_ACTIVE; i>PARAMETER_MAX; --i)
         {
-            std::snprintf(tmpBuf, STR_MAX, "PARAMVAL_%i:%i\n", pluginId, i);
+            std::snprintf(tmpBuf, STR_MAX, "PARAMVAL_%u:%i\n", pluginId, i);
             CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
 
-            std::snprintf(tmpBuf, STR_MAX, "%f\n", static_cast<double>(plugin->getInternalParameterValue(i)));
+            std::snprintf(tmpBuf, STR_MAX, "%.12g\n", static_cast<double>(plugin->getInternalParameterValue(i)));
             CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
 
             fUiServer.flushMessages();
@@ -540,7 +603,11 @@ protected:
             CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
 
             std::snprintf(tmpBuf, STR_MAX, "%i:%i:%i:%i\n", paramData.type, paramData.hints,
-                                                            paramData.midiChannel, paramData.midiCC);
+                                                            paramData.mappedControlIndex, paramData.midiChannel);
+            CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
+
+            std::snprintf(tmpBuf, STR_MAX, "%.12g:%.12g\n", static_cast<double>(paramData.mappedMinimum),
+                                                            static_cast<double>(paramData.mappedMaximum));
             CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
 
             if (plugin->getParameterName(i, tmpBuf)) {
@@ -570,7 +637,7 @@ protected:
             std::snprintf(tmpBuf, STR_MAX, "PARAMETER_RANGES_%i:%i\n", pluginId, i);
             CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
 
-            std::snprintf(tmpBuf, STR_MAX, "%f:%f:%f:%f:%f:%f\n",
+            std::snprintf(tmpBuf, STR_MAX, "%.12g:%.12g:%.12g:%.12g:%.12g:%.12g\n",
                           static_cast<double>(paramRanges.def),
                           static_cast<double>(paramRanges.min),
                           static_cast<double>(paramRanges.max),
@@ -579,17 +646,17 @@ protected:
                           static_cast<double>(paramRanges.stepLarge));
             CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
 
-            std::snprintf(tmpBuf, STR_MAX, "PARAMVAL_%i:%i\n", pluginId, i);
+            std::snprintf(tmpBuf, STR_MAX, "PARAMVAL_%u:%u\n", pluginId, i);
             CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
 
-            std::snprintf(tmpBuf, STR_MAX, "%f\n", static_cast<double>(plugin->getParameterValue(i)));
+            std::snprintf(tmpBuf, STR_MAX, "%.12g\n", static_cast<double>(plugin->getParameterValue(i)));
             CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
         }
 
         fUiServer.flushMessages();
     }
 
-    void uiServerSendPluginPrograms(CarlaPlugin* const plugin)
+    void uiServerSendPluginPrograms(const CarlaPluginPtr& plugin)
     {
         char tmpBuf[STR_MAX+1];
         carla_zeroChars(tmpBuf, STR_MAX+1);
@@ -617,7 +684,8 @@ protected:
         fUiServer.flushMessages();
 
         count = plugin->getMidiProgramCount();
-        std::snprintf(tmpBuf, STR_MAX, "MIDI_PROGRAM_COUNT_%i:%i:%i\n", pluginId, count, plugin->getCurrentMidiProgram());
+        std::snprintf(tmpBuf, STR_MAX, "MIDI_PROGRAM_COUNT_%i:%i:%i\n",
+                      pluginId, count, plugin->getCurrentMidiProgram());
         CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
 
         for (uint32_t i=0; i<count; ++i)
@@ -630,14 +698,13 @@ protected:
             std::snprintf(tmpBuf, STR_MAX, "%i:%i\n", mpData.bank, mpData.program);
             CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
 
-            std::snprintf(tmpBuf, STR_MAX, "%s", mpData.name);
-            CARLA_SAFE_ASSERT_RETURN(fUiServer.writeAndFixMessage(tmpBuf),);
+            CARLA_SAFE_ASSERT_RETURN(fUiServer.writeAndFixMessage(mpData.name),);
         }
 
         fUiServer.flushMessages();
     }
 
-    void uiServerSendPluginProperties(CarlaPlugin* const plugin)
+    void uiServerSendPluginProperties(const CarlaPluginPtr& plugin)
     {
         char tmpBuf[STR_MAX+1];
         carla_zeroChars(tmpBuf, STR_MAX+1);
@@ -677,61 +744,65 @@ protected:
         if (! fUiServer.isPipeRunning())
             return;
 
-        CarlaPlugin* plugin;
-
         switch (action)
         {
         case ENGINE_CALLBACK_UPDATE:
-            plugin = getPlugin(pluginId);
-
-            if (plugin != nullptr && plugin->isEnabled())
+            if (const CarlaPluginPtr plugin = getPlugin(pluginId))
             {
-                CARLA_SAFE_ASSERT_BREAK(plugin->getId() == pluginId);
-                uiServerSendPluginProperties(plugin);
+                if (plugin->isEnabled())
+                {
+                    CARLA_SAFE_ASSERT_BREAK(plugin->getId() == pluginId);
+                    uiServerSendPluginProperties(plugin);
+                }
             }
             break;
 
         case ENGINE_CALLBACK_RELOAD_INFO:
-            plugin = getPlugin(pluginId);
-
-            if (plugin != nullptr && plugin->isEnabled())
+            if (const CarlaPluginPtr plugin = getPlugin(pluginId))
             {
-                CARLA_SAFE_ASSERT_BREAK(plugin->getId() == pluginId);
-                uiServerSendPluginInfo(plugin);
+                if (plugin->isEnabled())
+                {
+                    CARLA_SAFE_ASSERT_BREAK(plugin->getId() == pluginId);
+                    uiServerSendPluginInfo(plugin);
+                }
             }
             break;
 
         case ENGINE_CALLBACK_RELOAD_PARAMETERS:
-            plugin = getPlugin(pluginId);
-
-            if (plugin != nullptr && plugin->isEnabled())
+            if (const CarlaPluginPtr plugin = getPlugin(pluginId))
             {
-                CARLA_SAFE_ASSERT_BREAK(plugin->getId() == pluginId);
-                uiServerSendPluginParameters(plugin);
+                if (plugin->isEnabled())
+                {
+                    CARLA_SAFE_ASSERT_BREAK(plugin->getId() == pluginId);
+                    uiServerSendPluginParameters(plugin);
+                }
             }
             break;
 
         case ENGINE_CALLBACK_RELOAD_PROGRAMS:
-            plugin = getPlugin(pluginId);
-
-            if (plugin != nullptr && plugin->isEnabled())
+            if (const CarlaPluginPtr plugin = getPlugin(pluginId))
             {
-                CARLA_SAFE_ASSERT_BREAK(plugin->getId() == pluginId);
-                uiServerSendPluginPrograms(plugin);
+                if (plugin->isEnabled())
+                {
+                    CARLA_SAFE_ASSERT_BREAK(plugin->getId() == pluginId);
+                    uiServerSendPluginPrograms(plugin);
+                }
             }
             break;
 
         case ENGINE_CALLBACK_RELOAD_ALL:
         case ENGINE_CALLBACK_PLUGIN_ADDED:
-            plugin = getPlugin(pluginId);
-
-            if (plugin != nullptr && plugin->isEnabled())
+        case ENGINE_CALLBACK_PLUGIN_RENAMED:
+            if (const CarlaPluginPtr plugin = getPlugin(pluginId))
             {
-                CARLA_SAFE_ASSERT_BREAK(plugin->getId() == pluginId);
-                uiServerSendPluginInfo(plugin);
-                uiServerSendPluginParameters(plugin);
-                uiServerSendPluginPrograms(plugin);
-                uiServerSendPluginProperties(plugin);
+                if (plugin->isEnabled())
+                {
+                    CARLA_SAFE_ASSERT_BREAK(plugin->getId() == pluginId);
+                    uiServerSendPluginInfo(plugin);
+                    uiServerSendPluginParameters(plugin);
+                    uiServerSendPluginPrograms(plugin);
+                    uiServerSendPluginProperties(plugin);
+                }
             }
             break;
 
@@ -761,7 +832,7 @@ protected:
 
         {
             const CarlaScopedLocale csl;
-            std::snprintf(tmpBuf, STR_MAX, "%f\n", static_cast<double>(valuef));
+            std::snprintf(tmpBuf, STR_MAX, "%.12g\n", static_cast<double>(valuef));
         }
         CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
 
@@ -772,23 +843,6 @@ protected:
         }
 
         fUiServer.flushMessages();
-    }
-
-    const char* uiFileCallback(FileCallbackOpcode action, bool isDir, const char* title, const char* filter)
-    {
-        switch (action)
-        {
-        case FILE_CALLBACK_DEBUG:
-            return nullptr;
-
-        case FILE_CALLBACK_OPEN:
-            return pHost->ui_open_file(pHost->handle, isDir, title, filter);
-
-        case FILE_CALLBACK_SAVE:
-            return pHost->ui_save_file(pHost->handle, isDir, title, filter);
-        }
-
-        return nullptr;
     }
 
     void uiServerInfo()
@@ -818,7 +872,7 @@ protected:
         CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage("sample-rate\n"),);
         {
             const CarlaScopedLocale csl;
-            std::snprintf(tmpBuf, STR_MAX, "%f\n", pData->sampleRate);
+            std::snprintf(tmpBuf, STR_MAX, "%.12g\n", pData->sampleRate);
         }
         CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
 
@@ -920,58 +974,66 @@ protected:
 
         static char strBufName[STR_MAX+1];
         static char strBufUnit[STR_MAX+1];
+        static char strBufComment[STR_MAX+1];
+        static char strBufGroupName[STR_MAX+1];
         carla_zeroChars(strBufName, STR_MAX+1);
         carla_zeroChars(strBufUnit, STR_MAX+1);
+        carla_zeroChars(strBufComment, STR_MAX+1);
+        carla_zeroChars(strBufGroupName, STR_MAX+1);
 
-        if (CarlaPlugin* const plugin = _getFirstPlugin())
+        uint32_t rindex = index;
+        if (const CarlaPluginPtr plugin = _getPluginForParameterIndex(rindex))
         {
-            if (index < plugin->getParameterCount())
+            const ParameterData& paramData(plugin->getParameterData(rindex));
+            const ParameterRanges& paramRanges(plugin->getParameterRanges(rindex));
+
+            if (! plugin->getParameterName(rindex, strBufName))
+                strBufName[0] = '\0';
+            if (! plugin->getParameterUnit(rindex, strBufUnit))
+                strBufUnit[0] = '\0';
+            if (! plugin->getParameterComment(rindex, strBufComment))
+                strBufComment[0] = '\0';
+            if (! plugin->getParameterGroupName(rindex, strBufGroupName))
+                std::snprintf(strBufGroupName, STR_MAX, "%u:%s", plugin->getId(), plugin->getName());
+
+            uint hints = 0x0;
+
+            if (paramData.hints & PARAMETER_IS_BOOLEAN)
+                hints |= NATIVE_PARAMETER_IS_BOOLEAN;
+            if (paramData.hints & PARAMETER_IS_INTEGER)
+                hints |= NATIVE_PARAMETER_IS_INTEGER;
+            if (paramData.hints & PARAMETER_IS_LOGARITHMIC)
+                hints |= NATIVE_PARAMETER_IS_LOGARITHMIC;
+            if (paramData.hints & PARAMETER_IS_AUTOMABLE)
+                hints |= NATIVE_PARAMETER_IS_AUTOMABLE;
+            if (paramData.hints & PARAMETER_USES_SAMPLERATE)
+                hints |= NATIVE_PARAMETER_USES_SAMPLE_RATE;
+            if (paramData.hints & PARAMETER_USES_SCALEPOINTS)
+                hints |= NATIVE_PARAMETER_USES_SCALEPOINTS;
+
+            if (paramData.type == PARAMETER_INPUT || paramData.type == PARAMETER_OUTPUT)
             {
-                const ParameterData& paramData(plugin->getParameterData(index));
-                const ParameterRanges& paramRanges(plugin->getParameterRanges(index));
-
-                if (! plugin->getParameterName(index, strBufName))
-                    strBufName[0] = '\0';
-                if (! plugin->getParameterUnit(index, strBufUnit))
-                    strBufUnit[0] = '\0';
-
-                uint hints = 0x0;
-
-                if (paramData.hints & PARAMETER_IS_BOOLEAN)
-                    hints |= NATIVE_PARAMETER_IS_BOOLEAN;
-                if (paramData.hints & PARAMETER_IS_INTEGER)
-                    hints |= NATIVE_PARAMETER_IS_INTEGER;
-                if (paramData.hints & PARAMETER_IS_LOGARITHMIC)
-                    hints |= NATIVE_PARAMETER_IS_LOGARITHMIC;
-                if (paramData.hints & PARAMETER_IS_AUTOMABLE)
-                    hints |= NATIVE_PARAMETER_IS_AUTOMABLE;
-                if (paramData.hints & PARAMETER_USES_SAMPLERATE)
-                    hints |= NATIVE_PARAMETER_USES_SAMPLE_RATE;
-                if (paramData.hints & PARAMETER_USES_SCALEPOINTS)
-                    hints |= NATIVE_PARAMETER_USES_SCALEPOINTS;
-
-                if (paramData.type == PARAMETER_INPUT || paramData.type == PARAMETER_OUTPUT)
-                {
-                    if (paramData.hints & PARAMETER_IS_ENABLED)
-                        hints |= NATIVE_PARAMETER_IS_ENABLED;
-                    if (paramData.type == PARAMETER_OUTPUT)
-                        hints |= NATIVE_PARAMETER_IS_OUTPUT;
-                }
-
-                param.hints = static_cast<NativeParameterHints>(hints);
-                param.name  = strBufName;
-                param.unit  = strBufUnit;
-                param.ranges.def = paramRanges.def;
-                param.ranges.min = paramRanges.min;
-                param.ranges.max = paramRanges.max;
-                param.ranges.step = paramRanges.step;
-                param.ranges.stepSmall = paramRanges.stepSmall;
-                param.ranges.stepLarge = paramRanges.stepLarge;
-                param.scalePointCount = 0; // TODO
-                param.scalePoints = nullptr;
-
-                return &param;
+                if (paramData.hints & PARAMETER_IS_ENABLED)
+                    hints |= NATIVE_PARAMETER_IS_ENABLED;
+                if (paramData.type == PARAMETER_OUTPUT)
+                    hints |= NATIVE_PARAMETER_IS_OUTPUT;
             }
+
+            param.hints = static_cast<NativeParameterHints>(hints);
+            param.name  = strBufName;
+            param.unit  = strBufUnit;
+            param.comment = strBufComment;
+            param.groupName = strBufGroupName;
+            param.ranges.def = paramRanges.def;
+            param.ranges.min = paramRanges.min;
+            param.ranges.max = paramRanges.max;
+            param.ranges.step = paramRanges.step;
+            param.ranges.stepSmall = paramRanges.stepSmall;
+            param.ranges.stepLarge = paramRanges.stepLarge;
+            param.scalePointCount = 0; // TODO
+            param.scalePoints = nullptr;
+
+            return &param;
         }
 
         param.hints = index < kNumInParams ? static_cast<NativeParameterHints>(0x0) : NATIVE_PARAMETER_IS_OUTPUT;
@@ -991,47 +1053,11 @@ protected:
 
     float getParameterValue(const uint32_t index) const
     {
-        if (CarlaPlugin* const plugin = _getFirstPlugin())
-        {
-            if (index < plugin->getParameterCount())
-                return plugin->getParameterValue(index);
-        }
+        uint32_t rindex = index;
+        if (const CarlaPluginPtr plugin = _getPluginForParameterIndex(rindex))
+            return plugin->getParameterValue(rindex);
 
         return fParameters[index];
-    }
-
-    // -------------------------------------------------------------------
-    // Plugin midi-program calls
-
-    uint32_t getMidiProgramCount() const
-    {
-        if (CarlaPlugin* const plugin = _getFirstPlugin())
-            return plugin->getMidiProgramCount();
-
-        return 0;
-    }
-
-    const NativeMidiProgram* getMidiProgramInfo(const uint32_t index) const
-    {
-        if (CarlaPlugin* const plugin = _getFirstPlugin())
-        {
-            if (index < plugin->getMidiProgramCount())
-            {
-                static NativeMidiProgram midiProg;
-
-                {
-                    const MidiProgramData& midiProgData(plugin->getMidiProgramData(index));
-
-                    midiProg.bank    = midiProgData.bank;
-                    midiProg.program = midiProgData.program;
-                    midiProg.name    = midiProgData.name;
-                }
-
-                return &midiProg;
-            }
-        }
-
-        return nullptr;
     }
 
     // -------------------------------------------------------------------
@@ -1039,22 +1065,11 @@ protected:
 
     void setParameterValue(const uint32_t index, const float value)
     {
-        if (CarlaPlugin* const plugin = _getFirstPlugin())
-        {
-            if (index < plugin->getParameterCount())
-            {
-                const float rvalue = plugin->getParameterRanges(index).getUnnormalizedValue(value);
-                plugin->setParameterValueRT(index, rvalue, false);
-            }
-        }
+        uint32_t rindex = index;
+        if (const CarlaPluginPtr plugin = _getPluginForParameterIndex(rindex))
+            plugin->setParameterValueRT(rindex, value, false);
 
         fParameters[index] = value;
-    }
-
-    void setMidiProgram(const uint8_t, const uint32_t bank, const uint32_t program)
-    {
-        if (CarlaPlugin* const plugin = _getFirstPlugin())
-            plugin->setMidiProgramById(bank, program, false, false, false);
     }
 
     // -------------------------------------------------------------------
@@ -1065,7 +1080,7 @@ protected:
 #if 0
         for (uint i=0; i < pData->curPluginCount; ++i)
         {
-            CarlaPlugin* const plugin(pData->plugins[i].plugin);
+            CarlaPluginPtr plugin = pData->plugins[i].plugin;
 
             if (plugin == nullptr || ! plugin->isEnabled())
                 continue;
@@ -1082,7 +1097,7 @@ protected:
 #if 0
         for (uint i=0; i < pData->curPluginCount; ++i)
         {
-            CarlaPlugin* const plugin(pData->plugins[i].plugin);
+            CarlaPluginPtr plugin = pData->plugins[i].plugin;
 
             if (plugin == nullptr || ! plugin->isEnabled())
                 continue;
@@ -1095,7 +1110,7 @@ protected:
         //runPendingRtEvents();
     }
 
-    void process(const float** const inBuffer, float** const outBuffer, const uint32_t frames,
+    void process(const float* const* const inBuffer, float** const outBuffer, const uint32_t frames,
                  const NativeMidiEvent* const midiEvents, const uint32_t midiEventCount)
     {
         if (frames > pData->bufferSize)
@@ -1293,12 +1308,9 @@ protected:
 
             for (uint i=0; i < pData->curPluginCount; ++i)
             {
-                CarlaPlugin* const plugin(pData->plugins[i].plugin);
-
-                if (plugin != nullptr && plugin->isEnabled())
-                {
-                    uiServerCallback(ENGINE_CALLBACK_PLUGIN_ADDED, i, 0, 0, 0, 0.0f, plugin->getName());
-                }
+                if (const CarlaPluginPtr plugin = pData->plugins[i].plugin)
+                    if (plugin->isEnabled())
+                        uiServerCallback(ENGINE_CALLBACK_PLUGIN_ADDED, i, 0, 0, 0, 0.0f, plugin->getName());
             }
 
             if (kIsPatchbay)
@@ -1311,15 +1323,16 @@ protected:
             // hide all custom uis
             for (uint i=0; i < pData->curPluginCount; ++i)
             {
-                CarlaPlugin* const plugin(pData->plugins[i].plugin);
-
-                if (plugin != nullptr && plugin->isEnabled())
+                if (const CarlaPluginPtr plugin = pData->plugins[i].plugin)
                 {
-                    if (plugin->getHints() & PLUGIN_HAS_CUSTOM_UI)
+                    if (plugin->isEnabled())
                     {
-                        try {
-                            plugin->showCustomUI(false);
-                        } CARLA_SAFE_EXCEPTION_CONTINUE("Plugin showCustomUI (hide)");
+                        if (plugin->getHints() & PLUGIN_HAS_CUSTOM_UI)
+                        {
+                            try {
+                                plugin->showCustomUI(false);
+                            } CARLA_SAFE_EXCEPTION_CONTINUE("Plugin showCustomUI (hide)");
+                        }
                     }
                 }
             }
@@ -1328,19 +1341,27 @@ protected:
 
     void uiIdle()
     {
+#ifdef USE_REFCOUNTER_JUCE_MESSAGE_MANAGER
+        const ScopedJuceMessageThreadRunner sjmtr(*this, false);
+
+        if (kNeedsJuceEvents && ! sjmtr.wasLocked)
+            return;
+#endif
+
         for (uint i=0; i < pData->curPluginCount; ++i)
         {
-            CarlaPlugin* const plugin(pData->plugins[i].plugin);
-
-            if (plugin != nullptr && plugin->isEnabled())
+            if (const CarlaPluginPtr plugin = pData->plugins[i].plugin)
             {
-                const uint hints(plugin->getHints());
-
-                if ((hints & PLUGIN_HAS_CUSTOM_UI) != 0 && (hints & PLUGIN_NEEDS_UI_MAIN_THREAD) != 0)
+                if (plugin->isEnabled())
                 {
-                    try {
-                        plugin->uiIdle();
-                    } CARLA_SAFE_EXCEPTION_CONTINUE("Plugin uiIdle");
+                    const uint hints = plugin->getHints();
+
+                    if ((hints & PLUGIN_HAS_CUSTOM_UI) != 0 && (hints & PLUGIN_NEEDS_UI_MAIN_THREAD) != 0)
+                    {
+                        try {
+                            plugin->uiIdle();
+                        } CARLA_SAFE_EXCEPTION_CONTINUE("Plugin uiIdle");
+                    }
                 }
             }
         }
@@ -1360,14 +1381,40 @@ protected:
             fUiServer.stopPipeServer(1000);
             break;
         }
+
+        if (carla_isNotEqual(fLastScaleFactor, pData->options.uiScale))
+        {
+            fLastScaleFactor = pData->options.uiScale;
+            pHost->dispatcher(pHost->handle,
+                              NATIVE_HOST_OPCODE_UI_RESIZE,
+                              static_cast<int>(kUiWidth * fLastScaleFactor + 0.5f),
+                              static_cast<int>(kUiHeight * fLastScaleFactor + 0.5f),
+                              nullptr, 0.0f);
+        }
+
+        {
+            const CarlaMutexLocker cml(fPluginDeleterMutex);
+            pData->deletePluginsAsNeeded();
+        }
     }
 
     void uiSetParameterValue(const uint32_t index, const float value)
     {
-        if (CarlaPlugin* const plugin = _getFirstPlugin())
+        uint32_t rindex = index;
+        if (const CarlaPluginPtr plugin = _getPluginForParameterIndex(rindex))
         {
-            if (index < plugin->getParameterCount())
-                plugin->uiParameterChange(index, value);
+            if (plugin->getHints() & PLUGIN_HAS_CUSTOM_UI)
+                plugin->uiParameterChange(rindex, value);
+
+            if (index >= kNumInParams || ! fUiServer.isPipeRunning())
+                return;
+
+            uiServerCallback(ENGINE_CALLBACK_PARAMETER_VALUE_CHANGED,
+                             plugin->getId(),
+                             static_cast<int>(rindex),
+                             0, 0,
+                             value,
+                             nullptr);
         }
     }
 
@@ -1377,6 +1424,9 @@ protected:
             return;
 
         fUiServer.idlePipe();
+
+        if (! fUiServer.isPipeRunning())
+            return;
 
         char tmpBuf[STR_MAX+1];
         carla_zeroChars(tmpBuf, STR_MAX+1);
@@ -1388,16 +1438,28 @@ protected:
         // ------------------------------------------------------------------------------------------------------------
         // send engine info
 
-        CARLA_SAFE_ASSERT_RETURN(fUiServer.writeAndFixMessage("runtime-info"),);
-        std::snprintf(tmpBuf, STR_MAX, "%f:0\n", static_cast<double>(getDSPLoad()));
+        std::snprintf(tmpBuf, STR_MAX, "%.12g:0\n", static_cast<double>(getDSPLoad()));
+        CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage("runtime-info\n"),);
         CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
 
         fUiServer.flushMessages();
 
+        if (const char* const projFolder = getCurrentProjectFolder())
+        {
+            if (fLastProjectFolder != projFolder)
+            {
+                carla_stdout("Project folder changed to %s", projFolder);
+                fLastProjectFolder = projFolder;
+                CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage("project-folder\n"),);
+                CARLA_SAFE_ASSERT_RETURN(fUiServer.writeAndFixMessage(projFolder),);
+                fUiServer.flushMessages();
+            }
+        }
+
         // ------------------------------------------------------------------------------------------------------------
         // send transport
 
-        CARLA_SAFE_ASSERT_RETURN(fUiServer.writeAndFixMessage("transport"),);
+        CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage("transport\n"),);
         CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(timeInfo.playing ? "true\n" : "false\n"),);
 
         if (timeInfo.bbt.valid)
@@ -1407,7 +1469,7 @@ protected:
                                                                    timeInfo.bbt.beat,
                                                                    static_cast<int>(timeInfo.bbt.tick + 0.5));
             CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
-            std::snprintf(tmpBuf, STR_MAX, "%f\n", timeInfo.bbt.beatsPerMinute);
+            std::snprintf(tmpBuf, STR_MAX, "%.12g\n", timeInfo.bbt.beatsPerMinute);
             CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
         }
         else
@@ -1425,11 +1487,11 @@ protected:
         for (uint i=0; i < pData->curPluginCount; ++i)
         {
             const EnginePluginData& plugData(pData->plugins[i]);
-            const CarlaPlugin* const plugin(pData->plugins[i].plugin);
+            const CarlaPluginPtr plugin = pData->plugins[i].plugin;
 
             std::snprintf(tmpBuf, STR_MAX, "PEAKS_%i\n", i);
             CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
-            std::snprintf(tmpBuf, STR_MAX, "%f:%f:%f:%f\n",
+            std::snprintf(tmpBuf, STR_MAX, "%.12g:%.12g:%.12g:%.12g\n",
                           static_cast<double>(plugData.peaks[0]),
                           static_cast<double>(plugData.peaks[1]),
                           static_cast<double>(plugData.peaks[2]),
@@ -1443,9 +1505,9 @@ protected:
                 if (! plugin->isParameterOutput(j))
                     continue;
 
-                std::snprintf(tmpBuf, STR_MAX, "PARAMVAL_%i:%i\n", i, j);
+                std::snprintf(tmpBuf, STR_MAX, "PARAMVAL_%u:%u\n", i, j);
                 CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
-                std::snprintf(tmpBuf, STR_MAX, "%f\n", static_cast<double>(plugin->getParameterValue(j)));
+                std::snprintf(tmpBuf, STR_MAX, "%.12g\n", static_cast<double>(plugin->getParameterValue(j)));
                 CARLA_SAFE_ASSERT_RETURN(fUiServer.writeMessage(tmpBuf),);
 
                 fUiServer.flushMessages();
@@ -1465,6 +1527,10 @@ protected:
 
     void setState(const char* const data)
     {
+#ifdef USE_REFCOUNTER_JUCE_MESSAGE_MANAGER
+        const ScopedJuceMessageThreadRunner sjmtr(*this, true);
+#endif
+
         // remove all plugins from UI side
         for (uint i=0, count=pData->curPluginCount; i < count; ++i)
             CarlaEngine::callback(true, true, ENGINE_CALLBACK_PLUGIN_REMOVED, count-i-1, 0, 0, 0, 0.0f, nullptr);
@@ -1474,6 +1540,11 @@ protected:
         removeAllPlugins();
         fIsRunning = true;
 
+        {
+            const CarlaMutexLocker cml(fPluginDeleterMutex);
+            pData->deletePluginsAsNeeded();
+        }
+
         // stopped during removeAllPlugins()
         if (! pData->thread.isThreadRunning())
             pData->thread.startThread();
@@ -1481,7 +1552,9 @@ protected:
         fOptionsForced = true;
         const String state(data);
         XmlDocument xml(state);
-        loadProjectInternal(xml);
+        loadProjectInternal(xml, true);
+
+        reloadFromUI();
     }
 
     // -------------------------------------------------------------------
@@ -1549,24 +1622,9 @@ public:
         return handlePtr->getParameterValue(index);
     }
 
-    static uint32_t _get_midi_program_count(NativePluginHandle handle)
-    {
-        return handlePtr->getMidiProgramCount();
-    }
-
-    static const NativeMidiProgram* _get_midi_program_info(NativePluginHandle handle, uint32_t index)
-    {
-        return handlePtr->getMidiProgramInfo(index);
-    }
-
     static void _set_parameter_value(NativePluginHandle handle, uint32_t index, float value)
     {
         handlePtr->setParameterValue(index, value);
-    }
-
-    static void _set_midi_program(NativePluginHandle handle, uint8_t channel, uint32_t bank, uint32_t program)
-    {
-        handlePtr->setMidiProgram(channel, bank, program);
     }
 
     static void _ui_show(NativePluginHandle handle, bool show)
@@ -1594,8 +1652,9 @@ public:
         handlePtr->deactivate();
     }
 
+    // FIXME for v3.0, use const for the input buffer
     static void _process(NativePluginHandle handle,
-                         const float** inBuffer, float** outBuffer, const uint32_t frames,
+                         float** inBuffer, float** outBuffer, const uint32_t frames,
                          const NativeMidiEvent* midiEvents, uint32_t midiEventCount)
     {
         handlePtr->process(inBuffer, outBuffer, frames, midiEvents, midiEventCount);
@@ -1612,7 +1671,8 @@ public:
     }
 
     static intptr_t _dispatcher(NativePluginHandle handle,
-                                NativePluginDispatcherOpcode opcode, int32_t index, intptr_t value, void* ptr, float opt)
+                                NativePluginDispatcherOpcode opcode,
+                                int32_t index, intptr_t value, void* ptr, float opt)
     {
         switch(opcode)
         {
@@ -1636,6 +1696,11 @@ public:
             CarlaEngineNative* const engine = handlePtr;
             return (intptr_t)(CarlaEngine*)engine;
         }
+        case NATIVE_PLUGIN_OPCODE_IDLE:
+            //handlePtr->idle();
+            return 0;
+        case NATIVE_PLUGIN_OPCODE_UI_MIDI_EVENT:
+            return 0;
         }
 
         return 0;
@@ -1647,29 +1712,56 @@ public:
 
     // -------------------------------------------------------------------
 
-    static void _ui_server_callback(void* handle, EngineCallbackOpcode action, uint pluginId,
-                                    int value1, int value2, int value3,
-                                    float valuef, const char* valueStr)
-    {
-        handlePtr->uiServerCallback(action, pluginId, value1, value2, value3, valuef, valueStr);
-    }
-
-    static const char* _ui_file_callback(void* handle, FileCallbackOpcode action, bool isDir,
-                                         const char* title, const char* filter)
-    {
-        return handlePtr->uiFileCallback(action, isDir, title, filter);
-    }
-
-    // -------------------------------------------------------------------
-
     #undef handlePtr
 
 private:
     const NativeHostDescriptor* const pHost;
 
-#ifdef USE_JUCE_MESSAGE_THREAD
-    const bool kNeedsJuceMsgThread;
-    const juce::SharedResourcePointer<SharedJuceMessageThread> fJuceMsgThread;
+#ifdef USE_REFCOUNTER_JUCE_MESSAGE_MANAGER
+    const bool kNeedsJuceEvents;
+    const juce::SharedResourcePointer<ReferenceCountedJuceMessageMessager> fJuceMsgMgr;
+    CarlaMutex fJuceMsgMutex;
+
+    struct ScopedJuceMessageThreadRunner {
+        const CarlaMutexTryLocker cmtl;
+        const bool wasLocked;
+        juce::MessageManager* msgMgr;
+
+        ScopedJuceMessageThreadRunner(CarlaEngineNative& self, const bool forceLock) noexcept
+            : cmtl(self.fJuceMsgMutex, forceLock),
+              wasLocked(cmtl.wasLocked()),
+              msgMgr(nullptr)
+        {
+            if (! self.kNeedsJuceEvents)
+                return;
+            if (! wasLocked)
+                return;
+
+            juce::MessageManager* const msgMgr2 = juce::MessageManager::getInstanceWithoutCreating();
+            CARLA_SAFE_ASSERT_RETURN(msgMgr2 != nullptr,);
+
+            if (! msgMgr2->isThisTheMessageThread())
+            {
+                try {
+                    msgMgr2->setCurrentThreadAsMessageThread();
+                } CARLA_SAFE_EXCEPTION_RETURN("setCurrentThreadAsMessageThread",);
+            }
+
+            msgMgr = msgMgr2;
+        }
+
+        ~ScopedJuceMessageThreadRunner()
+        {
+            if (msgMgr == nullptr)
+                return;
+
+            const juce::MessageManagerLock mml;
+
+            for (; msgMgr->dispatchNextMessageOnSystemQueue(true);) {}
+        }
+
+        CARLA_DECLARE_NON_COPY_STRUCT(ScopedJuceMessageThreadRunner)
+    };
 #endif
 
     const bool kIsPatchbay; // rack if false
@@ -1678,20 +1770,58 @@ private:
     CarlaEngineNativeUI fUiServer;
 
     float fParameters[kNumInParams+kNumOutParams];
+    float fLastScaleFactor;
+    CarlaString fLastProjectFolder;
+    CarlaMutex fPluginDeleterMutex;
 
     bool fOptionsForced;
 
-    CarlaPlugin* _getFirstPlugin() const noexcept
+    CarlaPluginPtr _getPluginForParameterIndex(uint32_t& index) const noexcept
     {
         if (pData->curPluginCount == 0 || pData->plugins == nullptr)
             return nullptr;
 
-        CarlaPlugin* const plugin(pData->plugins[0].plugin);
+        for (uint32_t i=0; i<pData->curPluginCount; ++i)
+        {
+            const CarlaPluginPtr plugin = pData->plugins[i].plugin;
 
-        if (plugin == nullptr || ! plugin->isEnabled())
-            return nullptr;
+            if (plugin.get() == nullptr || ! plugin->isEnabled())
+                break;
 
-        return pData->plugins[0].plugin;
+            if (const uint32_t paramCount = plugin->getParameterCount())
+            {
+                if (index >= paramCount)
+                {
+                    index -= paramCount;
+                    continue;
+                }
+
+                return plugin;
+            }
+        }
+
+        return nullptr;
+    }
+
+    bool _getRealIndexForPluginParameter(const uint32_t pluginId, uint32_t& rindex) const noexcept
+    {
+        if (pData->curPluginCount == 0 || pluginId >= pData->curPluginCount || pData->plugins == nullptr)
+            return false;
+
+        for (uint32_t i=0; i<pluginId; ++i)
+        {
+            const CarlaPluginPtr plugin = pData->plugins[i].plugin;
+
+            if (plugin.get() == nullptr || ! plugin->isEnabled())
+                return false;
+
+            rindex += plugin->getParameterCount();
+        }
+
+        if (rindex >= kNumInParams)
+            return false;
+
+        return true;
     }
 
     CARLA_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CarlaEngineNative)
@@ -1699,7 +1829,7 @@ private:
 
 // -----------------------------------------------------------------------
 
-bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
+bool CarlaEngineNativeUI::msgReceived(const char* const msg) noexcept
 {
     if (CarlaExternalUI::msgReceived(msg))
         return true;
@@ -1714,14 +1844,11 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
 
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(option), true);
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsInt(value), true);
-        readNextLineAsString(valueStr); // can be null
+        readNextLineAsString(valueStr, false); // can be null
 
         try {
             fEngine->setOption(static_cast<EngineOption>(option), value, valueStr);
         } CARLA_SAFE_EXCEPTION("setOption");
-
-        if (valueStr != nullptr)
-            delete[] valueStr;
     }
     else if (std::strcmp(msg, "clear_engine_xruns") == 0)
     {
@@ -1735,37 +1862,35 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
     {
         const char* filename;
 
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(filename), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(filename, false), true);
 
         try {
             ok = fEngine->loadFile(filename);
         } CARLA_SAFE_EXCEPTION("loadFile");
 
-        delete[] filename;
+        fEngine->reloadFromUI();
     }
     else if (std::strcmp(msg, "load_project") == 0)
     {
         const char* filename;
 
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(filename), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(filename, false), true);
 
         try {
             ok = fEngine->loadProject(filename, true);
         } CARLA_SAFE_EXCEPTION("loadProject");
 
-        delete[] filename;
+        fEngine->reloadFromUI();
     }
     else if (std::strcmp(msg, "save_project") == 0)
     {
         const char* filename;
 
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(filename), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(filename, false), true);
 
         try {
             ok = fEngine->saveProject(filename, true);
         } CARLA_SAFE_EXCEPTION("saveProject");
-
-        delete[] filename;
     }
     else if (std::strcmp(msg, "clear_project_filename") == 0)
     {
@@ -1797,6 +1922,22 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         try {
             ok = fEngine->patchbayDisconnect(external, connectionId);
         } CARLA_SAFE_EXCEPTION("patchbayDisconnect");
+    }
+    else if (std::strcmp(msg, "patchbay_set_group_pos") == 0)
+    {
+        bool external;
+        uint32_t groupId;
+        int x1, y1, x2, y2;
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsBool(external), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(groupId), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsInt(x1), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsInt(y1), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsInt(x2), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsInt(y2), true);
+
+        try {
+            ok = fEngine->patchbaySetGroupPos(false, true, external, groupId, x1, y1, x2, y2);
+        } CARLA_SAFE_EXCEPTION("patchbaySetGroupPos");
     }
     else if (std::strcmp(msg, "patchbay_refresh") == 0)
     {
@@ -1842,9 +1983,9 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
 
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(btype), true);
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(ptype), true);
-        readNextLineAsString(filename); // can be null
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(name), true);
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(label), true);
+        readNextLineAsString(filename, true); // can be null
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(name, true), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(label, true), true);
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsLong(uniqueId), true);
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(options), true);
 
@@ -1878,9 +2019,7 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
 
         ok = fEngine->removePlugin(pluginId);
-
-        if (pluginId == 0)
-            fEngine->reloadFromUI();
+        fEngine->reloadFromUI();
     }
     else if (std::strcmp(msg, "remove_all_plugins") == 0)
     {
@@ -1893,11 +2032,9 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         const char* newName;
 
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(newName), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(newName, false), true);
 
         ok = fEngine->renamePlugin(pluginId, newName);
-
-        delete[] newName;
     }
     else if (std::strcmp(msg, "clone_plugin") == 0)
     {
@@ -1906,6 +2043,7 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
 
         ok = fEngine->clonePlugin(pluginId);
+        fEngine->reloadFromUI();
     }
     else if (std::strcmp(msg, "replace_plugin") == 0)
     {
@@ -1923,9 +2061,7 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginIdB), true);
 
         ok = fEngine->switchPlugins(pluginIdA, pluginIdB);
-
-        if (pluginIdA == 0 || pluginIdB == 0)
-            fEngine->reloadFromUI();
+        fEngine->reloadFromUI();
     }
     else if (std::strcmp(msg, "load_plugin_state") == 0)
     {
@@ -1933,15 +2069,13 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         const char* filename;
 
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(filename), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(filename, false), true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
         {
             plugin->loadStateFromFile(filename);
             _updateParamValues(plugin, pluginId, false, true);
         }
-
-        delete[] filename;
     }
     else if (std::strcmp(msg, "save_plugin_state") == 0)
     {
@@ -1949,12 +2083,10 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         const char* filename;
 
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(filename), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(filename, false), true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
             plugin->saveStateToFile(filename);
-
-        delete[] filename;
     }
     else if (std::strcmp(msg, "set_option") == 0)
     {
@@ -1965,7 +2097,7 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(option), true);
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsBool(yesNo), true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
             plugin->setOption(option, yesNo, false);
     }
     else if (std::strcmp(msg, "set_active") == 0)
@@ -1976,7 +2108,7 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsBool(onOff), true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
             plugin->setActive(onOff, true, false);
     }
     else if (std::strcmp(msg, "set_drywet") == 0)
@@ -1987,7 +2119,7 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsFloat(value), true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
             plugin->setDryWet(value, true, false);
     }
     else if (std::strcmp(msg, "set_volume") == 0)
@@ -1998,7 +2130,7 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsFloat(value), true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
             plugin->setVolume(value, true, false);
     }
     else if (std::strcmp(msg, "set_balance_left") == 0)
@@ -2009,7 +2141,7 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsFloat(value), true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
             plugin->setBalanceLeft(value, true, false);
     }
     else if (std::strcmp(msg, "set_balance_right") == 0)
@@ -2020,7 +2152,7 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsFloat(value), true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
             plugin->setBalanceRight(value, true, false);
     }
     else if (std::strcmp(msg, "set_panning") == 0)
@@ -2031,7 +2163,7 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsFloat(value), true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
             plugin->setPanning(value, true, false);
     }
     else if (std::strcmp(msg, "set_ctrl_channel") == 0)
@@ -2043,7 +2175,7 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsInt(channel), true);
         CARLA_SAFE_ASSERT_RETURN(channel >= -1 && channel < MAX_MIDI_CHANNELS, true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
             plugin->setCtrlChannel(int8_t(channel), true, false);
     }
     else if (std::strcmp(msg, "set_parameter_value") == 0)
@@ -2055,7 +2187,7 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(parameterId), true);
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsFloat(value), true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
         {
             plugin->setParameterValue(parameterId, value, true, true, false);
             fEngine->setParameterValueFromUI(pluginId, parameterId, value);
@@ -2070,21 +2202,34 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(channel), true);
         CARLA_SAFE_ASSERT_RETURN(channel < MAX_MIDI_CHANNELS, true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
             plugin->setParameterMidiChannel(parameterId, static_cast<uint8_t>(channel), true, false);
     }
-    else if (std::strcmp(msg, "set_parameter_midi_cc") == 0)
+    else if (std::strcmp(msg, "set_parameter_mapped_control_index") == 0)
     {
         uint32_t pluginId, parameterId;
-        int32_t cc;
+        int32_t ctrl;
 
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(parameterId), true);
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsInt(cc), true);
-        CARLA_SAFE_ASSERT_RETURN(cc >= -1 && cc < MAX_MIDI_CONTROL, true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsInt(ctrl), true);
+        CARLA_SAFE_ASSERT_RETURN(ctrl >= CONTROL_INDEX_NONE && ctrl <= CONTROL_INDEX_MAX_ALLOWED, true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
-            plugin->setParameterMidiCC(parameterId, static_cast<int16_t>(cc), true, false);
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
+            plugin->setParameterMappedControlIndex(parameterId, static_cast<int16_t>(ctrl), true, false, true);
+    }
+    else if (std::strcmp(msg, "set_parameter_mapped_range") == 0)
+    {
+        uint32_t pluginId, parameterId;
+        float minimum, maximum;
+
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(parameterId), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsFloat(minimum), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsFloat(maximum), true);
+
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
+            plugin->setParameterMappedRange(parameterId, minimum, maximum, true, false);
     }
     else if (std::strcmp(msg, "set_parameter_touch") == 0)
     {
@@ -2095,7 +2240,7 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(parameterId), true);
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsBool(touching), true);
 
-        if (fEngine->getPlugin(pluginId) != nullptr)
+        if (fEngine->getPlugin(pluginId))
             fEngine->setParameterTouchFromUI(pluginId, parameterId, touching);
     }
     else if (std::strcmp(msg, "set_program") == 0)
@@ -2106,7 +2251,7 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsInt(index), true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
         {
             plugin->setProgram(index, true, true, false);
             _updateParamValues(plugin, pluginId, true, true);
@@ -2120,7 +2265,7 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsInt(index), true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
         {
             plugin->setMidiProgram(index, true, true, false);
             _updateParamValues(plugin, pluginId, true, true);
@@ -2134,16 +2279,15 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         const char* value;
 
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(type), true);
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(key), true);
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(value), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(type, true), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(key, true), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(value, false), true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
             plugin->setCustomData(type, key, value, true);
 
         delete[] type;
         delete[] key;
-        delete[] value;
     }
     else if (std::strcmp(msg, "set_chunk_data") == 0)
     {
@@ -2151,9 +2295,9 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         const char* cdata;
 
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(cdata), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(cdata, false), true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
         {
             std::vector<uint8_t> chunk(carla_getChunkFromBase64String(cdata));
 #ifdef CARLA_PROPER_CPP11_SUPPORT
@@ -2163,8 +2307,6 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
 #endif
             _updateParamValues(plugin, pluginId, false, true);
         }
-
-        delete[] cdata;
     }
     else if (std::strcmp(msg, "prepare_for_save") == 0)
     {
@@ -2172,8 +2314,8 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
 
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
-            plugin->prepareForSave();
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
+            plugin->prepareForSave(false);
     }
     else if (std::strcmp(msg, "reset_parameters") == 0)
     {
@@ -2181,7 +2323,7 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
 
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
         {
             plugin->resetParameters();
             _updateParamValues(plugin, pluginId, false, true);
@@ -2193,7 +2335,7 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
 
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
         {
             plugin->randomizeParameters();
             _updateParamValues(plugin, pluginId, false, true);
@@ -2211,7 +2353,7 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         CARLA_SAFE_ASSERT_RETURN(note < MAX_MIDI_VALUE, true);
         CARLA_SAFE_ASSERT_RETURN(velocity < MAX_MIDI_VALUE, true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
             plugin->sendMidiSingleNote(static_cast<uint8_t>(channel), static_cast<uint8_t>(note), static_cast<uint8_t>(velocity), true, true, false);
     }
     else if (std::strcmp(msg, "show_custom_ui") == 0)
@@ -2222,7 +2364,7 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(pluginId), true);
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsBool(yesNo), true);
 
-        if (CarlaPlugin* const plugin = fEngine->getPlugin(pluginId))
+        if (const CarlaPluginPtr plugin = fEngine->getPlugin(pluginId))
             plugin->showCustomUI(yesNo);
     }
     else
@@ -2242,7 +2384,8 @@ bool CarlaEngineNativeUI::msgReceived(const char*const msg) noexcept
     return true;
 }
 
-void CarlaEngineNativeUI::_updateParamValues(CarlaPlugin* const plugin, const uint32_t pluginId,
+void CarlaEngineNativeUI::_updateParamValues(const CarlaPluginPtr& plugin,
+                                             const uint32_t pluginId,
                                              const bool sendCallback, const bool sendPluginHost) const noexcept
 {
     float value;
@@ -2261,6 +2404,7 @@ void CarlaEngineNativeUI::_updateParamValues(CarlaPlugin* const plugin, const ui
         }
 
         if (sendPluginHost) {
+            carla_stdout("_updateParamValues");
             fEngine->setParameterValueFromUI(pluginId, i, value);
         }
     }
@@ -2274,7 +2418,8 @@ static const NativePluginDescriptor carlaRackDesc = {
                                                   |NATIVE_PLUGIN_HAS_UI
                                                   |NATIVE_PLUGIN_NEEDS_UI_MAIN_THREAD
                                                   |NATIVE_PLUGIN_USES_STATE
-                                                  |NATIVE_PLUGIN_USES_TIME),
+                                                  |NATIVE_PLUGIN_USES_TIME
+                                                  |NATIVE_PLUGIN_USES_UI_SIZE),
     /* supports  */ static_cast<NativePluginSupports>(NATIVE_PLUGIN_SUPPORTS_EVERYTHING),
     /* audioIns  */ 2,
     /* audioOuts */ 2,
@@ -2291,10 +2436,10 @@ static const NativePluginDescriptor carlaRackDesc = {
     CarlaEngineNative::_get_parameter_count,
     CarlaEngineNative::_get_parameter_info,
     CarlaEngineNative::_get_parameter_value,
-    CarlaEngineNative::_get_midi_program_count,
-    CarlaEngineNative::_get_midi_program_info,
+    /* _get_midi_program_count */ nullptr,
+    /* _get_midi_program_info  */ nullptr,
     CarlaEngineNative::_set_parameter_value,
-    CarlaEngineNative::_set_midi_program,
+    /* _set_midi_program       */ nullptr,
     /* _set_custom_data        */ nullptr,
     CarlaEngineNative::_ui_show,
     CarlaEngineNative::_ui_idle,
@@ -2309,7 +2454,11 @@ static const NativePluginDescriptor carlaRackDesc = {
     CarlaEngineNative::_dispatcher,
     /* _render_inline_dsplay */ nullptr,
     /* cvIns  */ 0,
-    /* cvOuts */ 0
+    /* cvOuts */ 0,
+    /* _get_buffer_port_name */ nullptr,
+    /* _get_buffer_port_range */ nullptr,
+    /* ui_width   */ kUiWidth,
+    /* ui_height  */ kUiHeight
 };
 
 static const NativePluginDescriptor carlaRackNoMidiOutDesc = {
@@ -2318,7 +2467,8 @@ static const NativePluginDescriptor carlaRackNoMidiOutDesc = {
                                                   |NATIVE_PLUGIN_HAS_UI
                                                   |NATIVE_PLUGIN_NEEDS_UI_MAIN_THREAD
                                                   |NATIVE_PLUGIN_USES_STATE
-                                                  |NATIVE_PLUGIN_USES_TIME),
+                                                  |NATIVE_PLUGIN_USES_TIME
+                                                  |NATIVE_PLUGIN_USES_UI_SIZE),
     /* supports  */ static_cast<NativePluginSupports>(NATIVE_PLUGIN_SUPPORTS_EVERYTHING),
     /* audioIns  */ 2,
     /* audioOuts */ 2,
@@ -2335,14 +2485,14 @@ static const NativePluginDescriptor carlaRackNoMidiOutDesc = {
     CarlaEngineNative::_get_parameter_count,
     CarlaEngineNative::_get_parameter_info,
     CarlaEngineNative::_get_parameter_value,
-    CarlaEngineNative::_get_midi_program_count,
-    CarlaEngineNative::_get_midi_program_info,
+    /* _get_midi_program_count */ nullptr,
+    /* _get_midi_program_info  */ nullptr,
     CarlaEngineNative::_set_parameter_value,
-    CarlaEngineNative::_set_midi_program,
+    /* _set_midi_program       */ nullptr,
     /* _set_custom_data        */ nullptr,
     CarlaEngineNative::_ui_show,
     CarlaEngineNative::_ui_idle,
-    /* _ui_set_parameter_value */ nullptr,
+    CarlaEngineNative::_ui_set_parameter_value,
     /* _ui_set_midi_program    */ nullptr,
     /* _ui_set_custom_data     */ nullptr,
     CarlaEngineNative::_activate,
@@ -2353,7 +2503,11 @@ static const NativePluginDescriptor carlaRackNoMidiOutDesc = {
     CarlaEngineNative::_dispatcher,
     /* _render_inline_dsplay */ nullptr,
     /* cvIns  */ 0,
-    /* cvOuts */ 0
+    /* cvOuts */ 0,
+    /* _get_buffer_port_name */ nullptr,
+    /* _get_buffer_port_range */ nullptr,
+    /* ui_width   */ kUiWidth,
+    /* ui_height  */ kUiHeight
 };
 
 static const NativePluginDescriptor carlaPatchbayDesc = {
@@ -2362,7 +2516,8 @@ static const NativePluginDescriptor carlaPatchbayDesc = {
                                                   |NATIVE_PLUGIN_HAS_UI
                                                   |NATIVE_PLUGIN_NEEDS_UI_MAIN_THREAD
                                                   |NATIVE_PLUGIN_USES_STATE
-                                                  |NATIVE_PLUGIN_USES_TIME),
+                                                  |NATIVE_PLUGIN_USES_TIME
+                                                  |NATIVE_PLUGIN_USES_UI_SIZE),
     /* supports  */ static_cast<NativePluginSupports>(NATIVE_PLUGIN_SUPPORTS_EVERYTHING),
     /* audioIns  */ 2,
     /* audioOuts */ 2,
@@ -2379,14 +2534,14 @@ static const NativePluginDescriptor carlaPatchbayDesc = {
     CarlaEngineNative::_get_parameter_count,
     CarlaEngineNative::_get_parameter_info,
     CarlaEngineNative::_get_parameter_value,
-    CarlaEngineNative::_get_midi_program_count,
-    CarlaEngineNative::_get_midi_program_info,
+    /* _get_midi_program_count */ nullptr,
+    /* _get_midi_program_info  */ nullptr,
     CarlaEngineNative::_set_parameter_value,
-    CarlaEngineNative::_set_midi_program,
+    /* _set_midi_program       */ nullptr,
     /* _set_custom_data        */ nullptr,
     CarlaEngineNative::_ui_show,
     CarlaEngineNative::_ui_idle,
-    /* _ui_set_parameter_value */ nullptr,
+    CarlaEngineNative::_ui_set_parameter_value,
     /* _ui_set_midi_program    */ nullptr,
     /* _ui_set_custom_data     */ nullptr,
     CarlaEngineNative::_activate,
@@ -2397,7 +2552,11 @@ static const NativePluginDescriptor carlaPatchbayDesc = {
     CarlaEngineNative::_dispatcher,
     /* _render_inline_dsplay */ nullptr,
     /* cvIns  */ 0,
-    /* cvOuts */ 0
+    /* cvOuts */ 0,
+    /* _get_buffer_port_name */ nullptr,
+    /* _get_buffer_port_range */ nullptr,
+    /* ui_width   */ kUiWidth,
+    /* ui_height  */ kUiHeight
 };
 
 static const NativePluginDescriptor carlaPatchbay3sDesc = {
@@ -2406,7 +2565,8 @@ static const NativePluginDescriptor carlaPatchbay3sDesc = {
                                                   |NATIVE_PLUGIN_HAS_UI
                                                   |NATIVE_PLUGIN_NEEDS_UI_MAIN_THREAD
                                                   |NATIVE_PLUGIN_USES_STATE
-                                                  |NATIVE_PLUGIN_USES_TIME),
+                                                  |NATIVE_PLUGIN_USES_TIME
+                                                  |NATIVE_PLUGIN_USES_UI_SIZE),
     /* supports  */ static_cast<NativePluginSupports>(NATIVE_PLUGIN_SUPPORTS_EVERYTHING),
     /* audioIns  */ 3,
     /* audioOuts */ 2,
@@ -2423,14 +2583,14 @@ static const NativePluginDescriptor carlaPatchbay3sDesc = {
     CarlaEngineNative::_get_parameter_count,
     CarlaEngineNative::_get_parameter_info,
     CarlaEngineNative::_get_parameter_value,
-    CarlaEngineNative::_get_midi_program_count,
-    CarlaEngineNative::_get_midi_program_info,
+    /* _get_midi_program_count */ nullptr,
+    /* _get_midi_program_info  */ nullptr,
     CarlaEngineNative::_set_parameter_value,
-    CarlaEngineNative::_set_midi_program,
+    /* _set_midi_program       */ nullptr,
     /* _set_custom_data        */ nullptr,
     CarlaEngineNative::_ui_show,
     CarlaEngineNative::_ui_idle,
-    /* _ui_set_parameter_value */ nullptr,
+    CarlaEngineNative::_ui_set_parameter_value,
     /* _ui_set_midi_program    */ nullptr,
     /* _ui_set_custom_data     */ nullptr,
     CarlaEngineNative::_activate,
@@ -2441,7 +2601,11 @@ static const NativePluginDescriptor carlaPatchbay3sDesc = {
     CarlaEngineNative::_dispatcher,
     /* _render_inline_dsplay */ nullptr,
     /* cvIns  */ 0,
-    /* cvOuts */ 0
+    /* cvOuts */ 0,
+    /* _get_buffer_port_name */ nullptr,
+    /* _get_buffer_port_range */ nullptr,
+    /* ui_width   */ kUiWidth,
+    /* ui_height  */ kUiHeight
 };
 
 static const NativePluginDescriptor carlaPatchbay16Desc = {
@@ -2450,7 +2614,8 @@ static const NativePluginDescriptor carlaPatchbay16Desc = {
                                                   |NATIVE_PLUGIN_HAS_UI
                                                   |NATIVE_PLUGIN_NEEDS_UI_MAIN_THREAD
                                                   |NATIVE_PLUGIN_USES_STATE
-                                                  |NATIVE_PLUGIN_USES_TIME),
+                                                  |NATIVE_PLUGIN_USES_TIME
+                                                  |NATIVE_PLUGIN_USES_UI_SIZE),
     /* supports  */ static_cast<NativePluginSupports>(NATIVE_PLUGIN_SUPPORTS_EVERYTHING),
     /* audioIns  */ 16,
     /* audioOuts */ 16,
@@ -2467,14 +2632,14 @@ static const NativePluginDescriptor carlaPatchbay16Desc = {
     CarlaEngineNative::_get_parameter_count,
     CarlaEngineNative::_get_parameter_info,
     CarlaEngineNative::_get_parameter_value,
-    CarlaEngineNative::_get_midi_program_count,
-    CarlaEngineNative::_get_midi_program_info,
+    /* _get_midi_program_count */ nullptr,
+    /* _get_midi_program_info  */ nullptr,
     CarlaEngineNative::_set_parameter_value,
-    CarlaEngineNative::_set_midi_program,
+    /* _set_midi_program       */ nullptr,
     /* _set_custom_data        */ nullptr,
     CarlaEngineNative::_ui_show,
     CarlaEngineNative::_ui_idle,
-    /* _ui_set_parameter_value */ nullptr,
+    CarlaEngineNative::_ui_set_parameter_value,
     /* _ui_set_midi_program    */ nullptr,
     /* _ui_set_custom_data     */ nullptr,
     CarlaEngineNative::_activate,
@@ -2485,7 +2650,11 @@ static const NativePluginDescriptor carlaPatchbay16Desc = {
     CarlaEngineNative::_dispatcher,
     /* _render_inline_dsplay */ nullptr,
     /* cvIns  */ 0,
-    /* cvOuts */ 0
+    /* cvOuts */ 0,
+    /* _get_buffer_port_name */ nullptr,
+    /* _get_buffer_port_range */ nullptr,
+    /* ui_width   */ kUiWidth,
+    /* ui_height  */ kUiHeight
 };
 
 static const NativePluginDescriptor carlaPatchbay32Desc = {
@@ -2494,7 +2663,8 @@ static const NativePluginDescriptor carlaPatchbay32Desc = {
                                                   |NATIVE_PLUGIN_HAS_UI
                                                   |NATIVE_PLUGIN_NEEDS_UI_MAIN_THREAD
                                                   |NATIVE_PLUGIN_USES_STATE
-                                                  |NATIVE_PLUGIN_USES_TIME),
+                                                  |NATIVE_PLUGIN_USES_TIME
+                                                  |NATIVE_PLUGIN_USES_UI_SIZE),
     /* supports  */ static_cast<NativePluginSupports>(NATIVE_PLUGIN_SUPPORTS_EVERYTHING),
     /* audioIns  */ 32,
     /* audioOuts */ 32,
@@ -2511,14 +2681,14 @@ static const NativePluginDescriptor carlaPatchbay32Desc = {
     CarlaEngineNative::_get_parameter_count,
     CarlaEngineNative::_get_parameter_info,
     CarlaEngineNative::_get_parameter_value,
-    CarlaEngineNative::_get_midi_program_count,
-    CarlaEngineNative::_get_midi_program_info,
+    /* _get_midi_program_count */ nullptr,
+    /* _get_midi_program_info  */ nullptr,
     CarlaEngineNative::_set_parameter_value,
-    CarlaEngineNative::_set_midi_program,
+    /* _set_midi_program       */ nullptr,
     /* _set_custom_data        */ nullptr,
     CarlaEngineNative::_ui_show,
     CarlaEngineNative::_ui_idle,
-    /* _ui_set_parameter_value */ nullptr,
+    CarlaEngineNative::_ui_set_parameter_value,
     /* _ui_set_midi_program    */ nullptr,
     /* _ui_set_custom_data     */ nullptr,
     CarlaEngineNative::_activate,
@@ -2529,7 +2699,11 @@ static const NativePluginDescriptor carlaPatchbay32Desc = {
     CarlaEngineNative::_dispatcher,
     /* _render_inline_dsplay */ nullptr,
     /* cvIns  */ 0,
-    /* cvOuts */ 0
+    /* cvOuts */ 0,
+    /* _get_buffer_port_name */ nullptr,
+    /* _get_buffer_port_range */ nullptr,
+    /* ui_width   */ kUiWidth,
+    /* ui_height  */ kUiHeight
 };
 
 static const NativePluginDescriptor carlaPatchbay64Desc = {
@@ -2538,7 +2712,8 @@ static const NativePluginDescriptor carlaPatchbay64Desc = {
                                                   |NATIVE_PLUGIN_HAS_UI
                                                   |NATIVE_PLUGIN_NEEDS_UI_MAIN_THREAD
                                                   |NATIVE_PLUGIN_USES_STATE
-                                                  |NATIVE_PLUGIN_USES_TIME),
+                                                  |NATIVE_PLUGIN_USES_TIME
+                                                  |NATIVE_PLUGIN_USES_UI_SIZE),
     /* supports  */ static_cast<NativePluginSupports>(NATIVE_PLUGIN_SUPPORTS_EVERYTHING),
     /* audioIns  */ 64,
     /* audioOuts */ 64,
@@ -2555,14 +2730,14 @@ static const NativePluginDescriptor carlaPatchbay64Desc = {
     CarlaEngineNative::_get_parameter_count,
     CarlaEngineNative::_get_parameter_info,
     CarlaEngineNative::_get_parameter_value,
-    CarlaEngineNative::_get_midi_program_count,
-    CarlaEngineNative::_get_midi_program_info,
+    /* _get_midi_program_count */ nullptr,
+    /* _get_midi_program_info  */ nullptr,
     CarlaEngineNative::_set_parameter_value,
-    CarlaEngineNative::_set_midi_program,
+    /* _set_midi_program       */ nullptr,
     /* _set_custom_data        */ nullptr,
     CarlaEngineNative::_ui_show,
     CarlaEngineNative::_ui_idle,
-    /* _ui_set_parameter_value */ nullptr,
+    CarlaEngineNative::_ui_set_parameter_value,
     /* _ui_set_midi_program    */ nullptr,
     /* _ui_set_custom_data     */ nullptr,
     CarlaEngineNative::_activate,
@@ -2573,7 +2748,11 @@ static const NativePluginDescriptor carlaPatchbay64Desc = {
     CarlaEngineNative::_dispatcher,
     /* _render_inline_dsplay */ nullptr,
     /* cvIns  */ 0,
-    /* cvOuts */ 0
+    /* cvOuts */ 0,
+    /* _get_buffer_port_name */ nullptr,
+    /* _get_buffer_port_range */ nullptr,
+    /* ui_width   */ kUiWidth,
+    /* ui_height  */ kUiHeight
 };
 
 static const NativePluginDescriptor carlaPatchbayCVDesc = {
@@ -2583,7 +2762,8 @@ static const NativePluginDescriptor carlaPatchbayCVDesc = {
                                                   |NATIVE_PLUGIN_NEEDS_UI_MAIN_THREAD
                                                   |NATIVE_PLUGIN_USES_CONTROL_VOLTAGE
                                                   |NATIVE_PLUGIN_USES_STATE
-                                                  |NATIVE_PLUGIN_USES_TIME),
+                                                  |NATIVE_PLUGIN_USES_TIME
+                                                  |NATIVE_PLUGIN_USES_UI_SIZE),
     /* supports  */ static_cast<NativePluginSupports>(NATIVE_PLUGIN_SUPPORTS_EVERYTHING),
     /* audioIns  */ 2,
     /* audioOuts */ 2,
@@ -2600,14 +2780,14 @@ static const NativePluginDescriptor carlaPatchbayCVDesc = {
     CarlaEngineNative::_get_parameter_count,
     CarlaEngineNative::_get_parameter_info,
     CarlaEngineNative::_get_parameter_value,
-    CarlaEngineNative::_get_midi_program_count,
-    CarlaEngineNative::_get_midi_program_info,
+    /* _get_midi_program_count */ nullptr,
+    /* _get_midi_program_info  */ nullptr,
     CarlaEngineNative::_set_parameter_value,
-    CarlaEngineNative::_set_midi_program,
+    /* _set_midi_program       */ nullptr,
     /* _set_custom_data        */ nullptr,
     CarlaEngineNative::_ui_show,
     CarlaEngineNative::_ui_idle,
-    /* _ui_set_parameter_value */ nullptr,
+    CarlaEngineNative::_ui_set_parameter_value,
     /* _ui_set_midi_program    */ nullptr,
     /* _ui_set_custom_data     */ nullptr,
     CarlaEngineNative::_activate,
@@ -2618,7 +2798,11 @@ static const NativePluginDescriptor carlaPatchbayCVDesc = {
     CarlaEngineNative::_dispatcher,
     /* _render_inline_dsplay */ nullptr,
     /* cvIns  */ 5,
-    /* cvOuts */ 5
+    /* cvOuts */ 5,
+    /* _get_buffer_port_name */ nullptr,
+    /* _get_buffer_port_range */ nullptr,
+    /* ui_width   */ kUiWidth,
+    /* ui_height  */ kUiHeight
 };
 
 CARLA_BACKEND_END_NAMESPACE
@@ -2686,34 +2870,39 @@ const NativePluginDescriptor* carla_get_native_patchbay_cv_plugin()
 
 CARLA_BACKEND_START_NAMESPACE
 
-CarlaEngine* CarlaEngine::newJack() { return nullptr; }
+namespace EngineInit {
 
-# ifdef USING_JUCE
-CarlaEngine*       CarlaEngine::newJuce(const AudioApi)           { return nullptr; }
-uint               CarlaEngine::getJuceApiCount()                 { return 0;       }
-const char*        CarlaEngine::getJuceApiName(const uint)        { return nullptr; }
-const char* const* CarlaEngine::getJuceApiDeviceNames(const uint) { return nullptr; }
-const EngineDriverDeviceInfo* CarlaEngine::getJuceDeviceInfo(const uint, const char* const) { return nullptr; }
-bool               CarlaEngine::showJuceDeviceControlPanel(const uint, const char* const)   { return false; }
-# else
-CarlaEngine*       CarlaEngine::newRtAudio(const AudioApi)           { return nullptr; }
-uint               CarlaEngine::getRtAudioApiCount()                 { return 0;       }
-const char*        CarlaEngine::getRtAudioApiName(const uint)        { return nullptr; }
-const char* const* CarlaEngine::getRtAudioApiDeviceNames(const uint) { return nullptr; }
-const EngineDriverDeviceInfo* CarlaEngine::getRtAudioDeviceInfo(const uint, const char* const) { return nullptr; }
-# endif
+CarlaEngine* newJack() { return nullptr; }
+
+#ifdef USING_JUCE_AUDIO_DEVICES
+CarlaEngine*       newJuce(const AudioApi)           { return nullptr; }
+uint               getJuceApiCount()                 { return 0;       }
+const char*        getJuceApiName(const uint)        { return nullptr; }
+const char* const* getJuceApiDeviceNames(const uint) { return nullptr; }
+const EngineDriverDeviceInfo* getJuceDeviceInfo(const uint, const char* const) { return nullptr; }
+bool               showJuceDeviceControlPanel(const uint, const char* const)   { return false; }
+#else
+CarlaEngine*       newRtAudio(const AudioApi)           { return nullptr; }
+uint               getRtAudioApiCount()                 { return 0;       }
+const char*        getRtAudioApiName(const uint)        { return nullptr; }
+const char* const* getRtAudioApiDeviceNames(const uint) { return nullptr; }
+const EngineDriverDeviceInfo* getRtAudioDeviceInfo(const uint, const char* const) { return nullptr; }
+#endif
+
+}
 
 CARLA_BACKEND_END_NAMESPACE
 
-#define CARLA_PLUGIN_UI_CLASS_PREFIX EngineNative
-#include "CarlaHostCommon.cpp"
+#define CARLA_PLUGIN_UI_CLASS_PREFIX Plugin
 #include "CarlaPluginUI.cpp"
+# undef CARLA_PLUGIN_UI_CLASS_PREFIX
 #include "CarlaDssiUtils.cpp"
 #include "CarlaMacUtils.cpp"
 #include "CarlaPatchbayUtils.cpp"
 #include "CarlaPipeUtils.cpp"
+#include "CarlaProcessUtils.cpp"
 #include "CarlaStateUtils.cpp"
 
-#endif
+#endif /* CARLA_PLUGIN_EXPORT */
 
 // -----------------------------------------------------------------------

@@ -27,6 +27,8 @@
 #include "lv2/atom.h"
 #include "lv2/urid.h"
 
+#include <vector>
+
 CARLA_BRIDGE_UI_START_NAMESPACE
 
 /*!
@@ -53,32 +55,42 @@ protected:
 
     // ---------------------------------------------------------------------
 
-    bool libOpen(const char* const filename) noexcept;
-    void* libSymbol(const char* const symbol) const noexcept;
+    bool libOpen(const char* filename) noexcept;
+    void* libSymbol(const char* symbol) const noexcept;
     const char* libError() const noexcept;
 
     // ---------------------------------------------------------------------
     // DSP Callbacks
 
-    virtual void dspParameterChanged(const uint32_t index, const float value) = 0;
-    virtual void dspProgramChanged(const uint32_t index) = 0;
-    virtual void dspMidiProgramChanged(const uint32_t bank, const uint32_t program) = 0;
-    virtual void dspStateChanged(const char* const key, const char* const value) = 0;
-    virtual void dspNoteReceived(const bool onOff, const uint8_t channel, const uint8_t note, const uint8_t velocity) = 0;
+    virtual void dspParameterChanged(uint32_t index, float value) = 0;
+    virtual void dspParameterChanged(const char* uri, float value) = 0;
+    virtual void dspProgramChanged(uint32_t index) = 0;
+    virtual void dspMidiProgramChanged(uint32_t bank, uint32_t program) = 0;
+    virtual void dspStateChanged(const char* key, const char* value) = 0;
+    virtual void dspNoteReceived(bool onOff, uint8_t channel, uint8_t note, uint8_t velocity) = 0;
 
-    virtual void dspAtomReceived(const uint32_t index, const LV2_Atom* const atom) = 0;
-    virtual void dspURIDReceived(const LV2_URID urid, const char* const uri) = 0;
+    virtual void dspAtomReceived(uint32_t index, const LV2_Atom* atom) = 0;
+    virtual void dspURIDReceived(LV2_URID urid, const char* uri) = 0;
 
-    virtual void uiOptionsChanged(const double sampleRate, const float uiScale,
-                                  const bool useTheme, const bool useThemeColors,
-                                  const char* const windowTitle, const uintptr_t transientWindowId) = 0;
+    struct BridgeFormatOptions {
+        double sampleRate;
+        uint32_t bgColor;
+        uint32_t fgColor;
+        float uiScale;
+        bool useTheme;
+        bool useThemeColors;
+        const char* windowTitle;
+        uintptr_t transientWindowId;
+    };
+
+    virtual void uiOptionsChanged(const BridgeFormatOptions& opts) = 0;
 
 public:
     // ---------------------------------------------------------------------
     // UI initialization
 
-    virtual bool init(const int argc, const char* argv[]);
-    virtual void exec(const bool showUI);
+    virtual bool init(int argc, const char* argv[]);
+    virtual void exec(bool showUI);
     virtual void idleUI() {}
 
     // ---------------------------------------------------------------------
@@ -93,7 +105,7 @@ public:
     /*!
      * TESTING
      */
-    virtual void uiResized(const uint width, const uint height) = 0;
+    virtual void uiResized(uint width, uint height) = 0;
 
     /*!
      * Options.
@@ -152,9 +164,10 @@ protected:
 
     lib_t fLib;
     CarlaString fLibFilename;
+    std::vector<uint8_t> fBase64ReservedChunk;
 
     /*! @internal */
-    bool msgReceived(const char* const msg) noexcept override;
+    bool msgReceived(const char* msg) noexcept override;
 
     CARLA_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CarlaBridgeFormat)
 };

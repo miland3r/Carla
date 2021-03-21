@@ -26,7 +26,13 @@
 #if defined(CARLA_OS_LINUX) && defined(HAVE_X11)
 # include <X11/Xlib.h>
 #elif defined(CARLA_OS_MAC)
+# define Component CocoaComponent
+# define MemoryBlock CocoaMemoryBlock
+# define Point CocoaPoint
 # import <Cocoa/Cocoa.h>
+# undef Component
+# undef MemoryBlock
+# undef Point
 #endif
 
 // -----------------------------------------------------------------------
@@ -99,7 +105,7 @@ private:
             return;
 
 #if defined(CARLA_OS_LINUX) && defined(HAVE_X11)
-        Display* const display = XWindowSystem::getInstance()->displayRef();
+        Display* const display = XWindowSystem::getInstance()->getDisplay();
         CARLA_SAFE_ASSERT_RETURN(display != nullptr,);
 
         ::Window window = (::Window)getWindowHandle();

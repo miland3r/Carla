@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # Common Carla code
-# Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+# Copyright (C) 2011-2021 Filipe Coelho <falktx@falktx.com>
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License as
@@ -17,25 +17,15 @@
 # For a full copy of the GNU General Public License see the doc/GPL.txt file.
 
 # ------------------------------------------------------------------------------------------------------------
-# Config
-
-# These will be modified during install
-X_LIBDIR_X = None
-X_DATADIR_X = None
-
-# ------------------------------------------------------------------------------------------------------------
 # Imports (Global)
 
 import os
 import sys
 
-from PyQt5.Qt import PYQT_VERSION_STR
-from PyQt5.QtCore import qFatal, QT_VERSION_STR, qWarning, QDir
-from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QFileDialog, QMessageBox
+from math import fmod
 
 # ------------------------------------------------------------------------------------------------------------
-# Import Signal
+# Imports (Signal)
 
 from signal import signal, SIGINT, SIGTERM
 
@@ -46,9 +36,31 @@ except:
     haveSIGUSR1 = False
 
 # ------------------------------------------------------------------------------------------------------------
+# Imports (PyQt5)
+
+from PyQt5.Qt import PYQT_VERSION_STR
+from PyQt5.QtCore import qFatal, QT_VERSION, QT_VERSION_STR, qWarning, QDir, QSettings
+from PyQt5.QtGui import QIcon
+from PyQt5.QtWidgets import QFileDialog, QMessageBox
+
+# ------------------------------------------------------------------------------------------------------------
 # Imports (Custom)
 
-from carla_backend_qt import *
+from carla_backend import (
+    kIs64bit, HAIKU, LINUX, MACOS, WINDOWS,
+    MAX_DEFAULT_PARAMETERS,
+    ENGINE_PROCESS_MODE_MULTIPLE_CLIENTS,
+    ENGINE_PROCESS_MODE_PATCHBAY,
+    ENGINE_TRANSPORT_MODE_INTERNAL,
+    ENGINE_TRANSPORT_MODE_JACK
+)
+
+# ------------------------------------------------------------------------------------------------------------
+# Config
+
+# These will be modified during install
+X_LIBDIR_X = None
+X_DATADIR_X = None
 
 # ------------------------------------------------------------------------------------------------------------
 # Platform specific stuff
@@ -59,7 +71,7 @@ if WINDOWS:
 # ------------------------------------------------------------------------------------------------------------
 # Set Version
 
-VERSION = "2.0.90 (2.1-alpha2)"
+VERSION = "2.3.0-RC2"
 
 # ------------------------------------------------------------------------------------------------------------
 # Set TMP
@@ -119,57 +131,43 @@ del envPATH
 # Static MIDI CC list
 
 MIDI_CC_LIST = (
-    "0x01 Modulation",
-    "0x02 Breath",
-    "0x03 (Undefined)",
-    "0x04 Foot",
-    "0x05 Portamento",
-    "0x07 Volume",
-    "0x08 Balance",
-    "0x09 (Undefined)",
-    "0x0A Pan",
-    "0x0B Expression",
-    "0x0C FX Control 1",
-    "0x0D FX Control 2",
-    "0x0E (Undefined)",
-    "0x0F (Undefined)",
-    "0x10 General Purpose 1",
-    "0x11 General Purpose 2",
-    "0x12 General Purpose 3",
-    "0x13 General Purpose 4",
-    "0x14 (Undefined)",
-    "0x15 (Undefined)",
-    "0x16 (Undefined)",
-    "0x17 (Undefined)",
-    "0x18 (Undefined)",
-    "0x19 (Undefined)",
-    "0x1A (Undefined)",
-    "0x1B (Undefined)",
-    "0x1C (Undefined)",
-    "0x1D (Undefined)",
-    "0x1E (Undefined)",
-    "0x1F (Undefined)",
-    "0x46 Control 1 [Variation]",
-    "0x47 Control 2 [Timbre]",
-    "0x48 Control 3 [Release]",
-    "0x49 Control 4 [Attack]",
-    "0x4A Control 5 [Brightness]",
-    "0x4B Control 6 [Decay]",
-    "0x4C Control 7 [Vib Rate]",
-    "0x4D Control 8 [Vib Depth]",
-    "0x4E Control 9 [Vib Delay]",
-    "0x4F Control 10 [Undefined]",
-    "0x50 General Purpose 5",
-    "0x51 General Purpose 6",
-    "0x52 General Purpose 7",
-    "0x53 General Purpose 8",
-    "0x54 Portamento Control",
-    "0x5B FX 1 Depth [Reverb]",
-    "0x5C FX 2 Depth [Tremolo]",
-    "0x5D FX 3 Depth [Chorus]",
-    "0x5E FX 4 Depth [Detune]",
-    "0x5F FX 5 Depth [Phaser]"
+    "01 [0x01] Modulation",
+    "02 [0x02] Breath",
+    "04 [0x04] Foot",
+    "05 [0x05] Portamento",
+    "07 [0x07] Volume",
+    "08 [0x08] Balance",
+    "10 [0x0A] Pan",
+    "11 [0x0B] Expression",
+    "12 [0x0C] FX Control 1",
+    "13 [0x0D] FX Control 2",
+    "16 [0x10] General Purpose 1",
+    "17 [0x11] General Purpose 2",
+    "18 [0x12] General Purpose 3",
+    "19 [0x13] General Purpose 4",
+    "70 [0x46] Control 1 [Variation]",
+    "71 [0x47] Control 2 [Timbre]",
+    "72 [0x48] Control 3 [Release]",
+    "73 [0x49] Control 4 [Attack]",
+    "74 [0x4A] Control 5 [Brightness]",
+    "75 [0x4B] Control 6 [Decay]",
+    "76 [0x4C] Control 7 [Vib Rate]",
+    "77 [0x4D] Control 8 [Vib Depth]",
+    "78 [0x4E] Control 9 [Vib Delay]",
+    "79 [0x4F] Control 10 [Undefined]",
+    "80 [0x50] General Purpose 5",
+    "81 [0x51] General Purpose 6",
+    "82 [0x52] General Purpose 7",
+    "83 [0x53] General Purpose 8",
+    "84 [0x54] Portamento Control",
+    "91 [0x5B] FX 1 Depth [Reverb]",
+    "92 [0x5C] FX 2 Depth [Tremolo]",
+    "93 [0x5D] FX 3 Depth [Chorus]",
+    "94 [0x5E] FX 4 Depth [Detune]",
+    "95 [0x5F] FX 5 Depth [Phaser]"
 )
+
+MAX_MIDI_CC_LIST_ITEM = 95
 
 # ------------------------------------------------------------------------------------------------------------
 # PatchCanvas defines
@@ -186,6 +184,7 @@ CARLA_KEY_MAIN_PRO_THEME_COLOR  = "Main/ProThemeColor"   # str
 CARLA_KEY_MAIN_REFRESH_INTERVAL = "Main/RefreshInterval" # int
 CARLA_KEY_MAIN_CONFIRM_EXIT     = "Main/ConfirmExit"     # bool
 CARLA_KEY_MAIN_SHOW_LOGS        = "Main/ShowLogs"        # bool
+CARLA_KEY_MAIN_SYSTEM_ICONS     = "Main/SystemIcons"     # bool
 CARLA_KEY_MAIN_EXPERIMENTAL     = "Main/Experimental"    # bool
 
 CARLA_KEY_CANVAS_THEME             = "Canvas/Theme"           # str
@@ -212,6 +211,7 @@ CARLA_KEY_ENGINE_PREFER_UI_BRIDGES     = "Engine/PreferUiBridges"     # bool
 CARLA_KEY_ENGINE_MANAGE_UIS            = "Engine/ManageUIs"           # bool
 CARLA_KEY_ENGINE_UIS_ALWAYS_ON_TOP     = "Engine/UIsAlwaysOnTop"      # bool
 CARLA_KEY_ENGINE_MAX_PARAMETERS        = "Engine/MaxParameters"       # int
+CARLA_KEY_ENGINE_RESET_XRUNS           = "Engine/ResetXruns"          # bool
 CARLA_KEY_ENGINE_UI_BRIDGES_TIMEOUT    = "Engine/UiBridgesTimeout"    # int
 
 CARLA_KEY_OSC_ENABLED          = "OSC/Enabled"
@@ -221,6 +221,9 @@ CARLA_KEY_OSC_TCP_PORT_RANDOM  = "OSC/TCPRandom"
 CARLA_KEY_OSC_UDP_PORT_ENABLED = "OSC/UDPEnabled"
 CARLA_KEY_OSC_UDP_PORT_NUMBER  = "OSC/UDPNumber"
 CARLA_KEY_OSC_UDP_PORT_RANDOM  = "OSC/UDPRandom"
+
+CARLA_KEY_PATHS_AUDIO = "Paths/Audio"
+CARLA_KEY_PATHS_MIDI  = "Paths/MIDI"
 
 CARLA_KEY_PATHS_LADSPA = "Paths/LADSPA"
 CARLA_KEY_PATHS_DSSI   = "Paths/DSSI"
@@ -257,6 +260,7 @@ CARLA_DEFAULT_MAIN_PRO_THEME_COLOR  = "Black"
 CARLA_DEFAULT_MAIN_REFRESH_INTERVAL = 20
 CARLA_DEFAULT_MAIN_CONFIRM_EXIT     = True
 CARLA_DEFAULT_MAIN_SHOW_LOGS        = bool(not WINDOWS)
+CARLA_DEFAULT_MAIN_SYSTEM_ICONS     = False
 CARLA_DEFAULT_MAIN_EXPERIMENTAL     = False
 
 # Canvas
@@ -282,6 +286,7 @@ CARLA_DEFAULT_PREFER_UI_BRIDGES     = True
 CARLA_DEFAULT_MANAGE_UIS            = True
 CARLA_DEFAULT_UIS_ALWAYS_ON_TOP     = False
 CARLA_DEFAULT_MAX_PARAMETERS        = MAX_DEFAULT_PARAMETERS
+CARLA_DEFAULT_RESET_XRUNS           = False
 CARLA_DEFAULT_UI_BRIDGES_TIMEOUT    = 4000
 
 CARLA_DEFAULT_AUDIO_BUFFER_SIZE     = 512
@@ -303,9 +308,9 @@ if CARLA_DEFAULT_AUDIO_DRIVER == "JACK":
 else:
     CARLA_DEFAULT_PROCESS_MODE   = ENGINE_PROCESS_MODE_PATCHBAY
     CARLA_DEFAULT_TRANSPORT_MODE = ENGINE_TRANSPORT_MODE_INTERNAL
-    
+
 # OSC
-CARLA_DEFAULT_OSC_ENABLED = not WINDOWS
+CARLA_DEFAULT_OSC_ENABLED = not (MACOS or WINDOWS)
 CARLA_DEFAULT_OSC_TCP_PORT_ENABLED = True
 CARLA_DEFAULT_OSC_TCP_PORT_NUMBER  = 22752
 CARLA_DEFAULT_OSC_TCP_PORT_RANDOM  = False
@@ -328,6 +333,12 @@ CARLA_DEFAULT_EXPERIMENTAL_JACK_APPS             = False
 CARLA_DEFAULT_EXPERIMENTAL_LV2_EXPORT            = False
 CARLA_DEFAULT_EXPERIMENTAL_PREVENT_BAD_BEHAVIOUR = False
 CARLA_DEFAULT_EXPERIMENTAL_LOAD_LIB_GLOBAL       = False
+
+# ------------------------------------------------------------------------------------------------------------
+# Default File Folders
+
+CARLA_DEFAULT_FILE_PATH_AUDIO = []
+CARLA_DEFAULT_FILE_PATH_MIDI  = []
 
 # ------------------------------------------------------------------------------------------------------------
 # Default Plugin Folders (get)
@@ -457,7 +468,9 @@ else:
     DEFAULT_VST3_PATH   += ":/usr/local/lib/vst3"
 
     DEFAULT_SF2_PATH     = HOME + "/.sounds/sf2"
+    DEFAULT_SF2_PATH    += HOME + "/.sounds/sf3"
     DEFAULT_SF2_PATH    += ":/usr/share/sounds/sf2"
+    DEFAULT_SF2_PATH    += ":/usr/share/sounds/sf3"
     DEFAULT_SF2_PATH    += ":/usr/share/soundfonts"
 
     DEFAULT_SFZ_PATH     = HOME + "/.sounds/sfz"
@@ -486,19 +499,21 @@ readEnvVars = True
 
 if WINDOWS:
     # Check if running Wine. If yes, ignore env vars
+    # pylint: disable=import-error
     from winreg import ConnectRegistry, OpenKey, CloseKey, HKEY_CURRENT_USER
-    reg = ConnectRegistry(None, HKEY_CURRENT_USER)
+    # pylint: enable=import-error
+    _reg = ConnectRegistry(None, HKEY_CURRENT_USER)
 
     try:
-        key = OpenKey(reg, r"SOFTWARE\Wine")
-        CloseKey(key)
-        del key
+        _key = OpenKey(_reg, r"SOFTWARE\Wine")
+        CloseKey(_key)
+        del _key
         readEnvVars = False
     except:
         pass
 
-    CloseKey(reg)
-    del reg
+    CloseKey(_reg)
+    del _reg
 
 if readEnvVars:
     CARLA_DEFAULT_LADSPA_PATH = os.getenv("LADSPA_PATH", DEFAULT_LADSPA_PATH).split(splitter)
@@ -532,19 +547,15 @@ del DEFAULT_SFZ_PATH
 # ------------------------------------------------------------------------------------------------------------
 # Global Carla object
 
-class CarlaObject(object):
-    __slots__ = [
-        'gui',   # Host Window
-        'nogui', # Skip UI
-        'term',  # Terminated by OS signal
-        'utils'  # Utils object
-    ]
+class CarlaObject():
+    def __init__(self):
+        self.cnprefix = ""    # Client name prefix
+        self.gui      = None  # Host Window
+        self.nogui    = False # Skip UI
+        self.term     = False # Terminated by OS signal
+        self.utils    = None  # Utils object
 
 gCarla = CarlaObject()
-gCarla.gui   = None
-gCarla.nogui = False
-gCarla.term  = False
-gCarla.utils = None
 
 # ------------------------------------------------------------------------------------------------------------
 # Set CWD
@@ -557,7 +568,11 @@ if not CWD:
 # make it work with cxfreeze
 if os.path.isfile(CWD):
     CWD = os.path.dirname(CWD)
+    if CWD.endswith("/lib"):
+        CWD = CWD.rsplit("/lib",1)[0]
     CXFREEZE = True
+    if not WINDOWS:
+        os.environ['CARLA_MAGIC_FILE'] = os.path.join(CWD, "magic.mgc")
 else:
     CXFREEZE = False
 
@@ -570,6 +585,23 @@ elif MACOS:
     DLL_EXTENSION = "dylib"
 else:
     DLL_EXTENSION = "so"
+
+# ------------------------------------------------------------------------------------------------------------
+# Find decimal points for a parameter, using step and stepSmall
+
+def countDecimalPoints(step, stepSmall):
+    if stepSmall >= 1.0:
+        return 0
+    if step >= 1.0:
+        return 2
+
+    count = 0
+    value = fmod(abs(stepSmall), 1)
+    while 0.001 < value < 0.99 and count < 6:
+        value = fmod(value*10, 1)
+        count += 1
+
+    return count
 
 # ------------------------------------------------------------------------------------------------------------
 # Check if a value is a number (float support)
@@ -587,16 +619,15 @@ def isNumber(value):
 def toList(value):
     if value is None:
         return []
-    elif not isinstance(value, list):
+    if not isinstance(value, list):
         return [value]
-    else:
-        return value
+    return value
 
 # ------------------------------------------------------------------------------------------------------------
 # Get Icon from user theme, using our own as backup (Oxygen)
 
-def getIcon(icon, size = 16):
-    return QIcon.fromTheme(icon, QIcon(":/%ix%i/%s.png" % (size, size, icon)))
+def getIcon(icon, size, qrcformat):
+    return QIcon.fromTheme(icon, QIcon(":/%ix%i/%s.%s" % (size, size, icon, qrcformat)))
 
 # ------------------------------------------------------------------------------------------------------------
 # Handle some basic command-line arguments shared between all carla variants
@@ -604,6 +635,7 @@ def getIcon(icon, size = 16):
 def handleInitialCommandLineArguments(file):
     initName  = os.path.basename(file) if (file is not None and os.path.dirname(file) in PATH) else sys.argv[0]
     libPrefix = None
+    readPrefixNext = False
 
     for arg in sys.argv[1:]:
         if arg.startswith("--with-appname="):
@@ -612,11 +644,23 @@ def handleInitialCommandLineArguments(file):
         elif arg.startswith("--with-libprefix="):
             libPrefix = arg.replace("--with-libprefix=", "")
 
+        elif arg.startswith("--osc-gui="):
+            gCarla.nogui = int(arg.replace("--osc-gui=", ""))
+
+        elif arg.startswith("--cnprefix="):
+            gCarla.cnprefix = arg.replace("--cnprefix=", "")
+
+        elif arg == "--cnprefix":
+            readPrefixNext = True
+
         elif arg == "--gdb":
             pass
 
         elif arg in ("-n", "--n", "-no-gui", "--no-gui", "-nogui", "--nogui"):
             gCarla.nogui = True
+
+        elif MACOS and arg.startswith("-psn_"):
+            pass
 
         elif arg in ("-h", "--h", "-help", "--help"):
             print("Usage: %s [OPTION]... [FILE|URL]" % initName)
@@ -625,12 +669,18 @@ def handleInitialCommandLineArguments(file):
             print("")
             print(" and OPTION can be one or more of the following:")
             print("")
-            print("    --gdb    \t Run Carla inside gdb.")
-            print(" -n,--no-gui \t Run Carla headless, don't show UI.")
+            print("    --cnprefix\t Set a prefix for client names in multi-client mode.")
+            if isinstance(gCarla.nogui, bool):
+                print("    --gdb     \t Run Carla inside gdb.")
+                print(" -n,--no-gui  \t Run Carla headless, don't show UI.")
+                print("")
+            print(" -h,--help    \t Print this help text and exit.")
+            print(" -v,--version \t Print version information and exit.")
             print("")
-            print(" -h,--help   \t Print this help text and exit.")
-            print(" -v,--version\t Print version information and exit.")
-            print("")
+
+            if not isinstance(gCarla.nogui, bool):
+                print("NOTE: when using %s the FILE is only valid the first time the backend is started" % initName)
+                sys.exit(1)
 
             sys.exit(0)
 
@@ -644,22 +694,48 @@ def handleInitialCommandLineArguments(file):
             print("  Binary dir:     %s" % pathBinaries)
             print("  Resources dir:  %s" % pathResources)
 
-            sys.exit(0)
+            sys.exit(1 if gCarla.nogui else 0)
+
+        elif readPrefixNext:
+            readPrefixNext = False
+            gCarla.cnprefix = arg
+
+    if gCarla.nogui and not isinstance(gCarla.nogui, bool):
+        if os.fork():
+            # pylint: disable=protected-access
+            os._exit(0)
+            # pylint: enable=protected-access
+        else:
+            os.setsid()
 
     return (initName, libPrefix)
 
 # ------------------------------------------------------------------------------------------------------------
 # Get initial project file (as passed in the command-line parameters)
 
-def getInitialProjectFile(app, skipExistCheck = False):
-    # FIXME - PyQt mishandles unicode characters, we'll use direct sys.argv for now
+def getInitialProjectFile(skipExistCheck = False):
+    # NOTE: PyQt mishandles unicode characters, we directly use sys.argv instead of qApp->arguments()
     # see https://riverbankcomputing.com/pipermail/pyqt/2015-January/035395.html
-    #args = app.arguments()[1:]
     args = sys.argv[1:]
+    readPrefixNext = False
     for arg in args:
-        if arg.startswith("--with-appname=") or arg.startswith("--with-libprefix=") or arg == "--gdb":
+        if readPrefixNext:
+            readPrefixNext = False
             continue
-        if arg in ("-n", "--n", "-no-gui", "--no-gui", "-nogui", "--nogui"):
+        if arg.startswith("--cnprefix="):
+            continue
+        if arg.startswith("--osc-gui="):
+            continue
+        if arg.startswith("--with-appname="):
+            continue
+        if arg.startswith("--with-libprefix="):
+            continue
+        if arg == "--cnprefix":
+            readPrefixNext = True
+            continue
+        if arg in ("-n", "--n", "-no-gui", "--no-gui", "-nogui", "--nogui", "--gdb"):
+            continue
+        if MACOS and arg.startswith("-psn_"):
             continue
         arg = os.path.expanduser(arg)
         if skipExistCheck or os.path.exists(arg):
@@ -744,7 +820,15 @@ def getAndSetPath(parent, lineEdit):
     return newPath
 
 # ------------------------------------------------------------------------------------------------------------
-# Custom MessageBox
+# Backwards-compatible horizontalAdvance/width call, depending on Qt version
+
+def fontMetricsHorizontalAdvance(fontMetrics, string):
+    if QT_VERSION >= 0x51100:
+        return fontMetrics.horizontalAdvance(string)
+    return fontMetrics.width(string)
+
+# ------------------------------------------------------------------------------------------------------------
+# Custom QMessageBox which resizes itself to fit text
 
 class QMessageBoxWithBetterWidth(QMessageBox):
     def __init__(self, parent):
@@ -755,16 +839,33 @@ class QMessageBoxWithBetterWidth(QMessageBox):
 
         lines = self.text().strip().split("\n") + self.informativeText().strip().split("\n")
 
-        if len(lines) > 0:
+        if lines:
             width = 0
 
             for line in lines:
-                width = max(fontMetrics.width(line), width)
+                width = max(fontMetricsHorizontalAdvance(fontMetrics, line), width)
 
             self.layout().setColumnMinimumWidth(2, width + 12)
 
         QMessageBox.showEvent(self, event)
 
+# ------------------------------------------------------------------------------------------------------------
+# Safer QSettings class, which does not throw if type mismatches
+
+class QSafeSettings(QSettings):
+    def value(self, key, defaultValue, valueType):
+        if not isinstance(defaultValue, valueType):
+            print("QSafeSettings.value() - defaultValue type mismatch for key", key)
+
+        try:
+            return QSettings.value(self, key, defaultValue, valueType)
+        except:
+            return defaultValue
+
+# ------------------------------------------------------------------------------------------------------------
+# Custom MessageBox
+
+# pylint: disable=too-many-arguments
 def CustomMessageBox(parent, icon, title, text,
                      extraText="",
                      buttons=QMessageBox.Yes|QMessageBox.No,
@@ -777,5 +878,6 @@ def CustomMessageBox(parent, icon, title, text,
     msgBox.setStandardButtons(buttons)
     msgBox.setDefaultButton(defButton)
     return msgBox.exec_()
+# pylint: enable=too-many-arguments
 
 # ------------------------------------------------------------------------------------------------------------

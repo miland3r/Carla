@@ -1,6 +1,6 @@
 /*
  * Carla Juce Plugin
- * Copyright (C) 2013-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2013-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -18,27 +18,26 @@
 #include "CarlaPluginInternal.hpp"
 #include "CarlaEngine.hpp"
 
-#if defined(USING_JUCE)
+#ifdef USING_JUCE
 
 #include "CarlaBackendUtils.hpp"
 #include "CarlaMathUtils.hpp"
+#include "CarlaProcessUtils.hpp"
+#include "CarlaScopeUtils.hpp"
 
-#if defined(__GNUC__) && (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6))
+#if defined(__clang__)
+# pragma clang diagnostic push
+# pragma clang diagnostic ignored "-Wfloat-equal"
+# pragma clang diagnostic ignored "-Wimplicit-int-float-conversion"
+#elif defined(__GNUC__) && (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6))
 # pragma GCC diagnostic push
-# pragma GCC diagnostic ignored "-Wcast-qual"
 # pragma GCC diagnostic ignored "-Wconversion"
 # pragma GCC diagnostic ignored "-Wdouble-promotion"
 # pragma GCC diagnostic ignored "-Weffc++"
 # pragma GCC diagnostic ignored "-Wfloat-equal"
-# pragma GCC diagnostic ignored "-Woverloaded-virtual"
-# pragma GCC diagnostic ignored "-Wsign-conversion"
-# pragma GCC diagnostic ignored "-Wundef"
-# pragma GCC diagnostic ignored "-Wzero-as-null-pointer-constant"
-# if __GNUC__ > 7
-#  pragma GCC diagnostic ignored "-Wclass-memaccess"
-# endif
 #endif
 
+#define JUCE_GUI_BASICS_INCLUDE_XHEADERS 1
 #include "AppConfig.h"
 #include "juce_audio_processors/juce_audio_processors.h"
 #include "juce_gui_basics/juce_gui_basics.h"
@@ -49,16 +48,52 @@
 
 #include "JucePluginWindow.hpp"
 
-namespace juce {
-extern bool juce_isRunningInWine();
-}
-
 CARLA_BACKEND_START_NAMESPACE
 
 // -------------------------------------------------------------------------------------------------------------------
 // Fallback data
 
 static const ExternalMidiNote kExternalMidiNoteFallback = { -1, 0, 0 };
+
+// -------------------------------------------------------------------------------------------------------------------
+// find all available plugin audio ports
+
+static void findMaxTotalChannels(juce::AudioProcessor* const filter,
+                                 const bool isAU, uint32_t& maxTotalIns, uint32_t& maxTotalOuts)
+{
+    filter->enableAllBuses();
+
+    if (isAU)
+    {
+        maxTotalIns  = static_cast<uint32_t>(juce::jmax(0, filter->getTotalNumInputChannels()));
+        maxTotalOuts = static_cast<uint32_t>(juce::jmax(0, filter->getTotalNumOutputChannels()));
+        return;
+    }
+
+    const int numInputBuses  = filter->getBusCount(true);
+    const int numOutputBuses = filter->getBusCount(false);
+
+    if (numInputBuses > 1 || numOutputBuses > 1)
+    {
+        maxTotalIns = maxTotalOuts = 0;
+
+        for (int i = 0; i < numInputBuses; ++i)
+            maxTotalIns += static_cast<uint32_t>(juce::jmax(0, filter->getChannelCountOfBus(true, i)));
+
+        for (int i = 0; i < numOutputBuses; ++i)
+            maxTotalOuts += static_cast<uint32_t>(juce::jmax(0, filter->getChannelCountOfBus(false, i)));
+    }
+    else
+    {
+        maxTotalIns  = numInputBuses  > 0
+                     ? static_cast<uint32_t>(juce::jmax(0, filter->getBus(true, 0)->getMaxSupportedChannels(64)))
+                     : 0;
+
+        maxTotalOuts = numOutputBuses > 0
+                     ? static_cast<uint32_t>(juce::jmax(0, filter->getBus(false, 0)->getMaxSupportedChannels(64)))
+                     : 0;
+    }
+}
 
 // -------------------------------------------------------------------------------------------------------------------
 
@@ -70,8 +105,8 @@ public:
     CarlaPluginJuce(CarlaEngine* const engine, const uint id)
         : CarlaPlugin(engine, id),
           fDesc(),
-          fInstance(nullptr),
           fFormatManager(),
+          fInstance(),
           fAudioBuffer(),
           fMidiBuffer(),
           fPosInfo(),
@@ -98,7 +133,7 @@ public:
         pData->masterMutex.lock();
 
         if (pData->client != nullptr && pData->client->isActive())
-            pData->client->deactivate();
+            pData->client->deactivate(true);
 
         if (pData->active)
         {
@@ -106,12 +141,7 @@ public:
             pData->active = false;
         }
 
-        if (fInstance != nullptr)
-        {
-            delete fInstance;
-            fInstance = nullptr;
-        }
-
+        fInstance = nullptr;
         clearBuffers();
     }
 
@@ -127,7 +157,10 @@ public:
     {
         if (fDesc.isInstrument)
             return PLUGIN_CATEGORY_SYNTH;
-        return getPluginCategoryFromName(fDesc.category.toRawUTF8());
+
+        return getPluginCategoryFromName(fDesc.category.isNotEmpty()
+                                         ? fDesc.category.toRawUTF8()
+                                         : fDesc.name.toRawUTF8());
     }
 
     int64_t getUniqueId() const noexcept override
@@ -188,6 +221,7 @@ public:
             options |= PLUGIN_OPTION_SEND_PITCHBEND;
             options |= PLUGIN_OPTION_SEND_ALL_SOUND_OFF;
             options |= PLUGIN_OPTION_SEND_PROGRAM_CHANGES;
+            options |= PLUGIN_OPTION_SKIP_SENDING_NOTES;
         }
 
         return options;
@@ -267,12 +301,12 @@ public:
     {
         CarlaPlugin::setName(newName);
 
-        if (fWindow != nullptr)
-        {
-            juce::String uiName(pData->name);
-            uiName += " (GUI)";
-            fWindow->setName(uiName);
-        }
+        if (fWindow == nullptr || pData->uiTitle.isNotEmpty())
+            return;
+
+        juce::String uiName(pData->name);
+        uiName += " (GUI)";
+        fWindow->setName(uiName);
     }
 
     // -------------------------------------------------------------------
@@ -301,7 +335,7 @@ public:
 
         try {
             fInstance->setParameter(static_cast<int>(parameterId), value);
-        } CARLA_SAFE_EXCEPTION("setParameter");
+        } CARLA_SAFE_EXCEPTION("setParameter(RT)");
 
         CarlaPlugin::setParameterValueRT(parameterId, fixedValue, sendCallbackLater);
     }
@@ -323,7 +357,7 @@ public:
             uint8_t* const dataCompat = (uint8_t*)std::malloc(dataSize + 160);
             CARLA_SAFE_ASSERT_RETURN(dataCompat != nullptr,);
 
-            carla_stdout("NOTE: Loading plugin state in Carla compatibiity mode");
+            carla_stdout("NOTE: Loading plugin state in Carla JUCE/VST2 compatibility mode");
             std::memset(dataCompat, 0, 160);
             std::memcpy(dataCompat+160, data, dataSize);
 
@@ -377,29 +411,55 @@ public:
     // -------------------------------------------------------------------
     // Set ui stuff
 
+    void setCustomUITitle(const char* const title) noexcept override
+    {
+        if (fWindow != nullptr)
+        {
+            try {
+                fWindow->setName(title);
+            } CARLA_SAFE_EXCEPTION("set custom ui title");
+        }
+
+        CarlaPlugin::setCustomUITitle(title);
+    }
+
     void showCustomUI(const bool yesNo) override
     {
         CARLA_SAFE_ASSERT_RETURN(fInstance != nullptr,);
+        carla_debug("CarlaPluginJuce::showCustomUI(%s)", bool2str(yesNo));
 
         if (yesNo)
         {
-            if (fWindow == nullptr)
-            {
-                juce::String uiName(pData->name);
-                uiName += " (GUI)";
-
-                fWindow = new JucePluginWindow(pData->engine->getOptions().frontendWinId);
-                fWindow->setName(uiName);
-            }
-
             if (juce::AudioProcessorEditor* const editor = fInstance->createEditorIfNeeded())
+            {
+                const EngineOptions& opts(pData->engine->getOptions());
+
+                editor->setScaleFactor(opts.uiScale);
+
+                if (fWindow == nullptr)
+                {
+                    juce::String uiName;
+
+                    if (pData->uiTitle.isNotEmpty())
+                    {
+                        uiName = pData->uiTitle.buffer();
+                    }
+                    else
+                    {
+                        uiName  = pData->name;
+                        uiName += " (GUI)";
+                    }
+
+                    fWindow = new JucePluginWindow(opts.frontendWinId);
+                    fWindow->setName(uiName);
+                }
+
                 fWindow->show(editor);
+                fWindow->toFront(true);
+            }
         }
         else
         {
-            if (fWindow != nullptr)
-                fWindow->hide();
-
             if (juce::AudioProcessorEditor* const editor = fInstance->getActiveEditor())
                 delete editor;
 
@@ -444,17 +504,17 @@ public:
 
         clearBuffers();
 
-        fInstance->refreshParameterList();
-
         uint32_t aIns, aOuts, mIns, mOuts, params;
         mIns = mOuts = 0;
 
         bool needsCtrlIn, needsCtrlOut;
         needsCtrlIn = needsCtrlOut = false;
 
-        aIns   = (fInstance->getTotalNumInputChannels() > 0)  ? static_cast<uint32_t>(fInstance->getTotalNumInputChannels())  : 0;
-        aOuts  = (fInstance->getTotalNumOutputChannels() > 0) ? static_cast<uint32_t>(fInstance->getTotalNumOutputChannels()) : 0;
-        params = (fInstance->getNumParameters() > 0)          ? static_cast<uint32_t>(fInstance->getNumParameters())          : 0;
+        const bool isAU = fDesc.pluginFormatName == "AU" || fDesc.pluginFormatName == "AudioUnit";
+        findMaxTotalChannels(fInstance.get(), isAU, aIns, aOuts);
+        fInstance->refreshParameterList();
+
+        params = static_cast<uint32_t>(std::max(fInstance->getNumParameters(), 0));
 
         if (fInstance->acceptsMidi())
         {
@@ -562,7 +622,12 @@ public:
 #endif
 
             if (fInstance->isParameterAutomatable(static_cast<int>(j)))
+            {
                 pData->param.data[j].hints |= PARAMETER_IS_AUTOMABLE;
+
+                if (fInstance->isMetaParameter(static_cast<int>(j)))
+                    pData->param.data[j].hints |= PARAMETER_CAN_BE_CV_CONTROLLED;
+            }
 
             // FIXME?
             def = fInstance->getParameterDefaultValue(static_cast<int>(j));
@@ -594,6 +659,9 @@ public:
             portName.truncate(portNameSize);
 
             pData->event.portIn = (CarlaEngineEventPort*)pData->client->addPort(kEnginePortTypeEvent, portName, true, 0);
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+            pData->event.cvSourcePorts = pData->client->createCVSourcePorts();
+#endif
         }
 
         if (needsCtrlOut)
@@ -643,7 +711,10 @@ public:
         if (mOuts > 0)
             pData->extraHints |= PLUGIN_EXTRA_HINT_HAS_MIDI_OUT;
 
-        fInstance->setPlayConfigDetails(static_cast<int>(aIns), static_cast<int>(aOuts), pData->engine->getSampleRate(), static_cast<int>(pData->engine->getBufferSize()));
+        fInstance->setPlayConfigDetails(static_cast<int>(aIns),
+                                        static_cast<int>(aOuts),
+                                        pData->engine->getSampleRate(),
+                                        static_cast<int>(pData->engine->getBufferSize()));
 
         bufferSizeChanged(pData->engine->getBufferSize());
         reloadPrograms(true);
@@ -664,15 +735,17 @@ public:
         pData->prog.clear();
 
         // Query new programs
-        uint32_t newCount = (fInstance->getNumPrograms() > 0) ? static_cast<uint32_t>(fInstance->getNumPrograms()) : 0;
+        const uint32_t newCount = (fInstance->getNumPrograms() > 0)
+                                ? static_cast<uint32_t>(fInstance->getNumPrograms())
+                                : 0;
 
         if (newCount > 0)
         {
             pData->prog.createNew(newCount);
 
             // Update names
-            for (int i=0, count=fInstance->getNumPrograms(); i<count; ++i)
-                pData->prog.names[i] = carla_strdup(fInstance->getProgramName(i).toRawUTF8());
+            for (uint32_t i=0; i < newCount; ++i)
+                pData->prog.names[i] = carla_strdup(fInstance->getProgramName(static_cast<int>(i)).toRawUTF8());
         }
 
         if (doInit)
@@ -751,7 +824,11 @@ public:
         } catch(...) {}
     }
 
-    void process(const float** const audioIn, float** const audioOut, const float** const, float** const, const uint32_t frames) override
+    void process(const float* const* const audioIn,
+                 float** const audioOut,
+                 const float* const* const cvIn,
+                 float**,
+                 const uint32_t frames) override
     {
         // --------------------------------------------------------------------------------------------------------
         // Check if active
@@ -806,12 +883,16 @@ public:
             // ----------------------------------------------------------------------------------------------------
             // Event Input (System)
 
-#ifndef BUILD_BRIDGE
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
             bool allNotesOffSent = false;
+
+            if (cvIn != nullptr && pData->event.cvSourcePorts != nullptr)
+                pData->event.cvSourcePorts->initPortBuffers(cvIn, frames, false, pData->event.portIn);
 #endif
+
             for (uint32_t i=0, numEvents=pData->event.portIn->getEventCount(); i < numEvents; ++i)
             {
-                const EngineEvent& event(pData->event.portIn->getEvent(i));
+                EngineEvent& event(pData->event.portIn->getEvent(i));
 
                 if (event.time >= frames)
                     continue;
@@ -822,7 +903,7 @@ public:
                     break;
 
                 case kEngineEventTypeControl: {
-                    const EngineControlEvent& ctrlEvent(event.ctrl);
+                    EngineControlEvent& ctrlEvent(event.ctrl);
 
                     switch (ctrlEvent.type)
                     {
@@ -830,28 +911,40 @@ public:
                         break;
 
                     case kEngineControlEventTypeParameter: {
-#ifndef BUILD_BRIDGE
+                        float value;
+
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+                        // non-midi
+                        if (event.channel == kEngineEventNonMidiChannel)
+                        {
+                            const uint32_t k = ctrlEvent.param;
+                            CARLA_SAFE_ASSERT_CONTINUE(k < pData->param.count);
+
+                            ctrlEvent.handled = true;
+                            value = pData->param.getFinalUnnormalizedValue(k, ctrlEvent.normalizedValue);
+                            setParameterValueRT(k, value, true);
+                            continue;
+                        }
+
                         // Control backend stuff
                         if (event.channel == pData->ctrlChannel)
                         {
-                            float value;
-
                             if (MIDI_IS_CONTROL_BREATH_CONTROLLER(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_DRYWET) != 0)
                             {
-                                value = ctrlEvent.value;
+                                ctrlEvent.handled = true;
+                                value = ctrlEvent.normalizedValue;
                                 setDryWetRT(value, true);
                             }
-
-                            if (MIDI_IS_CONTROL_CHANNEL_VOLUME(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_VOLUME) != 0)
+                            else if (MIDI_IS_CONTROL_CHANNEL_VOLUME(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_VOLUME) != 0)
                             {
-                                value = ctrlEvent.value*127.0f/100.0f;
+                                ctrlEvent.handled = true;
+                                value = ctrlEvent.normalizedValue*127.0f/100.0f;
                                 setVolumeRT(value, true);
                             }
-
-                            if (MIDI_IS_CONTROL_BALANCE(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_BALANCE) != 0)
+                            else if (MIDI_IS_CONTROL_BALANCE(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_BALANCE) != 0)
                             {
                                 float left, right;
-                                value = ctrlEvent.value/0.5f - 1.0f;
+                                value = ctrlEvent.normalizedValue/0.5f - 1.0f;
 
                                 if (value < 0.0f)
                                 {
@@ -869,6 +962,7 @@ public:
                                     right = 1.0f;
                                 }
 
+                                ctrlEvent.handled = true;
                                 setBalanceLeftRT(left, true);
                                 setBalanceRightRT(right, true);
                             }
@@ -880,43 +974,32 @@ public:
                         {
                             if (pData->param.data[k].midiChannel != event.channel)
                                 continue;
-                            if (pData->param.data[k].midiCC != ctrlEvent.param)
+                            if (pData->param.data[k].mappedControlIndex != ctrlEvent.param)
                                 continue;
                             if (pData->param.data[k].type != PARAMETER_INPUT)
                                 continue;
                             if ((pData->param.data[k].hints & PARAMETER_IS_AUTOMABLE) == 0)
                                 continue;
 
-                            float value;
-
-                            if (pData->param.data[k].hints & PARAMETER_IS_BOOLEAN)
-                            {
-                                value = (ctrlEvent.value < 0.5f) ? pData->param.ranges[k].min : pData->param.ranges[k].max;
-                            }
-                            else
-                            {
-                                if (pData->param.data[k].hints & PARAMETER_IS_LOGARITHMIC)
-                                    value = pData->param.ranges[k].getUnnormalizedLogValue(ctrlEvent.value);
-                                else
-                                    value = pData->param.ranges[k].getUnnormalizedValue(ctrlEvent.value);
-
-                                if (pData->param.data[k].hints & PARAMETER_IS_INTEGER)
-                                    value = std::rint(value);
-                            }
-
+                            ctrlEvent.handled = true;
+                            value = pData->param.getFinalUnnormalizedValue(k, ctrlEvent.normalizedValue);
                             setParameterValueRT(k, value, true);
                         }
 
-                        if ((pData->options & PLUGIN_OPTION_SEND_CONTROL_CHANGES) != 0 && ctrlEvent.param < MAX_MIDI_CONTROL)
+                        if ((pData->options & PLUGIN_OPTION_SEND_CONTROL_CHANGES) != 0 && ctrlEvent.param < MAX_MIDI_VALUE)
                         {
                             uint8_t midiData[3];
                             midiData[0] = uint8_t(MIDI_STATUS_CONTROL_CHANGE | (event.channel & MIDI_CHANNEL_BIT));
                             midiData[1] = uint8_t(ctrlEvent.param);
-                            midiData[2] = uint8_t(ctrlEvent.value*127.0f);
+                            midiData[2] = uint8_t(ctrlEvent.normalizedValue*127.0f);
 
                             fMidiBuffer.addEvent(midiData, 3, static_cast<int>(event.time));
                         }
 
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+                        if (! ctrlEvent.handled)
+                            checkForMidiLearn(event);
+#endif
                         break;
                     } // case kEngineControlEventTypeParameter
 
@@ -925,12 +1008,12 @@ public:
                         {
                             uint8_t midiData[3];
                             midiData[0] = uint8_t(MIDI_STATUS_CONTROL_CHANGE | (event.channel & MIDI_CHANNEL_BIT));
-                            midiData[1] = MIDI_CONTROL_BANK_SELECT; 
+                            midiData[1] = MIDI_CONTROL_BANK_SELECT;
                             midiData[2] = 0;
                             fMidiBuffer.addEvent(midiData, 3, static_cast<int>(event.time));
 
                             midiData[1] = MIDI_CONTROL_BANK_SELECT__LSB;
-                            midiData[2] = uint8_t(ctrlEvent.value*127.0f);
+                            midiData[2] = uint8_t(ctrlEvent.normalizedValue*127.0f);
                             fMidiBuffer.addEvent(midiData, 3, static_cast<int>(event.time));
                         }
                         break;
@@ -947,7 +1030,7 @@ public:
                         {
                             uint8_t midiData[3];
                             midiData[0] = uint8_t(MIDI_STATUS_PROGRAM_CHANGE | (event.channel & MIDI_CHANNEL_BIT));
-                            midiData[1] = uint8_t(ctrlEvent.value*127.0f);
+                            midiData[1] = uint8_t(ctrlEvent.normalizedValue*127.0f);
                             fMidiBuffer.addEvent(midiData, 2, static_cast<int>(event.time));
                         }
                         break;
@@ -967,7 +1050,7 @@ public:
                     case kEngineControlEventTypeAllNotesOff:
                         if (pData->options & PLUGIN_OPTION_SEND_ALL_SOUND_OFF)
                         {
-#ifndef BUILD_BRIDGE
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
                             if (event.channel == pData->ctrlChannel && ! allNotesOffSent)
                             {
                                 allNotesOffSent = true;
@@ -994,6 +1077,8 @@ public:
 
                     uint8_t status = uint8_t(MIDI_GET_STATUS_FROM_DATA(midiData));
 
+                    if ((status == MIDI_STATUS_NOTE_OFF || status == MIDI_STATUS_NOTE_ON) && (pData->options & PLUGIN_OPTION_SKIP_SENDING_NOTES))
+                        continue;
                     if (status == MIDI_STATUS_CHANNEL_PRESSURE && (pData->options & PLUGIN_OPTION_SEND_CHANNEL_PRESSURE) == 0)
                         continue;
                     if (status == MIDI_STATUS_CONTROL_CHANGE && (pData->options & PLUGIN_OPTION_SEND_CONTROL_CHANGES) == 0)
@@ -1016,20 +1101,11 @@ public:
 
                     if (status == MIDI_STATUS_NOTE_ON)
                     {
-                        pData->postponeRtEvent(kPluginPostRtEventNoteOn,
-                                               true,
-                                               event.channel,
-                                               midiData[1],
-                                               midiData[2],
-                                               0.0f);
+                        pData->postponeNoteOnRtEvent(true, event.channel, midiData[1], midiData[2]);
                     }
                     else if (status == MIDI_STATUS_NOTE_OFF)
                     {
-                        pData->postponeRtEvent(kPluginPostRtEventNoteOff,
-                                               true,
-                                               event.channel,
-                                               midiData[1],
-                                               0, 0.0f);
+                        pData->postponeNoteOffRtEvent(true, event.channel, midiData[1]);
                     }
                 } break;
                 } // switch (event.type)
@@ -1071,9 +1147,18 @@ public:
         // Process
 
         processSingle(audioIn, audioOut, frames);
+
+        // --------------------------------------------------------------------------------------------------------
+
+#ifdef BUILD_BRIDGE_ALTERNATIVE_ARCH
+        return;
+
+        // unused
+        (void)cvIn;
+#endif
     }
 
-    bool processSingle(const float** const inBuffer, float** const outBuffer, const uint32_t frames)
+    bool processSingle(const float* const* const inBuffer, float** const outBuffer, const uint32_t frames)
     {
         CARLA_SAFE_ASSERT_RETURN(frames > 0, false);
 
@@ -1230,7 +1315,9 @@ protected:
     // -------------------------------------------------------------------
 
 public:
-    bool init(const char* const filename, const char* const name, const char* const label, const int64_t uniqueId, const uint options, const char* const format)
+    bool init(const CarlaPluginPtr plugin,
+              const char* const filename, const char* const name, const char* const label,
+              const int64_t uniqueId, const uint options, const char* const format)
     {
         CARLA_SAFE_ASSERT_RETURN(pData->engine != nullptr, false);
 
@@ -1278,7 +1365,7 @@ public:
 
 #ifdef CARLA_OS_WIN
             // Fix for wine usage
-            if (juce::juce_isRunningInWine() && filename[0] == '/')
+            if (juce::File("Z:\\usr\\").isDirectory() && filename[0] == '/')
             {
                 jfilename.replace("/", "\\");
                 jfilename = "Z:" + jfilename;
@@ -1291,13 +1378,55 @@ public:
                 fDesc.name = label;
         }
 
-        fFormatManager.addDefaultFormats();
+        /**/ if (std::strcmp(format, "AU") == 0)
+        {
+#if JUCE_PLUGINHOST_AU
+            fFormatManager.addFormat(new juce::AudioUnitPluginFormat());
+#endif
+        }
+        else if (std::strcmp(format, "VST2") == 0)
+        {
+#if JUCE_PLUGINHOST_VST
+            fFormatManager.addFormat(new juce::VSTPluginFormat());
+#endif
+        }
+        else if (std::strcmp(format, "VST3") == 0)
+        {
+#if JUCE_PLUGINHOST_VST3
+            fFormatManager.addFormat(new juce::VST3PluginFormat());
+#endif
+        }
+        else
+        {
+            fFormatManager.addDefaultFormats();
+        }
 
         {
             juce::OwnedArray<juce::PluginDescription> pluginDescriptions;
             juce::KnownPluginList plist;
-            for (int i = 0; i < fFormatManager.getNumFormats(); ++i)
-                plist.scanAndAddFile(fileOrIdentifier, true, pluginDescriptions, *fFormatManager.getFormat(i));
+
+            {
+                const ScopedAbortCatcher sac;
+
+                for (int i = 0; i < fFormatManager.getNumFormats(); ++i)
+                {
+                    juce::AudioPluginFormat* const apformat = fFormatManager.getFormat(i);
+                    CARLA_SAFE_ASSERT_CONTINUE(apformat != nullptr);
+
+                    carla_debug("Trying to load '%s' plugin with format '%s'", fileOrIdentifier.toRawUTF8(), apformat->getName().toRawUTF8());
+
+                    try {
+                        plist.scanAndAddFile(fileOrIdentifier, true, pluginDescriptions, *apformat);
+                    } CARLA_SAFE_EXCEPTION_CONTINUE("scanAndAddFile")
+
+                    if (sac.wasTriggered())
+                    {
+                        carla_stderr("WARNING: Caught exception while scanning file, will not load this plugin");
+                        pluginDescriptions.clearQuick(false);
+                        break;
+                    }
+                }
+            }
 
             if (pluginDescriptions.size() == 0)
             {
@@ -1312,10 +1441,23 @@ public:
             fDesc.uid = static_cast<int>(uniqueId);
 
         juce::String error;
-        fInstance = fFormatManager.createPluginInstance(fDesc,
-                                                        pData->engine->getSampleRate(),
-                                                        static_cast<int>(pData->engine->getBufferSize()),
-                                                        error);
+
+        {
+            const ScopedAbortCatcher sac;
+
+            try {
+                fInstance = fFormatManager.createPluginInstance(fDesc,
+                                                                pData->engine->getSampleRate(),
+                                                                static_cast<int>(pData->engine->getBufferSize()),
+                                                                error);
+            } CARLA_SAFE_EXCEPTION("createPluginInstance")
+
+            if (sac.wasTriggered())
+            {
+                fInstance = nullptr;
+                carla_stderr("WARNING: Caught exception while instantiating, will not load this plugin");
+            }
+        }
 
         if (fInstance == nullptr)
         {
@@ -1343,7 +1485,7 @@ public:
         // ---------------------------------------------------------------
         // register client
 
-        pData->client = pData->engine->addClient(this);
+        pData->client = pData->engine->addClient(plugin);
 
         if (pData->client == nullptr || ! pData->client->isOk())
         {
@@ -1352,7 +1494,7 @@ public:
         }
 
         // ---------------------------------------------------------------
-        // set default options
+        // set options
 
         pData->options  = 0x0;
         pData->options |= PLUGIN_OPTION_FIXED_BUFFERS;
@@ -1360,28 +1502,35 @@ public:
 
         if (fInstance->acceptsMidi())
         {
-            pData->options |= PLUGIN_OPTION_SEND_CHANNEL_PRESSURE;
-            pData->options |= PLUGIN_OPTION_SEND_NOTE_AFTERTOUCH;
-            pData->options |= PLUGIN_OPTION_SEND_PITCHBEND;
-            pData->options |= PLUGIN_OPTION_SEND_ALL_SOUND_OFF;
-
-            if (options & PLUGIN_OPTION_SEND_CONTROL_CHANGES)
+            if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_CONTROL_CHANGES))
                 pData->options |= PLUGIN_OPTION_SEND_CONTROL_CHANGES;
-
-            if (options & PLUGIN_OPTION_SEND_PROGRAM_CHANGES)
-                pData->options |= PLUGIN_OPTION_SEND_PROGRAM_CHANGES;   
+            if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_CHANNEL_PRESSURE))
+                pData->options |= PLUGIN_OPTION_SEND_CHANNEL_PRESSURE;
+            if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_NOTE_AFTERTOUCH))
+                pData->options |= PLUGIN_OPTION_SEND_NOTE_AFTERTOUCH;
+            if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_PITCHBEND))
+                pData->options |= PLUGIN_OPTION_SEND_PITCHBEND;
+            if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_ALL_SOUND_OFF))
+                pData->options |= PLUGIN_OPTION_SEND_ALL_SOUND_OFF;
+            if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_PROGRAM_CHANGES))
+                pData->options |= PLUGIN_OPTION_SEND_PROGRAM_CHANGES;
+            if (isPluginOptionInverseEnabled(options, PLUGIN_OPTION_SKIP_SENDING_NOTES))
+                pData->options |= PLUGIN_OPTION_SKIP_SENDING_NOTES;
         }
 
         if (fInstance->getNumPrograms() > 1 && ((pData->options & PLUGIN_OPTION_SEND_PROGRAM_CHANGES) == 0))
-            pData->options |= PLUGIN_OPTION_MAP_PROGRAM_CHANGES;
+        {
+            if (isPluginOptionEnabled(options, PLUGIN_OPTION_MAP_PROGRAM_CHANGES))
+                pData->options |= PLUGIN_OPTION_MAP_PROGRAM_CHANGES;
+        }
 
         return true;
     }
 
 private:
     juce::PluginDescription    fDesc;
-    juce::AudioPluginInstance* fInstance;
     juce::AudioPluginFormatManager fFormatManager;
+    std::unique_ptr<juce::AudioPluginInstance> fInstance;
 
     juce::AudioSampleBuffer fAudioBuffer;
     juce::MidiBuffer        fMidiBuffer;
@@ -1389,7 +1538,7 @@ private:
     juce::MemoryBlock       fChunk;
     juce::String            fFormatName;
 
-    ScopedPointer<JucePluginWindow> fWindow;
+    CarlaScopedPointer<JucePluginWindow> fWindow;
 
     bool isJuceSaveFormat(const void* const data, const std::size_t dataSize)
     {
@@ -1402,7 +1551,7 @@ private:
 
         if (! compareMagic(set[0], "CcnK"))
             return false;
-        if (! compareMagic(set[2], "FBCh"))
+        if (! compareMagic(set[2], "FBCh") && ! compareMagic(set[2], "FJuc"))
             return false;
         if (fxbSwap(set[3]) > 1)
             return false;
@@ -1434,18 +1583,16 @@ CARLA_BACKEND_END_NAMESPACE
 
 CARLA_BACKEND_START_NAMESPACE
 
-CarlaPlugin* CarlaPlugin::newJuce(const Initializer& init, const char* const format)
+CarlaPluginPtr CarlaPlugin::newJuce(const Initializer& init, const char* const format)
 {
-    carla_debug("CarlaPlugin::newJuce({%p, \"%s\", \"%s\", \"%s\", " P_INT64 "}, %s)", init.engine, init.filename, init.name, init.label, init.uniqueId, format);
+    carla_debug("CarlaPlugin::newJuce({%p, \"%s\", \"%s\", \"%s\", " P_INT64 "}, %s)",
+                init.engine, init.filename, init.name, init.label, init.uniqueId, format);
 
 #ifdef USING_JUCE
-    CarlaPluginJuce* const plugin(new CarlaPluginJuce(init.engine, init.id));
+    std::shared_ptr<CarlaPluginJuce> plugin(new CarlaPluginJuce(init.engine, init.id));
 
-    if (! plugin->init(init.filename, init.name, init.label, init.uniqueId, init.options, format))
-    {
-        delete plugin;
+    if (! plugin->init(plugin, init.filename, init.name, init.label, init.uniqueId, init.options, format))
         return nullptr;
-    }
 
     return plugin;
 #else

@@ -1,6 +1,6 @@
 /*
  * Carla Plugin Host
- * Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -20,7 +20,7 @@
 
 #include "CarlaString.hpp"
 
-#ifdef HAVE_FLUIDSYNTH
+#if defined(HAVE_FLUIDSYNTH) && !defined(BUILD_BRIDGE_ALTERNATIVE_ARCH)
 # include <fluidsynth.h>
 #endif
 
@@ -65,29 +65,39 @@ const char* carla_get_complete_license_text()
         "<li>LADSPA plugin support</li>"
         "<li>DSSI plugin support</li>"
         "<li>LV2 plugin support</li>"
-#if defined(USING_JUCE) && (defined(CARLA_OS_MAC) || defined(CARLA_OS_WIN))
-        "<li>VST2/2 plugin support (using Juce)</li>"
+#if defined(USING_JUCE) && JUCE_PLUGINHOST_VST
+        "<li>VST2 plugin support (using JUCE)</li>"
 #else
         "<li>VST2 plugin support (using VeSTige header by Javier Serrano Polo)</li>"
 #endif
-#if defined(USING_JUCE) && defined(CARLA_OS_MAC)
-        "<li>AU plugin support (using Juce)</li>"
+#if defined(USING_JUCE) && JUCE_PLUGINHOST_VST3
+        "<li>VST3 plugin support (using JUCE)</li>"
+#endif
+#if defined(USING_JUCE) && JUCE_PLUGINHOST_AU
+        "<li>AU plugin support (using JUCE)</li>"
 #endif
 
         // Sample kit libraries
-#ifdef HAVE_FLUIDSYNTH
+#if defined(HAVE_FLUIDSYNTH) && !defined(BUILD_BRIDGE_ALTERNATIVE_ARCH)
         "<li>FluidSynth library v" FLUIDSYNTH_VERSION " for SF2/3 support</li>"
 #endif
         "<li>SFZero module for SFZ support</li>"
 
         // misc libs
         "<li>base64 utilities based on code by Ren\u00E9 Nyffenegger</li>"
+        "<li>dr_mp3 for mp3 file support</li>"
+#ifdef HAVE_LIBLO
         "<li>liblo library for OSC support</li>"
+#endif
+#ifdef HAVE_SNDFILE
+        "<li>libsndfile library for base audio file support</li>"
+#endif
         "<li>rtmempool library by Nedko Arnaudov"
         "<li>serd, sord, sratom and lilv libraries for LV2 discovery</li>"
 #ifndef USING_JUCE
         "<li>RtAudio v" RTAUDIO_VERSION " and RtMidi v" RTMIDI_VERSION " for native Audio and MIDI support</li>"
 #endif
+        "<li>zita-resampler for audio file sample rate resampling</li>"
 
         // Internal plugins
         "<li>MIDI Sequencer UI code by Perry Nguyen</li>"
@@ -140,6 +150,9 @@ const char* const* carla_get_supported_file_extensions()
 #ifdef HAVE_FLUIDSYNTH
         "sf2", "sf3",
 #endif
+#ifdef HAVE_FLUIDSYNTH_INSTPATCH
+        "dls", "gig",
+#endif
 #ifdef HAVE_ZYN_DEPS
         "xmz", "xiz",
 #endif
@@ -149,13 +162,11 @@ const char* const* carla_get_supported_file_extensions()
         "dll",
         "so",
 #endif
-#if defined(USING_JUCE) && (defined(CARLA_OS_MAC) || defined(CARLA_OS_WIN))
         "vst3",
-#endif
 
         // Audio files
 #ifdef HAVE_SNDFILE
-        "aif", "aifc", "aiff", "au", "bwf", "flac", "htk", "iff", "mat4", "mat5", "oga", "ogg",
+        "aif", "aifc", "aiff", "au", "bwf", "flac", "htk", "iff", "mat4", "mat5", "oga", "ogg", "opus",
         "paf", "pvf", "pvf5", "sd2", "sf", "snd", "svx", "vcc", "w64", "wav", "xi",
 #endif
 #ifdef HAVE_FFMPEG
@@ -164,6 +175,9 @@ const char* const* carla_get_supported_file_extensions()
         // FFmpeg without sndfile
         "flac", "oga", "ogg", "w64", "wav",
 # endif
+#else
+        // dr_mp3
+        "mp3",
 #endif
 
         // MIDI files
@@ -187,6 +201,9 @@ const char* const* carla_get_supported_features()
 #ifdef HAVE_FLUIDSYNTH
         "sf2",
 #endif
+#ifdef HAVE_FLUIDSYNTH_INSTPATCH
+        "dls", "gig",
+#endif
 #ifdef HAVE_HYLIA
         "link",
 #endif
@@ -201,9 +218,7 @@ const char* const* carla_get_supported_features()
 #endif
 #ifdef USING_JUCE
         "juce",
-# if defined(CARLA_OS_MAC) || defined(CARLA_OS_WIN)
         "vst3",
-# endif
 # if defined(CARLA_OS_MAC)
         "au",
 # endif
@@ -216,6 +231,34 @@ const char* const* carla_get_supported_features()
 
 // -------------------------------------------------------------------------------------------------------------------
 
-#include "../CarlaHostCommon.cpp"
+const char* carla_get_library_filename()
+{
+    carla_debug("carla_get_library_filename()");
+
+    static CarlaString ret;
+
+    if (ret.isEmpty())
+    {
+        using water::File;
+        ret = File(File::getSpecialLocation(File::currentExecutableFile)).getFullPathName().toRawUTF8();
+    }
+
+    return ret;
+}
+
+const char* carla_get_library_folder()
+{
+    carla_debug("carla_get_library_folder()");
+
+    static CarlaString ret;
+
+    if (ret.isEmpty())
+    {
+        using water::File;
+        ret = File(File::getSpecialLocation(File::currentExecutableFile).getParentDirectory()).getFullPathName().toRawUTF8();
+    }
+
+    return ret;
+}
 
 // -------------------------------------------------------------------------------------------------------------------

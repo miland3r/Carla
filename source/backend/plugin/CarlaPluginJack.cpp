@@ -1,6 +1,6 @@
 /*
  * Carla Plugin JACK
- * Copyright (C) 2016-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2016-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -26,6 +26,7 @@
 #include "CarlaEngineUtils.hpp"
 #include "CarlaMathUtils.hpp"
 #include "CarlaPipeUtils.hpp"
+#include "CarlaScopeUtils.hpp"
 #include "CarlaShmUtils.hpp"
 #include "CarlaThread.hpp"
 
@@ -70,11 +71,17 @@ static const ExternalMidiNote kExternalMidiNoteFallback = { -1, 0, 0 };
 
 // -------------------------------------------------------------------------------------------------------------------
 
+struct Announcer {
+    virtual ~Announcer() {}
+    virtual void nsmAnnounced(bool hasGui) = 0;
+};
+
 class CarlaPluginJackThread : public CarlaThread
 {
 public:
-    CarlaPluginJackThread(CarlaEngine* const engine, CarlaPlugin* const plugin) noexcept
+    CarlaPluginJackThread(Announcer* const ann, CarlaEngine* const engine, CarlaPlugin* const plugin) noexcept
         : CarlaThread("CarlaPluginJackThread"),
+          kAnnouncer(ann),
           kEngine(engine),
           kPlugin(plugin),
           fShmIds(),
@@ -82,6 +89,7 @@ public:
 #ifdef HAVE_LIBLO
           fOscClientAddress(nullptr),
           fOscServer(nullptr),
+          fHasOptionalGui(false),
           fProject(),
 #endif
           fProcess() {}
@@ -112,19 +120,21 @@ public:
         if (fSetupLabel != setupLabel)
             fSetupLabel = setupLabel;
 
-        maybeOpenFirstTime();
+        maybeOpenFirstTime(false);
 
         lo_send_from(fOscClientAddress, fOscServer, LO_TT_IMMEDIATE, "/nsm/client/save", "");
     }
 
-    void nsmShowGui(const bool yesNo)
+    bool nsmShowGui(const bool yesNo)
     {
-        if (fOscClientAddress == nullptr)
-            return;
+        if (fOscClientAddress == nullptr || ! fHasOptionalGui)
+            return false;
 
         lo_send_from(fOscClientAddress, fOscServer, LO_TT_IMMEDIATE,
                      yesNo ? "/nsm/client/show_optional_gui"
                            : "/nsm/client/hide_optional_gui", "");
+
+        return true;
     }
 #endif
 
@@ -133,14 +143,12 @@ public:
         const EngineOptions& options(kEngine->getOptions());
         CarlaString binaryDir(options.binaryDir);
 #ifdef HAVE_LIBLO
-        const int sessionManager = fSetupLabel[4] - '0';
+        const int sessionManager = fSetupLabel[4U] - '0';
 #endif
 
         CarlaString ret;
         ret += "export LD_LIBRARY_PATH=" + binaryDir + "/jack\n";
-#ifdef HAVE_X11
         ret += "export LD_PRELOAD=" + binaryDir + "/libcarla_interposer-jack-x11.so\n";
-#endif
 #ifdef HAVE_LIBLO
         if (sessionManager == LIBJACK_SESSION_MANAGER_NSM)
         {
@@ -177,18 +185,20 @@ protected:
         return ((CarlaPluginJackThread*)data)->handleBroadcast(path, types, argv, msg);
     }
 
-    void maybeOpenFirstTime()
+    void maybeOpenFirstTime(const bool announced)
     {
         if (fSetupLabel.length() <= 6)
             return;
 
-        if (fProject.path.isNotEmpty() || fProject.init(kEngine->getCurrentProjectFilename(), &fSetupLabel[6]))
+        if ((announced || fProject.path.isEmpty()) && fProject.init(kPlugin->getName(),
+                                                                    kEngine->getCurrentProjectFolder(),
+                                                                    &fSetupLabel[6U]))
         {
             carla_stdout("Sending open signal %s %s %s",
                          fProject.path.buffer(), fProject.display.buffer(), fProject.clientName.buffer());
 
             lo_send_from(fOscClientAddress, fOscServer, LO_TT_IMMEDIATE, "/nsm/client/open", "sss",
-                            fProject.path.buffer(), fProject.display.buffer(), fProject.clientName.buffer());
+                         fProject.path.buffer(), fProject.display.buffer(), fProject.clientName.buffer());
         }
     }
 
@@ -211,19 +221,30 @@ protected:
             CARLA_SAFE_ASSERT_RETURN(fOscClientAddress != nullptr, 0);
 
             fProject.appName = &argv[0]->s;
+            fHasOptionalGui  = std::strstr(&argv[1]->s, ":optional-gui:") != nullptr;
 
-            static const char* const method   = "/nsm/server/announce";
-            static const char* const message  = "Howdy, what took you so long?";
-            static const char* const smName   = "Carla";
-            static const char* const features = ":server-control:optional-gui:";
+            kAnnouncer->nsmAnnounced(fHasOptionalGui);
+
+            static const char* const featuresG = ":server-control:optional-gui:";
+            static const char* const featuresN = ":server-control:";
+
+            static const char* const method  = "/nsm/server/announce";
+            static const char* const message = "Howdy, what took you so long?";
+            static const char* const smName  = "Carla";
+
+            const char* const features = ((fSetupLabel[5U] - '0') & LIBJACK_FLAG_CONTROL_WINDOW)
+                                       ? featuresG : featuresN;
 
             lo_send_from(fOscClientAddress, fOscServer, LO_TT_IMMEDIATE, "/reply", "ssss",
                          method, message, smName, features);
 
-            maybeOpenFirstTime();
+            maybeOpenFirstTime(true);
+            return 0;
         }
 
-        else if (std::strcmp(path, "/reply") == 0)
+        CARLA_SAFE_ASSERT_RETURN(fOscClientAddress != nullptr, 0);
+
+        if (std::strcmp(path, "/reply") == 0)
         {
             CARLA_SAFE_ASSERT_RETURN(std::strcmp(types, "ss") == 0, 0);
 
@@ -261,6 +282,27 @@ protected:
                               0, 0, 0.0f, nullptr);
         }
 
+        // special messages
+        else if (std::strcmp(path, "/nsm/gui/client/save") == 0)
+        {
+            CARLA_SAFE_ASSERT_RETURN(std::strcmp(types, "s") == 0, 0);
+
+            lo_send_from(fOscClientAddress, fOscServer, LO_TT_IMMEDIATE, "/nsm/client/save", "");
+        }
+
+        else if (std::strcmp(path, "/nsm/server/stop") == 0)
+        {
+            CARLA_SAFE_ASSERT_RETURN(std::strcmp(types, "s") == 0, 0);
+
+            lo_send_from(fOscClientAddress, fOscServer, LO_TT_IMMEDIATE, "/nsm/client/hide_optional_gui", "");
+
+            kEngine->callback(true, true,
+                              ENGINE_CALLBACK_UI_STATE_CHANGED,
+                              kPlugin->getId(),
+                              0,
+                              0, 0, 0.0f, nullptr);
+        }
+
         return 0;
     }
 #endif
@@ -274,7 +316,7 @@ protected:
             fOscClientAddress = nullptr;
         }
 
-        const int sessionManager = fSetupLabel[4] - '0';
+        const int sessionManager = fSetupLabel[4U] - '0';
 
         if (sessionManager == LIBJACK_SESSION_MANAGER_NSM)
         {
@@ -286,7 +328,7 @@ protected:
         }
 #endif
 
-        const bool externalProcess = ((fSetupLabel[5] - '0') & LIBJACK_FLAG_EXTERNAL_START)
+        const bool externalProcess = ((fSetupLabel[5U] - '0') & LIBJACK_FLAG_EXTERNAL_START)
                                    && ! kEngine->isLoadingProject();
 
         if (! externalProcess)
@@ -319,21 +361,15 @@ protected:
             std::snprintf(winIdStr, STR_MAX, P_UINTPTR, options.frontendWinId);
             winIdStr[STR_MAX] = '\0';
 
-            CarlaString libjackdir(options.binaryDir);
-            libjackdir += "/jack";
-
-            CarlaString ldpreload;
-#ifdef HAVE_X11
-            ldpreload = (CarlaString(options.binaryDir)
-                    + "/libcarla_interposer-jack-x11.so");
-#endif
+            const CarlaString libjackdir(CarlaString(options.binaryDir) + "/jack");
+            const CarlaString ldpreload(CarlaString(options.binaryDir) + "/libcarla_interposer-jack-x11.so");
 
             const ScopedEngineEnvironmentLocker _seel(kEngine);
 
-            const ScopedEnvVar sev2("LD_LIBRARY_PATH", libjackdir.buffer());
-            const ScopedEnvVar sev1("LD_PRELOAD", ldpreload.isNotEmpty() ? ldpreload.buffer() : nullptr);
+            const CarlaScopedEnvVar sev2("LD_LIBRARY_PATH", libjackdir.buffer());
+            const CarlaScopedEnvVar sev1("LD_PRELOAD", ldpreload.isNotEmpty() ? ldpreload.buffer() : nullptr);
 #ifdef HAVE_LIBLO
-            const ScopedEnvVar sev3("NSM_URL", lo_server_get_url(fOscServer));
+            const CarlaScopedEnvVar sev3("NSM_URL", lo_server_get_url(fOscServer));
 #endif
 
             if (kPlugin->getHints() & PLUGIN_HAS_CUSTOM_UI)
@@ -396,7 +432,7 @@ protected:
             else
             {
                 // forced quit, may have crashed
-                if (fProcess->getExitCode() != 0 /*|| fProcess->exitStatus() == QProcess::CrashExit*/)
+                if (fProcess->getExitCodeAndClearPID() != 0)
                 {
                     carla_stderr("CarlaPluginJackThread::run() - application crashed");
 
@@ -416,6 +452,7 @@ protected:
     }
 
 private:
+    Announcer* const kAnnouncer;
     CarlaEngine* const kEngine;
     CarlaPlugin* const kPlugin;
 
@@ -425,6 +462,7 @@ private:
 #ifdef HAVE_LIBLO
     lo_address fOscClientAddress;
     lo_server  fOscServer;
+    bool fHasOptionalGui;
 
     struct ProjectData {
         CarlaString appName;
@@ -438,17 +476,23 @@ private:
               display(),
               clientName() {}
 
-        bool init(const char* const engineProjectFilename, const char* const uniqueCodeID)
+        bool init(const char* const pluginName,
+                  const char* const engineProjectFolder,
+                  const char* const uniqueCodeID)
         {
-            CARLA_SAFE_ASSERT_RETURN(engineProjectFilename != nullptr && engineProjectFilename[0] != '\0', false);
+            CARLA_SAFE_ASSERT_RETURN(engineProjectFolder != nullptr && engineProjectFolder[0] != '\0', false);
             CARLA_SAFE_ASSERT_RETURN(uniqueCodeID != nullptr && uniqueCodeID[0] != '\0', false);
             CARLA_SAFE_ASSERT_RETURN(appName.isNotEmpty(), false);
 
-            const File file(File(engineProjectFilename).withFileExtension(uniqueCodeID));
+            String child(pluginName);
+            child += ".";
+            child += uniqueCodeID;
 
+            const File file(File(engineProjectFolder).getChildFile(child));
+
+            clientName = appName + "." + uniqueCodeID;
             path = file.getFullPathName().toRawUTF8();
             display = file.getFileNameWithoutExtension().toRawUTF8();
-            clientName = appName + "." + uniqueCodeID;
 
             return true;
         }
@@ -457,14 +501,15 @@ private:
     } fProject;
 #endif
 
-    ScopedPointer<ChildProcess> fProcess;
+    CarlaScopedPointer<ChildProcess> fProcess;
 
     CARLA_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CarlaPluginJackThread)
 };
 
 // -------------------------------------------------------------------------------------------------------------------
 
-class CarlaPluginJack : public CarlaPlugin
+class CarlaPluginJack : public CarlaPlugin,
+                        public Announcer
 {
 public:
     CarlaPluginJack(CarlaEngine* const engine, const uint id)
@@ -477,7 +522,7 @@ public:
           fBufferSize(engine->getBufferSize()),
           fProcWaitTime(0),
           fSetupHints(0x0),
-          fBridgeThread(engine, this),
+          fBridgeThread(this, engine, this),
           fShmAudioPool(),
           fShmRtClientControl(),
           fShmNonRtClientControl(),
@@ -503,7 +548,7 @@ public:
         pData->masterMutex.lock();
 
         if (pData->client != nullptr && pData->client->isActive())
-            pData->client->deactivate();
+            pData->client->deactivate(true);
 
         if (pData->active)
         {
@@ -533,6 +578,27 @@ public:
         clearBuffers();
 
         fInfo.chunk.clear();
+    }
+
+    // -------------------------------------------------------------------
+
+    void nsmAnnounced(bool hasGui) override
+    {
+        if (hasGui || (pData->hints & PLUGIN_HAS_CUSTOM_UI) == 0x0)
+            return;
+
+        {
+            const CarlaMutexLocker _cml(fShmNonRtClientControl.mutex);
+
+            fShmNonRtClientControl.writeOpcode(kPluginBridgeNonRtClientShowUI);
+            fShmNonRtClientControl.commitWrite();
+        }
+
+        pData->engine->callback(true, true,
+                                ENGINE_CALLBACK_UI_STATE_CHANGED,
+                                pData->id,
+                                1,
+                                0, 0, 0.0f, nullptr);
     }
 
     // -------------------------------------------------------------------
@@ -569,7 +635,20 @@ public:
 
     uint getOptionsAvailable() const noexcept override
     {
-        return fInfo.optionsAvailable;
+        uint options = 0x0;
+
+        if (fInfo.mIns > 0)
+        {
+            options |= PLUGIN_OPTION_SEND_CONTROL_CHANGES;
+            options |= PLUGIN_OPTION_SEND_CHANNEL_PRESSURE;
+            options |= PLUGIN_OPTION_SEND_NOTE_AFTERTOUCH;
+            options |= PLUGIN_OPTION_SEND_PITCHBEND;
+            options |= PLUGIN_OPTION_SEND_ALL_SOUND_OFF;
+            options |= PLUGIN_OPTION_SEND_PROGRAM_CHANGES;
+            options |= PLUGIN_OPTION_SKIP_SENDING_NOTES;
+        }
+
+        return options;
     }
 
     bool getLabel(char* const strBuf) const noexcept override
@@ -598,13 +677,11 @@ public:
     // -------------------------------------------------------------------
     // Set data (state)
 
-    void prepareForSave() noexcept override
+    void prepareForSave(bool) noexcept override
     {
 #ifdef HAVE_LIBLO
         if (fInfo.setupLabel.length() == 6)
             setupUniqueProjectID();
-
-        fBridgeThread.nsmSave(fInfo.setupLabel);
 #endif
 
         {
@@ -613,6 +690,10 @@ public:
             fShmNonRtClientControl.writeOpcode(kPluginBridgeNonRtClientPrepareForSave);
             fShmNonRtClientControl.commitWrite();
         }
+
+#ifdef HAVE_LIBLO
+        fBridgeThread.nsmSave(fInfo.setupLabel);
+#endif
     }
 
     // -------------------------------------------------------------------
@@ -684,13 +765,14 @@ public:
         }
 
 #ifdef HAVE_LIBLO
-        fBridgeThread.nsmShowGui(yesNo);
+        if (! fBridgeThread.nsmShowGui(yesNo))
 #endif
+        {
+            const CarlaMutexLocker _cml(fShmNonRtClientControl.mutex);
 
-        const CarlaMutexLocker _cml(fShmNonRtClientControl.mutex);
-
-        fShmNonRtClientControl.writeOpcode(yesNo ? kPluginBridgeNonRtClientShowUI : kPluginBridgeNonRtClientHideUI);
-        fShmNonRtClientControl.commitWrite();
+            fShmNonRtClientControl.writeOpcode(yesNo ? kPluginBridgeNonRtClientShowUI : kPluginBridgeNonRtClientHideUI);
+            fShmNonRtClientControl.commitWrite();
+        }
     }
 
     void idle() override
@@ -916,7 +998,8 @@ public:
         } CARLA_SAFE_EXCEPTION("deactivate - waitForClient");
     }
 
-    void process(const float** const audioIn, float** const audioOut, const float**, float**, const uint32_t frames) override
+    void process(const float* const* const audioIn, float** const audioOut, 
+                 const float* const*, float**, const uint32_t frames) override
     {
         // --------------------------------------------------------------------------------------------------------
         // Check if active
@@ -1007,20 +1090,20 @@ public:
 
                             if (MIDI_IS_CONTROL_BREATH_CONTROLLER(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_DRYWET) != 0)
                             {
-                                value = ctrlEvent.value;
+                                value = ctrlEvent.normalizedValue;
                                 setDryWetRT(value, true);
                             }
 
                             if (MIDI_IS_CONTROL_CHANNEL_VOLUME(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_VOLUME) != 0)
                             {
-                                value = ctrlEvent.value*127.0f/100.0f;
+                                value = ctrlEvent.normalizedValue*127.0f/100.0f;
                                 setVolumeRT(value, true);
                             }
 
                             if (MIDI_IS_CONTROL_BALANCE(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_BALANCE) != 0)
                             {
                                 float left, right;
-                                value = ctrlEvent.value/0.5f - 1.0f;
+                                value = ctrlEvent.normalizedValue/0.5f - 1.0f;
 
                                 if (value < 0.0f)
                                 {
@@ -1043,6 +1126,16 @@ public:
                             }
                         }
 #endif
+                        if ((pData->options & PLUGIN_OPTION_SEND_CONTROL_CHANGES) != 0 && ctrlEvent.param < MAX_MIDI_VALUE)
+                        {
+                            fShmRtClientControl.writeOpcode(kPluginBridgeRtClientMidiEvent);
+                            fShmRtClientControl.writeUInt(event.time);
+                            fShmRtClientControl.writeByte(0); // port
+                            fShmRtClientControl.writeByte(3); // size
+                            fShmRtClientControl.writeByte(uint8_t(MIDI_STATUS_CONTROL_CHANGE | (event.channel & MIDI_CHANNEL_BIT)));
+                            fShmRtClientControl.writeByte(uint8_t(ctrlEvent.param));
+                            fShmRtClientControl.writeByte(uint8_t(ctrlEvent.normalizedValue*127.0f));
+                        }
                         break;
 
                     case kEngineControlEventTypeMidiBank:
@@ -1108,6 +1201,8 @@ public:
 
                     uint8_t status = uint8_t(MIDI_GET_STATUS_FROM_DATA(midiData));
 
+                    if ((status == MIDI_STATUS_NOTE_OFF || status == MIDI_STATUS_NOTE_ON) && (pData->options & PLUGIN_OPTION_SKIP_SENDING_NOTES))
+                        continue;
                     if (status == MIDI_STATUS_CHANNEL_PRESSURE && (pData->options & PLUGIN_OPTION_SEND_CHANNEL_PRESSURE) == 0)
                         continue;
                     if (status == MIDI_STATUS_CONTROL_CHANGE && (pData->options & PLUGIN_OPTION_SEND_CONTROL_CHANGES) == 0)
@@ -1135,20 +1230,11 @@ public:
 
                     if (status == MIDI_STATUS_NOTE_ON)
                     {
-                        pData->postponeRtEvent(kPluginPostRtEventNoteOn,
-                                               true,
-                                               event.channel,
-                                               midiData[1],
-                                               midiData[2],
-                                               0.0f);
+                        pData->postponeNoteOnRtEvent(true, event.channel, midiData[1], midiData[2]);
                     }
                     else if (status == MIDI_STATUS_NOTE_OFF)
                     {
-                        pData->postponeRtEvent(kPluginPostRtEventNoteOff,
-                                               true,
-                                               event.channel,
-                                               midiData[1],
-                                               0, 0.0f);
+                        pData->postponeNoteOffRtEvent(true, event.channel, midiData[1]);
                     }
                 } break;
                 }
@@ -1200,7 +1286,7 @@ public:
         } // End of Control and MIDI Output
     }
 
-    bool processSingle(const float** const audioIn, float** const audioOut, const uint32_t frames)
+    bool processSingle(const float* const* const audioIn, float** const audioOut, const uint32_t frames)
     {
         CARLA_SAFE_ASSERT_RETURN(! fTimedError, false);
         CARLA_SAFE_ASSERT_RETURN(frames > 0, false);
@@ -1446,6 +1532,7 @@ public:
             case kPluginBridgeNonRtServerProgramName:
             case kPluginBridgeNonRtServerMidiProgramData:
             case kPluginBridgeNonRtServerSetCustomData:
+            case kPluginBridgeNonRtServerVersion:
                 break;
 
             case kPluginBridgeNonRtServerSetChunkDataFile:
@@ -1511,7 +1598,8 @@ public:
 
     // -------------------------------------------------------------------
 
-    bool init(const char* const filename, const char* const name, const char* const label)
+    bool init(const CarlaPluginPtr plugin,
+              const char* const filename, const char* const name, const char* const label, const uint options)
     {
         CARLA_SAFE_ASSERT_RETURN(pData->engine != nullptr, false);
 
@@ -1546,11 +1634,14 @@ public:
         }
 
         for (int i=4; --i >= 0;) {
-            CARLA_SAFE_ASSERT_RETURN(label[i] >= '0' && label[i] <= '0'+64, false);
+            CARLA_SAFE_ASSERT_INT2_RETURN(label[i] >= '0' && label[i] <= '0'+64, i, label[i], false);
         }
-        for (int i=6; --i >= 4;) {
-            CARLA_SAFE_ASSERT_RETURN(label[i] >= '0' && label[i] < '0'+0x4f, false);
-        }
+        CARLA_SAFE_ASSERT_INT2_RETURN(label[4] >= '0' && label[4] < '0'+0x4f, 4, label[4], false);
+        CARLA_SAFE_ASSERT_UINT2_RETURN(static_cast<uchar>(label[5]) >= '0' &&
+                                       static_cast<uchar>(label[5]) <= '0'+0x73,
+                                       static_cast<uchar>(label[5]),
+                                       static_cast<uchar>('0'+0x73),
+                                       false);
 
         fInfo.aIns   = static_cast<uint8_t>(label[0] - '0');
         fInfo.aOuts  = static_cast<uint8_t>(label[1] - '0');
@@ -1618,14 +1709,13 @@ public:
         // ---------------------------------------------------------------
         // setup hints and options
 
-        fSetupHints = static_cast<uint>(label[5] - '0');
+        fSetupHints = static_cast<uint>(static_cast<uchar>(label[5]) - '0');
 
         // FIXME dryWet broken
-        pData->hints  = PLUGIN_IS_BRIDGE | PLUGIN_OPTION_FIXED_BUFFERS;
+        pData->hints  = PLUGIN_IS_BRIDGE;
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
         pData->hints |= /*PLUGIN_CAN_DRYWET |*/ PLUGIN_CAN_VOLUME | PLUGIN_CAN_BALANCE;
 #endif
-        //fInfo.optionsAvailable = optionAv;
 
         if (fSetupHints & LIBJACK_FLAG_CONTROL_WINDOW)
             pData->hints |= PLUGIN_HAS_CUSTOM_UI;
@@ -1654,13 +1744,43 @@ public:
         if (pData->name == nullptr)
             pData->name = pData->engine->getUniquePluginName("unknown");
 
-        pData->client = pData->engine->addClient(this);
+        pData->client = pData->engine->addClient(plugin);
 
         if (pData->client == nullptr || ! pData->client->isOk())
         {
             pData->engine->setLastError("Failed to register plugin client");
             return false;
         }
+
+        // remove unprintable characters if needed
+        if (fSetupHints & LIBJACK_FLAG_EXTERNAL_START)
+            fInfo.setupLabel[5U] = static_cast<char>('0' + (fSetupHints ^ LIBJACK_FLAG_EXTERNAL_START));
+
+        // ---------------------------------------------------------------
+        // set options
+
+        pData->options = PLUGIN_OPTION_FIXED_BUFFERS;
+
+        if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_CONTROL_CHANGES))
+            pData->options |= PLUGIN_OPTION_SEND_CONTROL_CHANGES;
+
+        if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_CHANNEL_PRESSURE))
+            pData->options |= PLUGIN_OPTION_SEND_CHANNEL_PRESSURE;
+
+        if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_NOTE_AFTERTOUCH))
+            pData->options |= PLUGIN_OPTION_SEND_NOTE_AFTERTOUCH;
+
+        if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_PITCHBEND))
+            pData->options |= PLUGIN_OPTION_SEND_PITCHBEND;
+
+        if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_ALL_SOUND_OFF))
+            pData->options |= PLUGIN_OPTION_SEND_ALL_SOUND_OFF;
+
+        if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_PROGRAM_CHANGES))
+            pData->options |= PLUGIN_OPTION_SEND_PROGRAM_CHANGES;
+
+        if (isPluginOptionInverseEnabled(options, PLUGIN_OPTION_SKIP_SENDING_NOTES))
+            pData->options |= PLUGIN_OPTION_SKIP_SENDING_NOTES;
 
         return true;
     }
@@ -1685,7 +1805,6 @@ private:
     struct Info {
         uint8_t aIns, aOuts;
         uint8_t mIns, mOuts;
-        uint optionsAvailable;
         CarlaString setupLabel;
         std::vector<uint8_t> chunk;
 
@@ -1694,7 +1813,6 @@ private:
               aOuts(0),
               mIns(0),
               mOuts(0),
-              optionsAvailable(0),
               setupLabel(),
               chunk() {}
 
@@ -1738,18 +1856,19 @@ private:
 
     void setupUniqueProjectID()
     {
-        const char* const engineProjectFilename = pData->engine->getCurrentProjectFilename();
-        carla_stdout("setupUniqueProjectID %s", engineProjectFilename);
+        const char* const engineProjectFolder = pData->engine->getCurrentProjectFolder();
+        carla_stdout("setupUniqueProjectID %s", engineProjectFolder);
 
-        if (engineProjectFilename == nullptr || engineProjectFilename[0] == '\0')
+        if (engineProjectFolder == nullptr || engineProjectFolder[0] == '\0')
             return;
 
-        const File file(engineProjectFilename);
-        CARLA_SAFE_ASSERT_RETURN(file.existsAsFile(),);
-        CARLA_SAFE_ASSERT_RETURN(file.getFileExtension().isNotEmpty(),);
+        const File file(engineProjectFolder);
+        CARLA_SAFE_ASSERT_RETURN(file.exists(),);
 
         char code[6];
         code[5] = '\0';
+
+        String child;
 
         for (;;)
         {
@@ -1766,7 +1885,10 @@ private:
             code[3] = kValidChars[safe_rand(kValidCharsLen)];
             code[4] = kValidChars[safe_rand(kValidCharsLen)];
 
-            const File newFile(file.withFileExtension(code));
+            child  = pData->name;
+            child += ".";
+            child += code;
+            const File newFile(file.getChildFile(child));
 
             if (newFile.existsAsFile())
                 continue;
@@ -1795,7 +1917,7 @@ private:
 
         // initial values
         fShmNonRtClientControl.writeOpcode(kPluginBridgeNonRtClientVersion);
-        fShmNonRtClientControl.writeUInt(CARLA_PLUGIN_BRIDGE_API_VERSION);
+        fShmNonRtClientControl.writeUInt(CARLA_PLUGIN_BRIDGE_API_VERSION_CURRENT);
 
         fShmNonRtClientControl.writeUInt(static_cast<uint32_t>(sizeof(BridgeRtClientData)));
         fShmNonRtClientControl.writeUInt(static_cast<uint32_t>(sizeof(BridgeNonRtClientData)));
@@ -1919,18 +2041,16 @@ CARLA_BACKEND_END_NAMESPACE
 
 CARLA_BACKEND_START_NAMESPACE
 
-CarlaPlugin* CarlaPlugin::newJackApp(const Initializer& init)
+CarlaPluginPtr CarlaPlugin::newJackApp(const Initializer& init)
 {
-    carla_debug("CarlaPlugin::newJackApp({%p, \"%s\", \"%s\", \"%s\"})", init.engine, init.filename, init.name, init.label);
+    carla_debug("CarlaPlugin::newJackApp({%p, \"%s\", \"%s\", \"%s\"})",
+                init.engine, init.filename, init.name, init.label);
 
 #ifdef CARLA_OS_LINUX
-    CarlaPluginJack* const plugin(new CarlaPluginJack(init.engine, init.id));
+    std::shared_ptr<CarlaPluginJack> plugin(new CarlaPluginJack(init.engine, init.id));
 
-    if (! plugin->init(init.filename, init.name, init.label))
-    {
-        delete plugin;
+    if (! plugin->init(plugin, init.filename, init.name, init.label, init.options))
         return nullptr;
-    }
 
     return plugin;
 #else

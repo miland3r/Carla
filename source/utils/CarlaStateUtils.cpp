@@ -1,6 +1,6 @@
 /*
  * Carla State utils
- * Copyright (C) 2012-2018 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2012-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -124,8 +124,11 @@ CarlaStateSave::Parameter::Parameter() noexcept
       symbol(nullptr),
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
       value(0.0f),
+      mappedControlIndex(CONTROL_INDEX_NONE),
       midiChannel(0),
-      midiCC(-1) {}
+      mappedRangeValid(false),
+      mappedMinimum(0.0f),
+      mappedMaximum(1.0f) {}
 #else
       value(0.0f) {}
 #endif
@@ -189,6 +192,7 @@ CarlaStateSave::CarlaStateSave() noexcept
       binary(nullptr),
       uniqueId(0),
       options(0x0),
+      temporary(false),
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
       active(false),
       dryWet(1.0f),
@@ -406,6 +410,9 @@ bool CarlaStateSave::fillFromXmlElement(const XmlElement* const xmlElement)
                 else if (tag == "Parameter")
                 {
                     Parameter* const stateParameter(new Parameter());
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+                    bool hasMappedMinimum = false, hasMappedMaximum = false;
+#endif
 
                     for (XmlElement* xmlSubData = xmlData->getFirstChildElement(); xmlSubData != nullptr; xmlSubData = xmlSubData->getNextElement())
                     {
@@ -441,11 +448,33 @@ bool CarlaStateSave::fillFromXmlElement(const XmlElement* const xmlElement)
                         else if (pTag == "MidiCC")
                         {
                             const int cc(pText.getIntValue());
-                            if (cc >= -1 && cc < MAX_MIDI_CONTROL)
-                                stateParameter->midiCC = static_cast<int16_t>(cc);
+                            if (cc > 0 && cc < MAX_MIDI_CONTROL)
+                                stateParameter->mappedControlIndex = static_cast<int16_t>(cc);
+                        }
+                        else if (pTag == "MappedControlIndex")
+                        {
+                            const int ctrl(pText.getIntValue());
+                            if (ctrl > CONTROL_INDEX_NONE && ctrl <= CONTROL_INDEX_MAX_ALLOWED)
+                                if (ctrl != CONTROL_INDEX_MIDI_LEARN)
+                                    stateParameter->mappedControlIndex = static_cast<int16_t>(ctrl);
+                        }
+                        else if (pTag == "MappedMinimum")
+                        {
+                            hasMappedMinimum = true;
+                            stateParameter->mappedMinimum = pText.getFloatValue();
+                        }
+                        else if (pTag == "MappedMaximum")
+                        {
+                            hasMappedMaximum = true;
+                            stateParameter->mappedMaximum = pText.getFloatValue();
                         }
 #endif
                     }
+
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+                    if (hasMappedMinimum && hasMappedMaximum)
+                        stateParameter->mappedRangeValid = true;
+#endif
 
                     parameters.append(stateParameter);
                 }
@@ -532,6 +561,8 @@ void CarlaStateSave::dumpToMemoryStream(MemoryOutputStream& content) const
         case PLUGIN_AU:
             infoXml << "   <Identifier>" << xmlSafeString(label, true) << "</Identifier>\n";
             break;
+        case PLUGIN_DLS:
+        case PLUGIN_GIG:
         case PLUGIN_SF2:
             infoXml << "   <Filename>"   << xmlSafeString(binary, true) << "</Filename>\n";
             infoXml << "   <Label>"      << xmlSafeString(label, true)  << "</Label>\n";
@@ -596,10 +627,20 @@ void CarlaStateSave::dumpToMemoryStream(MemoryOutputStream& content) const
             parameterXml << "    <Symbol>" << xmlSafeString(stateParameter->symbol, true) << "</Symbol>\n";
 
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
-        if (stateParameter->midiCC > 0)
+        if (stateParameter->mappedControlIndex > CONTROL_INDEX_NONE && stateParameter->mappedControlIndex <= CONTROL_INDEX_MAX_ALLOWED)
         {
-            parameterXml << "    <MidiCC>"      << stateParameter->midiCC        << "</MidiCC>\n";
-            parameterXml << "    <MidiChannel>" << stateParameter->midiChannel+1 << "</MidiChannel>\n";
+            parameterXml << "    <MidiChannel>"   << stateParameter->midiChannel+1 << "</MidiChannel>\n";
+            parameterXml << "    <MappedControlIndex>" << stateParameter->mappedControlIndex << "</MappedControlIndex>\n";
+
+            if (stateParameter->mappedRangeValid)
+            {
+                parameterXml << "    <MappedMinimum>" << String(stateParameter->mappedMinimum, 15) << "</MappedMinimum>\n";
+                parameterXml << "    <MappedMaximum>" << String(stateParameter->mappedMaximum, 15) << "</MappedMaximum>\n";
+            }
+
+            // backwards compatibility for older carla versions
+            if (stateParameter->mappedControlIndex > 0 && stateParameter->mappedControlIndex < MAX_MIDI_CONTROL)
+                parameterXml << "    <MidiCC>" << stateParameter->mappedControlIndex << "</MidiCC>\n";
         }
 #endif
 

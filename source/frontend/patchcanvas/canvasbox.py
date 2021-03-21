@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # PatchBay Canvas engine using QGraphicsView/Scene
-# Copyright (C) 2010-2019 Filipe Coelho <falktx@falktx.com>
+# Copyright (C) 2010-2020 Filipe Coelho <falktx@falktx.com>
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License as
@@ -19,12 +19,17 @@
 # ------------------------------------------------------------------------------------------------------------
 # Imports (Global)
 
-from sip import voidptr
-from struct import pack
-
-from PyQt5.QtCore import qCritical, Qt, QPointF, QRectF, QTimer
+from PyQt5.QtCore import pyqtSignal, pyqtSlot, qCritical, QT_VERSION, Qt, QPointF, QRectF, QTimer
 from PyQt5.QtGui import QCursor, QFont, QFontMetrics, QImage, QLinearGradient, QPainter, QPen
-from PyQt5.QtWidgets import QGraphicsItem, QMenu
+from PyQt5.QtWidgets import QGraphicsItem, QGraphicsObject, QMenu
+
+# ------------------------------------------------------------------------------------------------------------
+# Backwards-compatible horizontalAdvance/width call, depending on Qt version
+
+def fontHorizontalAdvance(font, string):
+    if QT_VERSION >= 0x51100:
+        return QFontMetrics(font).horizontalAdvance(string)
+    return QFontMetrics(font).width(string)
 
 # ------------------------------------------------------------------------------------------------------------
 # Imports (Custom)
@@ -75,13 +80,17 @@ class cb_line_t(object):
 
 # ------------------------------------------------------------------------------------------------------------
 
-class CanvasBox(QGraphicsItem):
+class CanvasBox(QGraphicsObject):
+    # signals
+    positionChanged = pyqtSignal(int, bool, int, int)
+
+    # enums
     INLINE_DISPLAY_DISABLED = 0
     INLINE_DISPLAY_ENABLED  = 1
     INLINE_DISPLAY_CACHED   = 2
 
     def __init__(self, group_id, group_name, icon, parent=None):
-        QGraphicsItem.__init__(self)
+        QGraphicsObject.__init__(self)
         self.setParentItem(parent)
 
         # Save Variables, useful for later
@@ -106,9 +115,10 @@ class CanvasBox(QGraphicsItem):
         self.m_cursor_moving = False
         self.m_forced_split = False
         self.m_mouse_down = False
-        self.m_inline_data = None
         self.m_inline_image = None
         self.m_inline_scaling = 1.0
+        self.m_inline_first = True
+        self.m_will_signal_pos_change = False
 
         self.m_port_list_ids = []
         self.m_connection_lines = []
@@ -133,7 +143,8 @@ class CanvasBox(QGraphicsItem):
         # Shadow
         # FIXME FX on top of graphic items make them lose high-dpi
         # See https://bugreports.qt.io/browse/QTBUG-65035
-        if options.eyecandy and canvas.scene.getDevicePixelRatioF() == 1.0:
+        # FIXME Random crashes while using Qt's drop shadow, let's just disable it
+        if False and options.eyecandy and canvas.scene.getDevicePixelRatioF() == 1.0:
             self.shadow = CanvasBoxShadow(self.toGraphicsObject())
             self.shadow.setFakeParent(self)
             self.setGraphicsEffect(self.shadow)
@@ -151,6 +162,10 @@ class CanvasBox(QGraphicsItem):
             self.setAcceptHoverEvents(True)
 
         self.updatePositions()
+
+        self.visibleChanged.connect(self.slot_signalPositionChangedLater)
+        self.xChanged.connect(self.slot_signalPositionChangedLater)
+        self.yChanged.connect(self.slot_signalPositionChangedLater)
 
         canvas.scene.addItem(self)
         QTimer.singleShot(0, self.fixPos)
@@ -180,21 +195,18 @@ class CanvasBox(QGraphicsItem):
 
     def removeAsPlugin(self):
         #del self.m_inline_image
-        #self.m_inline_data = None
         #self.m_inline_image = None
         #self.m_inline_scaling = 1.0
 
         self.m_plugin_id = -1
         self.m_plugin_ui = False
-        #self.m_plugin_inline = self.INLINE_DISPLAY_DISABLED
+        self.m_plugin_inline = self.INLINE_DISPLAY_DISABLED
 
     def setAsPlugin(self, plugin_id, hasUI, hasInlineDisplay):
         if hasInlineDisplay and not options.inline_displays:
             hasInlineDisplay = False
 
         if not hasInlineDisplay:
-            del self.m_inline_image
-            self.m_inline_data = None
             self.m_inline_image = None
             self.m_inline_scaling = 1.0
 
@@ -216,7 +228,7 @@ class CanvasBox(QGraphicsItem):
         self.updatePositions()
 
     def setShadowOpacity(self, opacity):
-        if self.shadow:
+        if self.shadow is not None:
             self.shadow.setOpacity(opacity)
 
     def addPortFromGroup(self, port_id, port_mode, port_type, port_name, is_alternate):
@@ -224,7 +236,9 @@ class CanvasBox(QGraphicsItem):
             if options.auto_hide_groups:
                 if options.eyecandy == EYECANDY_FULL:
                     CanvasItemFX(self, True, False)
+                self.blockSignals(True)
                 self.setVisible(True)
+                self.blockSignals(False)
 
         new_widget = CanvasPort(self.m_group_id, port_id, port_name, port_mode, port_type, is_alternate, self)
 
@@ -256,7 +270,9 @@ class CanvasBox(QGraphicsItem):
                 if options.eyecandy == EYECANDY_FULL:
                     CanvasItemFX(self, False, False)
                 else:
+                    self.blockSignals(True)
                     self.setVisible(False)
+                    self.blockSignals(False)
 
     def addLineFromGroup(self, line, connection_id):
         new_cbline = cb_line_t(line, connection_id)
@@ -270,20 +286,24 @@ class CanvasBox(QGraphicsItem):
         qCritical("PatchCanvas::CanvasBox.removeLineFromGroup(%i) - unable to find line to remove" % connection_id)
 
     def checkItemPos(self):
-        if not canvas.size_rect.isNull():
-            pos = self.scenePos()
-            if not (canvas.size_rect.contains(pos) and
-                    canvas.size_rect.contains(pos + QPointF(self.p_width, self.p_height))):
-                if pos.x() < canvas.size_rect.x():
-                    self.setPos(canvas.size_rect.x(), pos.y())
-                elif pos.x() + self.p_width > canvas.size_rect.width():
-                    self.setPos(canvas.size_rect.width() - self.p_width, pos.y())
+        if canvas.size_rect.isNull():
+            return
 
-                pos = self.scenePos()
-                if pos.y() < canvas.size_rect.y():
-                    self.setPos(pos.x(), canvas.size_rect.y())
-                elif pos.y() + self.p_height > canvas.size_rect.height():
-                    self.setPos(pos.x(), canvas.size_rect.height() - self.p_height)
+        pos = self.scenePos()
+        if (canvas.size_rect.contains(pos) and
+            canvas.size_rect.contains(pos + QPointF(self.p_width, self.p_height))):
+            return
+
+        if pos.x() < canvas.size_rect.x():
+            self.setPos(canvas.size_rect.x(), pos.y())
+        elif pos.x() + self.p_width > canvas.size_rect.width():
+            self.setPos(canvas.size_rect.width() - self.p_width, pos.y())
+
+        pos = self.scenePos()
+        if pos.y() < canvas.size_rect.y():
+            self.setPos(pos.x(), canvas.size_rect.y())
+        elif pos.y() + self.p_height > canvas.size_rect.height():
+            self.setPos(pos.x(), canvas.size_rect.height() - self.p_height)
 
     def removeIconFromScene(self):
         if self.icon_svg is None:
@@ -298,8 +318,8 @@ class CanvasBox(QGraphicsItem):
         self.prepareGeometryChange()
 
         # Check Text Name size
-        app_name_size = QFontMetrics(self.m_font_name).width(self.m_group_name) + 30
-        self.p_width = max(200 if self.m_plugin_inline != self.INLINE_DISPLAY_DISABLED else 50, app_name_size)
+        app_name_size = fontHorizontalAdvance(self.m_font_name, self.m_group_name) + 30
+        self.p_width = max(50, app_name_size)
 
         # Get Port List
         port_list = []
@@ -316,7 +336,7 @@ class CanvasBox(QGraphicsItem):
             port_spacing = canvas.theme.port_height + canvas.theme.port_spacing
 
             # Get Max Box Width, vertical ports re-positioning
-            port_types = [PORT_TYPE_AUDIO_JACK, PORT_TYPE_MIDI_JACK, PORT_TYPE_MIDI_ALSA, PORT_TYPE_PARAMETER]
+            port_types = (PORT_TYPE_AUDIO_JACK, PORT_TYPE_MIDI_JACK, PORT_TYPE_MIDI_ALSA, PORT_TYPE_PARAMETER)
             last_in_type = last_out_type = PORT_TYPE_NULL
             last_in_pos = last_out_pos = canvas.theme.box_header_height + canvas.theme.box_header_spacing
 
@@ -325,7 +345,7 @@ class CanvasBox(QGraphicsItem):
                     if port.port_type != port_type:
                         continue
 
-                    size = QFontMetrics(self.m_font_port).width(port.port_name)
+                    size = fontHorizontalAdvance(self.m_font_port, port.port_name)
 
                     if port.port_mode == PORT_MODE_INPUT:
                         max_in_width = max(max_in_width, size)
@@ -345,32 +365,37 @@ class CanvasBox(QGraphicsItem):
                         port.widget.setY(last_out_pos)
                         last_out_pos += port_spacing
 
-            self.p_width = max(self.p_width, (100 if self.m_plugin_inline != self.INLINE_DISPLAY_DISABLED else 30) + max_in_width + max_out_width)
-            self.p_width_in = max_in_width
+            self.p_width     = max(self.p_width, 30 + max_in_width + max_out_width)
+            self.p_width_in  = max_in_width
             self.p_width_out = max_out_width
 
-            #if self.m_plugin_inline:
-                #self.p_width += 10
-
-            # Horizontal ports re-positioning
-            inX = canvas.theme.port_offset
-            outX = self.p_width - max_out_width - canvas.theme.port_offset - 12
-            for port_type in port_types:
-                for port in port_list:
-                    if port.port_mode == PORT_MODE_INPUT:
-                        port.widget.setX(inX)
-                        port.widget.setPortWidth(max_in_width)
-
-                    elif port.port_mode == PORT_MODE_OUTPUT:
-                        port.widget.setX(outX)
-                        port.widget.setPortWidth(max_out_width)
-
-            self.p_height = max(last_in_pos, last_out_pos)
+            self.p_height  = max(last_in_pos, last_out_pos)
             self.p_height += max(canvas.theme.port_spacing, canvas.theme.port_spacingT) - canvas.theme.port_spacing
-            self.p_height += canvas.theme.box_pen.widthF()
+            self.p_height += canvas.theme.box_pen.width()
+
+            self.repositionPorts(port_list)
 
         self.repaintLines(True)
         self.update()
+
+    def repositionPorts(self, port_list = None):
+        if port_list is None:
+            port_list = []
+            for port in canvas.port_list:
+                if port.group_id == self.m_group_id and port.port_id in self.m_port_list_ids:
+                    port_list.append(port)
+
+        # Horizontal ports re-positioning
+        inX = canvas.theme.port_offset
+        outX = self.p_width - self.p_width_out - canvas.theme.port_offset - 12
+        for port in port_list:
+            if port.port_mode == PORT_MODE_INPUT:
+                port.widget.setX(inX)
+                port.widget.setPortWidth(self.p_width_in)
+
+            elif port.port_mode == PORT_MODE_OUTPUT:
+                port.widget.setX(outX)
+                port.widget.setPortWidth(self.p_width_out)
 
     def repaintLines(self, forced=False):
         if self.pos() != self.m_last_pos or forced:
@@ -388,6 +413,17 @@ class CanvasBox(QGraphicsItem):
 
             connection.widget.setZValue(z_value)
 
+    def triggerSignalPositionChanged(self):
+        self.positionChanged.emit(self.m_group_id, self.m_splitted, self.x(), self.y())
+        self.m_will_signal_pos_change = False
+
+    @pyqtSlot()
+    def slot_signalPositionChangedLater(self):
+        if self.m_will_signal_pos_change:
+            return
+        self.m_will_signal_pos_change = True
+        QTimer.singleShot(0, self.triggerSignalPositionChanged)
+
     def type(self):
         return CanvasBoxType
 
@@ -403,6 +439,7 @@ class CanvasBox(QGraphicsItem):
             PORT_TYPE_AUDIO_JACK: [],
             PORT_TYPE_MIDI_JACK: [],
             PORT_TYPE_MIDI_ALSA: [],
+            PORT_TYPE_PARAMETER: [],
         }
         for port in canvas.port_list:
             if port.group_id != self.m_group_id:
@@ -426,6 +463,7 @@ class CanvasBox(QGraphicsItem):
                     PORT_TYPE_AUDIO_JACK: [],
                     PORT_TYPE_MIDI_JACK: [],
                     PORT_TYPE_MIDI_ALSA: [],
+                    PORT_TYPE_PARAMETER: [],
                 }
 
                 for port in canvas.port_list:
@@ -567,14 +605,14 @@ class CanvasBox(QGraphicsItem):
             event.accept()
             canvas.callback(ACTION_PLUGIN_REMOVE, self.m_plugin_id, 0, "")
             return
-        QGraphicsItem.keyPressEvent(self, event)
+        QGraphicsObject.keyPressEvent(self, event)
 
     def hoverEnterEvent(self, event):
         if options.auto_select_items:
             if len(canvas.scene.selectedItems()) > 0:
                 canvas.scene.clearSelection()
             self.setSelected(True)
-        QGraphicsItem.hoverEnterEvent(self, event)
+        QGraphicsObject.hoverEnterEvent(self, event)
 
     def mouseDoubleClickEvent(self, event):
         if self.m_plugin_id >= 0:
@@ -582,9 +620,13 @@ class CanvasBox(QGraphicsItem):
             canvas.callback(ACTION_PLUGIN_SHOW_UI if self.m_plugin_ui else ACTION_PLUGIN_EDIT, self.m_plugin_id, 0, "")
             return
 
-        QGraphicsItem.mouseDoubleClickEvent(self, event)
+        QGraphicsObject.mouseDoubleClickEvent(self, event)
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.MiddleButton or event.source() == Qt.MouseEventSynthesizedByApplication:
+            event.ignore()
+            return
+
         canvas.last_z_value += 1
         self.setZValue(canvas.last_z_value)
         self.resetLinesZValue()
@@ -609,7 +651,7 @@ class CanvasBox(QGraphicsItem):
         else:
             self.m_mouse_down = False
 
-        QGraphicsItem.mousePressEvent(self, event)
+        QGraphicsObject.mousePressEvent(self, event)
 
     def mouseMoveEvent(self, event):
         if self.m_mouse_down:
@@ -617,7 +659,7 @@ class CanvasBox(QGraphicsItem):
                 self.setCursor(QCursor(Qt.SizeAllCursor))
                 self.m_cursor_moving = True
             self.repaintLines()
-        QGraphicsItem.mouseMoveEvent(self, event)
+        QGraphicsObject.mouseMoveEvent(self, event)
 
     def mouseReleaseEvent(self, event):
         if self.m_cursor_moving:
@@ -625,11 +667,13 @@ class CanvasBox(QGraphicsItem):
             QTimer.singleShot(0, self.fixPos)
         self.m_mouse_down = False
         self.m_cursor_moving = False
-        QGraphicsItem.mouseReleaseEvent(self, event)
+        QGraphicsObject.mouseReleaseEvent(self, event)
 
     def fixPos(self):
+        self.blockSignals(True)
         self.setX(round(self.x()))
         self.setY(round(self.y()))
+        self.blockSignals(False)
 
     def boundingRect(self):
         return QRectF(0, 0, self.p_width, self.p_height)
@@ -683,7 +727,7 @@ class CanvasBox(QGraphicsItem):
         if canvas.theme.box_use_icon:
             textPos = QPointF(25, canvas.theme.box_text_ypos)
         else:
-            appNameSize = QFontMetrics(self.m_font_name).width(self.m_group_name)
+            appNameSize = fontHorizontalAdvance(self.m_font_name, self.m_group_name)
             rem = self.p_width - appNameSize
             textPos = QPointF(rem/2, canvas.theme.box_text_ypos)
 
@@ -699,24 +743,36 @@ class CanvasBox(QGraphicsItem):
         if not options.inline_displays:
             return
 
-        inwidth  = self.p_width - self.p_width_in - self.p_width_out - 16
-        inheight = self.p_height - canvas.theme.box_header_height - canvas.theme.box_header_spacing - canvas.theme.port_spacing - 3
+        inwidth  = self.p_width - 16 - self.p_width_in - self.p_width_out
+        inheight = self.p_height - 3 - canvas.theme.box_header_height - canvas.theme.box_header_spacing - canvas.theme.port_spacing
+
         scaling  = canvas.scene.getScaleFactor() * canvas.scene.getDevicePixelRatioF()
 
         if self.m_plugin_id >= 0 and self.m_plugin_id <= MAX_PLUGIN_ID_ALLOWED and (
            self.m_plugin_inline == self.INLINE_DISPLAY_ENABLED or self.m_inline_scaling != scaling):
-            size = "%i:%i" % (int(inwidth*scaling), int(inheight*scaling))
+            if self.m_inline_first:
+                size = "%i:%i" % (int(50*scaling), int(50*scaling))
+            else:
+                size = "%i:%i" % (int(inwidth*scaling), int(inheight*scaling))
             data = canvas.callback(ACTION_INLINE_DISPLAY, self.m_plugin_id, 0, size)
             if data is None:
                 return
 
-            # invalidate old image first
-            del self.m_inline_image
-
-            self.m_inline_data = pack("%iB" % (data['height'] * data['stride']), *data['data'])
-            self.m_inline_image = QImage(voidptr(self.m_inline_data), data['width'], data['height'], data['stride'], QImage.Format_ARGB32)
+            self.m_inline_image   = QImage(data['data'], data['width'], data['height'], data['stride'],
+                                           QImage.Format_ARGB32)
             self.m_inline_scaling = scaling
-            self.m_plugin_inline = self.INLINE_DISPLAY_CACHED
+            self.m_plugin_inline  = self.INLINE_DISPLAY_CACHED
+
+            # make room for inline display, in a square shape
+            if self.m_inline_first:
+                self.m_inline_first = False
+                aspectRatio   = data['width'] / data['height']
+                self.p_height = int(max(50*scaling, self.p_height))
+                self.p_width += int(max(0, min((80 - 14)*scaling, (inheight-inwidth) * aspectRatio * scaling)))
+                self.repositionPorts()
+                self.repaintLines(True)
+                self.update()
+                return
 
         if self.m_inline_image is None:
             print("ERROR: inline display image is None for", self.m_plugin_id, self.m_group_name)

@@ -35,8 +35,11 @@ struct CarlaStateSave {
         const char* symbol;
         float       value;
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
-        uint8_t     midiChannel;
-        int16_t     midiCC;
+        int16_t mappedControlIndex;
+        uint8_t midiChannel;
+        bool    mappedRangeValid;
+        float   mappedMinimum;
+        float   mappedMaximum;
 #endif
 
         Parameter() noexcept;
@@ -69,6 +72,9 @@ struct CarlaStateSave {
     const char* binary;
     int64_t     uniqueId;
     uint        options;
+
+    // saved during clone, rename or similar
+    bool temporary;
 
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
     bool   active;

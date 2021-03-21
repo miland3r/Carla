@@ -25,11 +25,16 @@
 
 #include "water/files/File.h"
 
+#ifdef CARLA_OS_MAC
+# include "CarlaMacUtils.hpp"
+#endif
+
 #include <string>
 #include <vector>
 
 #define URI_CARLA_ATOM_WORKER_IN   "http://kxstudio.sf.net/ns/carla/atomWorkerIn"
 #define URI_CARLA_ATOM_WORKER_RESP "http://kxstudio.sf.net/ns/carla/atomWorkerResp"
+#define URI_CARLA_PARAMETER_CHANGE "http://kxstudio.sf.net/ns/carla/parameterChange"
 
 using water::File;
 
@@ -40,6 +45,7 @@ CARLA_BRIDGE_UI_START_NAMESPACE
 static double gInitialSampleRate = 44100.0;
 static const char* const kNullWindowTitle = "TestUI";
 static const uint32_t kNullWindowTitleSize = 6;
+static const char* const kUnmapFallback = "urn:null";
 
 // LV2 URI Map Ids
 enum CarlaLv2URIDs {
@@ -76,7 +82,8 @@ enum CarlaLv2URIDs {
     kUridLogTrace,
     kUridLogWarning,
     kUridPatchSet,
-    kUridPatchPoperty,
+    kUridPatchProperty,
+    kUridPatchSubject,
     kUridPatchValue,
     // time base type
     kUridTimePosition,
@@ -93,11 +100,17 @@ enum CarlaLv2URIDs {
     kUridTimeTicksPerBeat,
     kUridMidiEvent,
     kUridParamSampleRate,
+    // ui stuff
+    kUridBackgroundColor,
+    kUridForegroundColor,
     kUridScaleFactor,
     kUridWindowTitle,
+    // custom carla props
     kUridCarlaAtomWorkerIn,
     kUridCarlaAtomWorkerResp,
+    kUridCarlaParameterChange,
     kUridCarlaTransientWindowId,
+    // count
     kUridCount
 };
 
@@ -107,6 +120,7 @@ enum CarlaLv2Features {
     kFeatureIdLogs = 0,
     kFeatureIdOptions,
     kFeatureIdPrograms,
+    kFeatureIdStateFreePath,
     kFeatureIdStateMakePath,
     kFeatureIdStateMapPath,
     kFeatureIdUriMap,
@@ -120,6 +134,7 @@ enum CarlaLv2Features {
     kFeatureIdUiParent,
     kFeatureIdUiPortMap,
     kFeatureIdUiPortSubscribe,
+    kFeatureIdUiRequestValue,
     kFeatureIdUiResize,
     kFeatureIdUiTouch,
     kFeatureCount
@@ -131,6 +146,8 @@ struct Lv2PluginOptions {
     enum OptIndex {
         SampleRate,
         TransientWinId,
+        BackgroundColor,
+        ForegroundColor,
         ScaleFactor,
         WindowTitle,
         Null,
@@ -139,12 +156,16 @@ struct Lv2PluginOptions {
 
     float sampleRate;
     int64_t transientWinId;
+    uint32_t bgColor;
+    uint32_t fgColor;
     float uiScale;
     LV2_Options_Option opts[Count];
 
     Lv2PluginOptions() noexcept
         : sampleRate(static_cast<float>(gInitialSampleRate)),
           transientWinId(0),
+          bgColor(0x000000ff),
+          fgColor(0xffffffff),
           uiScale(1.0f)
     {
         LV2_Options_Option& optSampleRate(opts[SampleRate]);
@@ -154,6 +175,22 @@ struct Lv2PluginOptions {
         optSampleRate.size    = sizeof(float);
         optSampleRate.type    = kUridAtomFloat;
         optSampleRate.value   = &sampleRate;
+
+        LV2_Options_Option& optBackgroundColor(opts[BackgroundColor]);
+        optBackgroundColor.context = LV2_OPTIONS_INSTANCE;
+        optBackgroundColor.subject = 0;
+        optBackgroundColor.key     = kUridBackgroundColor;
+        optBackgroundColor.size    = sizeof(int32_t);
+        optBackgroundColor.type    = kUridAtomInt;
+        optBackgroundColor.value   = &bgColor;
+
+        LV2_Options_Option& optForegroundColor(opts[ForegroundColor]);
+        optForegroundColor.context = LV2_OPTIONS_INSTANCE;
+        optForegroundColor.subject = 0;
+        optForegroundColor.key     = kUridForegroundColor;
+        optForegroundColor.size    = sizeof(int32_t);
+        optForegroundColor.type    = kUridAtomInt;
+        optForegroundColor.value   = &fgColor;
 
         LV2_Options_Option& optScaleFactor(opts[ScaleFactor]);
         optScaleFactor.context = LV2_OPTIONS_INSTANCE;
@@ -189,6 +226,45 @@ struct Lv2PluginOptions {
     }
 };
 
+// -------------------------------------------------------------------------------------------------------------------
+
+static void initAtomForge(LV2_Atom_Forge& atomForge) noexcept
+{
+    carla_zeroStruct(atomForge);
+
+    atomForge.Bool     = kUridAtomBool;
+    atomForge.Chunk    = kUridAtomChunk;
+    atomForge.Double   = kUridAtomDouble;
+    atomForge.Float    = kUridAtomFloat;
+    atomForge.Int      = kUridAtomInt;
+    atomForge.Literal  = kUridAtomLiteral;
+    atomForge.Long     = kUridAtomLong;
+    atomForge.Object   = kUridAtomObject;
+    atomForge.Path     = kUridAtomPath;
+    atomForge.Property = kUridAtomProperty;
+    atomForge.Sequence = kUridAtomSequence;
+    atomForge.String   = kUridAtomString;
+    atomForge.Tuple    = kUridAtomTuple;
+    atomForge.URI      = kUridAtomURI;
+    atomForge.URID     = kUridAtomURID;
+    atomForge.Vector   = kUridAtomVector;
+
+#if defined(__clang__)
+# pragma clang diagnostic push
+# pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#elif defined(__GNUC__) && (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6))
+# pragma GCC diagnostic push
+# pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    atomForge.Blank    = kUridAtomBlank;
+    atomForge.Resource = kUridAtomResource;
+#if defined(__clang__)
+# pragma clang diagnostic pop
+#elif defined(__GNUC__) && (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6))
+# pragma GCC diagnostic pop
+#endif
+}
+
 // --------------------------------------------------------------------------------------------------------------------
 
 class CarlaLv2Client : public CarlaBridgeFormat
@@ -219,14 +295,18 @@ public:
         logFt->printf            = carla_lv2_log_printf;
         logFt->vprintf           = carla_lv2_log_vprintf;
 
+        LV2_State_Free_Path* const stateFreePathFt = new LV2_State_Free_Path;
+        stateFreePathFt->handle                    = this;
+        stateFreePathFt->free_path                 = carla_lv2_state_free_path;
+
         LV2_State_Make_Path* const stateMakePathFt = new LV2_State_Make_Path;
         stateMakePathFt->handle                    = this;
-        stateMakePathFt->path                      = carla_lv2_state_make_path;
+        stateMakePathFt->path                      = carla_lv2_state_make_path_tmp;
 
         LV2_State_Map_Path* const stateMapPathFt = new LV2_State_Map_Path;
         stateMapPathFt->handle                   = this;
-        stateMapPathFt->abstract_path            = carla_lv2_state_map_abstract_path;
-        stateMapPathFt->absolute_path            = carla_lv2_state_map_absolute_path;
+        stateMapPathFt->abstract_path            = carla_lv2_state_map_abstract_path_tmp;
+        stateMapPathFt->absolute_path            = carla_lv2_state_map_absolute_path_tmp;
 
         LV2_Programs_Host* const programsFt = new LV2_Programs_Host;
         programsFt->handle                  = this;
@@ -248,6 +328,10 @@ public:
         uiPortMapFt->handle               = this;
         uiPortMapFt->port_index           = carla_lv2_ui_port_map;
 
+        LV2UI_Request_Value* const uiRequestValueFt = new LV2UI_Request_Value;
+        uiRequestValueFt->handle                    = this;
+        uiRequestValueFt->request                   = carla_lv2_ui_request_value;
+
         LV2UI_Resize* const uiResizeFt    = new LV2UI_Resize;
         uiResizeFt->handle                = this;
         uiResizeFt->ui_resize             = carla_lv2_ui_resize;
@@ -266,6 +350,9 @@ public:
 
         fFeatures[kFeatureIdPrograms]->URI   = LV2_PROGRAMS__Host;
         fFeatures[kFeatureIdPrograms]->data  = programsFt;
+
+        fFeatures[kFeatureIdStateFreePath]->URI  = LV2_STATE__freePath;
+        fFeatures[kFeatureIdStateFreePath]->data = stateFreePathFt;
 
         fFeatures[kFeatureIdStateMakePath]->URI  = LV2_STATE__makePath;
         fFeatures[kFeatureIdStateMakePath]->data = stateMakePathFt;
@@ -306,6 +393,9 @@ public:
         fFeatures[kFeatureIdUiPortSubscribe]->URI  = LV2_UI__portSubscribe;
         fFeatures[kFeatureIdUiPortSubscribe]->data = nullptr;
 
+        fFeatures[kFeatureIdUiRequestValue]->URI  = LV2_UI__requestValue;
+        fFeatures[kFeatureIdUiRequestValue]->data = uiRequestValueFt;
+
         fFeatures[kFeatureIdUiResize]->URI  = LV2_UI__resize;
         fFeatures[kFeatureIdUiResize]->data = uiResizeFt;
 
@@ -330,6 +420,7 @@ public:
         fRdfUiDescriptor = nullptr;
 
         delete (LV2_Log_Log*)fFeatures[kFeatureIdLogs]->data;
+        delete (LV2_State_Free_Path*)fFeatures[kFeatureIdStateFreePath]->data;
         delete (LV2_State_Make_Path*)fFeatures[kFeatureIdStateMakePath]->data;
         delete (LV2_State_Map_Path*)fFeatures[kFeatureIdStateMapPath]->data;
         delete (LV2_Programs_Host*)fFeatures[kFeatureIdPrograms]->data;
@@ -337,6 +428,7 @@ public:
         delete (LV2_URID_Map*)fFeatures[kFeatureIdUridMap]->data;
         delete (LV2_URID_Unmap*)fFeatures[kFeatureIdUridUnmap]->data;
         delete (LV2UI_Port_Map*)fFeatures[kFeatureIdUiPortMap]->data;
+        delete (LV2UI_Request_Value*)fFeatures[kFeatureIdUiRequestValue]->data;
         delete (LV2UI_Resize*)fFeatures[kFeatureIdUiResize]->data;
 
         for (uint32_t i=0; i < kFeatureCount; ++i)
@@ -426,6 +518,11 @@ public:
 
         // ------------------------------------------------------------------------------------------------------------
         // open DLL
+
+#ifdef CARLA_OS_MAC
+        // Binary might be in quarentine due to Apple stupid notarization rules, let's remove that if possible
+        CarlaBackend::removeFileFromQuarantine(fRdfUiDescriptor->Binary);
+#endif
 
         if (! libOpen(fRdfUiDescriptor->Binary))
         {
@@ -541,6 +638,80 @@ public:
         fDescriptor->port_event(fHandle, index, sizeof(float), kUridNull, &value);
     }
 
+    void dspParameterChanged(const char* const uri, const float value) override
+    {
+        CARLA_SAFE_ASSERT_RETURN(fHandle != nullptr,)
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr,);
+
+        if (fDescriptor->port_event == nullptr)
+            return;
+
+        uint32_t parameterId = UINT32_MAX;
+
+        for (uint32_t i=0; i < fRdfDescriptor->ParameterCount; ++i)
+        {
+            const LV2_RDF_Parameter& rdfParam(fRdfDescriptor->Parameters[i]);
+
+            if (std::strcmp(rdfParam.URI, uri) == 0)
+            {
+                parameterId = i;
+                break;
+            }
+        }
+
+        if (parameterId == UINT32_MAX)
+            return;
+
+        uint8_t atomBuf[256];
+        LV2_Atom_Forge atomForge;
+        initAtomForge(atomForge);
+        lv2_atom_forge_set_buffer(&atomForge, atomBuf, sizeof(atomBuf));
+
+        LV2_Atom_Forge_Frame forgeFrame;
+        lv2_atom_forge_object(&atomForge, &forgeFrame, kUridNull, kUridPatchSet);
+
+        lv2_atom_forge_key(&atomForge, kUridCarlaParameterChange);
+        lv2_atom_forge_bool(&atomForge, true);
+
+        lv2_atom_forge_key(&atomForge, kUridPatchProperty);
+        lv2_atom_forge_urid(&atomForge, getCustomURID(uri));
+
+        lv2_atom_forge_key(&atomForge, kUridPatchValue);
+
+        switch (fRdfDescriptor->Parameters[parameterId].Type)
+        {
+        case LV2_PARAMETER_TYPE_BOOL:
+            lv2_atom_forge_bool(&atomForge, value > 0.5f);
+            break;
+        case LV2_PARAMETER_TYPE_INT:
+            lv2_atom_forge_int(&atomForge, static_cast<int32_t>(value + 0.5f));
+            break;
+        case LV2_PARAMETER_TYPE_LONG:
+            lv2_atom_forge_long(&atomForge, static_cast<int64_t>(value + 0.5f));
+            break;
+        case LV2_PARAMETER_TYPE_FLOAT:
+            lv2_atom_forge_float(&atomForge, value);
+            break;
+        case LV2_PARAMETER_TYPE_DOUBLE:
+            lv2_atom_forge_double(&atomForge, value);
+            break;
+        default:
+            carla_stderr2("dspParameterChanged called for invalid parameter, abort!");
+            return;
+        }
+
+        lv2_atom_forge_pop(&atomForge, &forgeFrame);
+
+        LV2_Atom* const atom((LV2_Atom*)atomBuf);
+        CARLA_SAFE_ASSERT(atom->size < sizeof(atomBuf));
+
+        fDescriptor->port_event(fHandle,
+                                fControlDesignatedPort,
+                                lv2_atom_total_size(atom),
+                                kUridAtomTransferEvent,
+                                atom);
+    }
+
     void dspProgramChanged(const uint32_t index) override
     {
         carla_stderr2("dspProgramChanged(%i) - not handled", index);
@@ -598,19 +769,14 @@ public:
         fCustomURIDs.push_back(uri);
     }
 
-    void uiOptionsChanged(const double sampleRate, const float uiScale,
-                          const bool useTheme, const bool useThemeColors,
-                          const char* const windowTitle, const uintptr_t transientWindowId) override
+    void uiOptionsChanged(const BridgeFormatOptions& opts) override
     {
-        carla_debug("CarlaLv2Client::uiOptionsChanged(%f, %f, %s, %s, \"%s\", " P_UINTPTR ")",
-                    sampleRate, static_cast<double>(uiScale),
-                    bool2str(useTheme), bool2str(useThemeColors),
-                    windowTitle, transientWindowId);
+        carla_debug("CarlaLv2Client::uiOptionsChanged()");
 
         // ------------------------------------------------------------------------------------------------------------
         // sample rate
 
-        const float sampleRatef = static_cast<float>(sampleRate);
+        const float sampleRatef = static_cast<float>(opts.sampleRate);
 
         if (carla_isNotEqual(fLv2Options.sampleRate, sampleRatef))
         {
@@ -634,15 +800,17 @@ public:
         }
 
         // ------------------------------------------------------------------------------------------------------------
-        // ui scale
+        // ui colors and scale
 
-        fLv2Options.uiScale = uiScale;
+        fLv2Options.bgColor = opts.bgColor;
+        fLv2Options.fgColor = opts.fgColor;
+        fLv2Options.uiScale = opts.uiScale;
 
         // ------------------------------------------------------------------------------------------------------------
         // window title
 
-        if (windowTitle != nullptr)
-            fUiOptions.windowTitle = windowTitle;
+        if (opts.windowTitle != nullptr)
+            fUiOptions.windowTitle = opts.windowTitle;
         else
             fUiOptions.windowTitle.clear();
 
@@ -652,14 +820,14 @@ public:
         // ------------------------------------------------------------------------------------------------------------
         // transient win id
 
-        fLv2Options.transientWinId = static_cast<int64_t>(transientWindowId);
-        fUiOptions.transientWindowId = transientWindowId;
+        fLv2Options.transientWinId = static_cast<int64_t>(opts.transientWindowId);
+        fUiOptions.transientWindowId = opts.transientWindowId;
 
         // ------------------------------------------------------------------------------------------------------------
         // other
 
-        fUiOptions.useTheme       = useTheme;
-        fUiOptions.useThemeColors = useThemeColors;
+        fUiOptions.useTheme       = opts.useTheme;
+        fUiOptions.useThemeColors = opts.useThemeColors;
     }
 
     void uiResized(const uint width, const uint height) override
@@ -699,9 +867,8 @@ public:
 
     const char* getCustomURIDString(const LV2_URID urid) const noexcept
     {
-        static const char* const sFallback = "urn:null";
-        CARLA_SAFE_ASSERT_RETURN(urid != kUridNull, sFallback);
-        CARLA_SAFE_ASSERT_RETURN(urid < fCustomURIDs.size(), sFallback);
+        CARLA_SAFE_ASSERT_RETURN(urid != kUridNull, kUnmapFallback);
+        CARLA_SAFE_ASSERT_RETURN(urid < fCustomURIDs.size(), kUnmapFallback);
         carla_debug("CarlaLv2Client::getCustomURIDString(%i)", urid);
 
         return fCustomURIDs[urid].c_str();
@@ -727,6 +894,91 @@ public:
         }
 
         return LV2UI_INVALID_PORT_INDEX;
+    }
+
+    // ----------------------------------------------------------------------------------------------------------------
+
+    char* handleStateMapToAbstractPath(const char* const absolutePath)
+    {
+        // may already be an abstract path
+        if (! File::isAbsolutePath(absolutePath))
+            return strdup(absolutePath);
+
+        return strdup(File(absolutePath).getRelativePathFrom(File::getCurrentWorkingDirectory()).toRawUTF8());
+    }
+
+    char* handleStateMapToAbsolutePath(const bool createDir, const char* const abstractPath)
+    {
+        File target;
+
+        if (File::isAbsolutePath(abstractPath))
+        {
+            target = abstractPath;
+        }
+        else
+        {
+            target = File::getCurrentWorkingDirectory().getChildFile(abstractPath);
+        }
+
+        if (createDir)
+        {
+            File dir(target.getParentDirectory());
+            if (! dir.exists())
+                dir.createDirectory();
+        }
+
+        return strdup(target.getFullPathName().toRawUTF8());
+    }
+
+    // ----------------------------------------------------------------------------------------------------------------
+
+    LV2UI_Request_Value_Status handleUiRequestValue(const LV2_URID key,
+                                                    const LV2_URID type,
+                                                    const LV2_Feature* const* features)
+    {
+        CARLA_SAFE_ASSERT_RETURN(fToolkit != nullptr, LV2UI_REQUEST_VALUE_ERR_UNKNOWN);
+        carla_debug("CarlaLv2Client::handleUIRequestValue(%u, %u, %p)", key, type, features);
+
+        if (type != kUridAtomPath)
+            return LV2UI_REQUEST_VALUE_ERR_UNSUPPORTED;
+
+        const char* const uri = getCustomURIDString(key);
+        CARLA_SAFE_ASSERT_RETURN(uri != nullptr && uri != kUnmapFallback, LV2UI_REQUEST_VALUE_ERR_UNKNOWN);
+
+        // TODO check if a file browser is already open
+
+        for (uint32_t i=0; i < fRdfDescriptor->ParameterCount; ++i)
+        {
+            if (fRdfDescriptor->Parameters[i].Type != LV2_PARAMETER_TYPE_PATH)
+                continue;
+            if (std::strcmp(fRdfDescriptor->Parameters[i].URI, uri) != 0)
+                continue;
+
+            // TODO file browser filters, also label for title
+            if (isPipeRunning())
+            {
+                char tmpBuf[0xff];
+
+                const CarlaMutexLocker cml(getPipeLock());
+
+                writeMessage("requestvalue\n", 13);
+
+                std::snprintf(tmpBuf, 0xff-1, "%u\n", key);
+                tmpBuf[0xff-1] = '\0';
+                writeMessage(tmpBuf);
+
+                std::snprintf(tmpBuf, 0xff-1, "%u\n", type);
+                tmpBuf[0xff-1] = '\0';
+                writeMessage(tmpBuf);
+            }
+
+            return LV2UI_REQUEST_VALUE_SUCCESS;
+        }
+
+        return LV2UI_REQUEST_VALUE_ERR_UNSUPPORTED;
+
+        // may be unused
+        (void)features;
     }
 
     int handleUiResize(const int width, const int height)
@@ -889,49 +1141,39 @@ private:
     // ----------------------------------------------------------------------------------------------------------------
     // State Feature
 
-    static char* carla_lv2_state_make_path(LV2_State_Make_Path_Handle handle, const char* path)
+    static void carla_lv2_state_free_path(LV2_State_Free_Path_Handle handle, char* path)
+    {
+        CARLA_SAFE_ASSERT_RETURN(handle != nullptr,);
+        carla_debug("carla_lv2_state_free_path(%p, \"%s\")", handle, path);
+
+        std::free(path);
+    }
+
+    static char* carla_lv2_state_make_path_tmp(LV2_State_Make_Path_Handle handle, const char* path)
     {
         CARLA_SAFE_ASSERT_RETURN(handle != nullptr, nullptr);
         CARLA_SAFE_ASSERT_RETURN(path != nullptr && path[0] != '\0', nullptr);
-        carla_debug("carla_lv2_state_make_path(%p, \"%s\")", handle, path);
+        carla_debug("carla_lv2_state_make_path_tmp(%p, \"%s\")", handle, path);
 
-        File file;
-
-        if (File::isAbsolutePath(path))
-            file = File(path);
-        else
-            file = File::getCurrentWorkingDirectory().getChildFile(path);
-
-        file.getParentDirectory().createDirectory();
-
-        return strdup(file.getFullPathName().toRawUTF8());
+        return ((CarlaLv2Client*)handle)->handleStateMapToAbsolutePath(true, path);
     }
 
-    static char* carla_lv2_state_map_abstract_path(LV2_State_Map_Path_Handle handle, const char* absolute_path)
+    static char* carla_lv2_state_map_abstract_path_tmp(LV2_State_Map_Path_Handle handle, const char* absolute_path)
     {
-        CARLA_SAFE_ASSERT_RETURN(handle != nullptr, strdup(""));
-        CARLA_SAFE_ASSERT_RETURN(absolute_path != nullptr && absolute_path[0] != '\0', strdup(""));
-        carla_debug("carla_lv2_state_map_abstract_path(%p, \"%s\")", handle, absolute_path);
+        CARLA_SAFE_ASSERT_RETURN(handle != nullptr, nullptr);
+        CARLA_SAFE_ASSERT_RETURN(absolute_path != nullptr && absolute_path[0] != '\0', nullptr);
+        carla_debug("carla_lv2_state_map_abstract_path_tmp(%p, \"%s\")", handle, absolute_path);
 
-        // may already be an abstract path
-        if (! File::isAbsolutePath(absolute_path))
-            return strdup(absolute_path);
-
-        return strdup(File(absolute_path).getRelativePathFrom(File::getCurrentWorkingDirectory()).toRawUTF8());
+        return ((CarlaLv2Client*)handle)->handleStateMapToAbstractPath(absolute_path);
     }
 
-    static char* carla_lv2_state_map_absolute_path(LV2_State_Map_Path_Handle handle, const char* abstract_path)
+    static char* carla_lv2_state_map_absolute_path_tmp(LV2_State_Map_Path_Handle handle, const char* abstract_path)
     {
-        const char* const cwd(File::getCurrentWorkingDirectory().getFullPathName().toRawUTF8());
-        CARLA_SAFE_ASSERT_RETURN(handle != nullptr, strdup(cwd));
-        CARLA_SAFE_ASSERT_RETURN(abstract_path != nullptr && abstract_path[0] != '\0', strdup(cwd));
-        carla_debug("carla_lv2_state_map_absolute_path(%p, \"%s\")", handle, abstract_path);
+        CARLA_SAFE_ASSERT_RETURN(handle != nullptr, nullptr);
+        CARLA_SAFE_ASSERT_RETURN(abstract_path != nullptr && abstract_path[0] != '\0', nullptr);
+        carla_debug("carla_lv2_state_map_absolute_path_tmp(%p, \"%s\")", handle, abstract_path);
 
-        // may already be an absolute path
-        if (File::isAbsolutePath(abstract_path))
-            return strdup(abstract_path);
-
-        return strdup(File::getCurrentWorkingDirectory().getChildFile(abstract_path).getFullPathName().toRawUTF8());
+        return ((CarlaLv2Client*)handle)->handleStateMapToAbsolutePath(false, abstract_path);
     }
 
     // ----------------------------------------------------------------------------------------------------------------
@@ -1027,7 +1269,9 @@ private:
         if (std::strcmp(uri, LV2_PATCH__Set) == 0)
             return kUridPatchSet;
         if (std::strcmp(uri, LV2_PATCH__property) == 0)
-            return kUridPatchPoperty;
+            return kUridPatchProperty;
+        if (std::strcmp(uri, LV2_PATCH__subject) == 0)
+            return kUridPatchSubject;
         if (std::strcmp(uri, LV2_PATCH__value) == 0)
             return kUridPatchValue;
 
@@ -1060,6 +1304,10 @@ private:
             return kUridMidiEvent;
         if (std::strcmp(uri, LV2_PARAMETERS__sampleRate) == 0)
             return kUridParamSampleRate;
+        if (std::strcmp(uri, LV2_UI__backgroundColor) == 0)
+            return kUridBackgroundColor;
+        if (std::strcmp(uri, LV2_UI__foregroundColor) == 0)
+            return kUridForegroundColor;
         if (std::strcmp(uri, LV2_UI__scaleFactor) == 0)
             return kUridScaleFactor;
         if (std::strcmp(uri, LV2_UI__windowTitle) == 0)
@@ -1070,6 +1318,8 @@ private:
             return kUridCarlaAtomWorkerIn;
         if (std::strcmp(uri, URI_CARLA_ATOM_WORKER_RESP) == 0)
             return kUridCarlaAtomWorkerResp;
+        if (std::strcmp(uri, URI_CARLA_PARAMETER_CHANGE) == 0)
+            return kUridCarlaParameterChange;
         if (std::strcmp(uri, LV2_KXSTUDIO_PROPERTIES__TransientWindowId) == 0)
             return kUridCarlaTransientWindowId;
 
@@ -1156,8 +1406,10 @@ private:
         // Patch types
         case kUridPatchSet:
             return LV2_PATCH__Set;
-        case kUridPatchPoperty:
+        case kUridPatchProperty:
             return LV2_PATCH__property;
+        case kUridPatchSubject:
+            return LV2_PATCH__subject;
         case kUridPatchValue:
             return LV2_PATCH__value;
 
@@ -1190,6 +1442,10 @@ private:
             return LV2_MIDI__MidiEvent;
         case kUridParamSampleRate:
             return LV2_PARAMETERS__sampleRate;
+        case kUridBackgroundColor:
+            return LV2_UI__backgroundColor;
+        case kUridForegroundColor:
+            return LV2_UI__foregroundColor;
         case kUridScaleFactor:
             return LV2_UI__scaleFactor;
         case kUridWindowTitle:
@@ -1200,6 +1456,8 @@ private:
             return URI_CARLA_ATOM_WORKER_IN;
         case kUridCarlaAtomWorkerResp:
             return URI_CARLA_ATOM_WORKER_RESP;
+        case kUridCarlaParameterChange:
+            return URI_CARLA_PARAMETER_CHANGE;
         case kUridCarlaTransientWindowId:
             return LV2_KXSTUDIO_PROPERTIES__TransientWindowId;
         }
@@ -1217,6 +1475,20 @@ private:
         carla_debug("carla_lv2_ui_port_map(%p, \"%s\")", handle, symbol);
 
         return ((CarlaLv2Client*)handle)->handleUiPortMap(symbol);
+    }
+
+    // ----------------------------------------------------------------------------------------------------------------
+    // UI Request Parameter Feature
+
+    static LV2UI_Request_Value_Status carla_lv2_ui_request_value(LV2UI_Feature_Handle handle,
+                                                                 LV2_URID key,
+                                                                 LV2_URID type,
+                                                                 const LV2_Feature* const* features)
+    {
+        CARLA_SAFE_ASSERT_RETURN(handle != nullptr, LV2UI_REQUEST_VALUE_ERR_UNKNOWN);
+        carla_debug("carla_lv2_ui_request_value(%p, %u, %u, %p)", handle, key, type, features);
+
+        return ((CarlaLv2Client*)handle)->handleUiRequestValue(key, type, features);
     }
 
     // ----------------------------------------------------------------------------------------------------------------

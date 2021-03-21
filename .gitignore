@@ -29,8 +29,13 @@
 *.vst3
 
 # Binary dir
+bin/ansi-pedantic-test_*
+bin/carla
 bin/carla.lv2/carla-bridge-*
+bin/carla-database
+bin/carla-settings
 bin/jack/
+bin/resources/
 bin/styles/
 build/
 
@@ -48,8 +53,15 @@ qrc_resources.cpp
 
 # Python files
 *.pyc
+
+# Qt files
+*_rc.cpp
 *_rc.py
+ui_*.hpp
 ui_*.py
+
+# Translation files
+*.qm
 
 # Misc files
 *.aria2
@@ -123,6 +135,8 @@ source/dist/
 
 # python files in plugin resources dir
 bin/resources/*.py
+bin/resources/patchcanvas
+bin/resources/widgets
 source/native-plugins/resources/*.py
 
 # Other

@@ -20,6 +20,7 @@
 
 #include "CarlaPlugin.hpp"
 
+#include "CarlaJuceUtils.hpp"
 #include "CarlaLibUtils.hpp"
 #include "CarlaStateUtils.hpp"
 
@@ -43,6 +44,13 @@ CARLA_BACKEND_START_NAMESPACE
 // Maximum pre-allocated events for some plugin types
 
 const ushort kPluginMaxMidiEvents = 512;
+
+// -----------------------------------------------------------------------
+// Extra parameter hints, hidden from backend
+
+const uint PARAMETER_MAPPED_RANGES_SET = 0x10000;
+const uint PARAMETER_IS_STRICT_BOUNDS  = 0x20000;
+const uint PARAMETER_IS_TRIGGER        = 0x40000;
 
 // -----------------------------------------------------------------------
 // Extra plugin hints, hidden from backend
@@ -73,12 +81,12 @@ enum SpecialParameterType {
  */
 enum PluginPostRtEventType {
     kPluginPostRtEventNull = 0,
-    kPluginPostRtEventDebug,
-    kPluginPostRtEventParameterChange,   // param, (unused), (unused), value
-    kPluginPostRtEventProgramChange,     // index
-    kPluginPostRtEventMidiProgramChange, // index
-    kPluginPostRtEventNoteOn,            // channel, note, velo
-    kPluginPostRtEventNoteOff            // channel, note
+    kPluginPostRtEventParameterChange,
+    kPluginPostRtEventProgramChange,
+    kPluginPostRtEventMidiProgramChange,
+    kPluginPostRtEventNoteOn,
+    kPluginPostRtEventNoteOff,
+    kPluginPostRtEventMidiLearn
 };
 
 /*!
@@ -88,10 +96,25 @@ enum PluginPostRtEventType {
 struct PluginPostRtEvent {
     PluginPostRtEventType type;
     bool sendCallback;
-    int32_t value1;
-    int32_t value2;
-    int32_t value3;
-    float   valuef;
+    union {
+        struct {
+            int32_t index;
+            float value;
+        } parameter;
+        struct {
+            uint32_t index;
+        } program;
+        struct {
+            uint8_t channel;
+            uint8_t note;
+            uint8_t velocity;
+        } note;
+        struct {
+            uint32_t parameter;
+            uint8_t cc;
+            uint8_t channel;
+        } midiLearn;
+    };
 };
 
 // -----------------------------------------------------------------------
@@ -148,6 +171,9 @@ struct PluginCVData {
 struct PluginEventData {
     CarlaEngineEventPort* portIn;
     CarlaEngineEventPort* portOut;
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+    CarlaEngineCVSourcePorts* cvSourcePorts;
+#endif
 
     PluginEventData() noexcept;
     ~PluginEventData() noexcept;
@@ -170,6 +196,8 @@ struct PluginParameterData {
     void createNew(uint32_t newCount, bool withSpecial);
     void clear() noexcept;
     float getFixedValue(uint32_t parameterId, float value) const noexcept;
+    float getFinalUnnormalizedValue(uint32_t parameterId, float normalizedValue) const noexcept;
+    float getFinalValueWithMidiDelta(uint32_t parameterId, float value, int8_t delta) const noexcept;
 
     CARLA_DECLARE_NON_COPY_STRUCT(PluginParameterData)
 };
@@ -232,8 +260,9 @@ struct CarlaPlugin::ProtectedData {
     int8_t ctrlChannel;
     uint   extraHints;
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
-    uint   transientTryCounter;
-    bool   transientFirstTry;
+    int32_t midiLearnParameterIndex;
+    uint    transientTryCounter;
+    bool    transientFirstTry;
 #endif
 
     // data 1
@@ -256,6 +285,8 @@ struct CarlaPlugin::ProtectedData {
     CarlaMutex singleMutex; // small lock used only in processSingle()
 
     CarlaStateSave stateSave;
+
+    CarlaString uiTitle;
 
     struct ExternalNotes {
         CarlaMutex mutex;
@@ -295,25 +326,40 @@ struct CarlaPlugin::ProtectedData {
         ~PostRtEvents() noexcept;
         void appendRT(const PluginPostRtEvent& event) noexcept;
         void trySplice() noexcept;
-        void clearData() noexcept;
 
-        inline CarlaMutex& getDataMutex() noexcept
-        {
-            return dataMutex;
-        }
+        struct Access {
+            Access(PostRtEvents& e)
+              : data2(e.dataPool)
+            {
+                const CarlaMutexLocker cml(e.dataMutex);
 
-        inline RtLinkedList<PluginPostRtEvent>::Itenerator getDataIterator() const noexcept
-        {
-            return data.begin2();
-        }
+                if (e.data.isNotEmpty())
+                    e.data.moveTo(data2, true);
+            }
+
+            ~Access()
+            {
+                data2.clear();
+            }
+
+            inline RtLinkedList<PluginPostRtEvent>::Itenerator getDataIterator() const noexcept
+            {
+                return data2.begin2();
+            }
+
+            inline std::size_t isEmpty() const noexcept
+            {
+                return data2.isEmpty();
+            }
+
+        private:
+            RtLinkedList<PluginPostRtEvent> data2;
+        };
 
     private:
         RtLinkedList<PluginPostRtEvent>::Pool dataPool;
-        RtLinkedList<PluginPostRtEvent> dataPendingRT;
-        RtLinkedList<PluginPostRtEvent> data;
+        RtLinkedList<PluginPostRtEvent> data, dataPendingRT;
         CarlaMutex dataMutex;
-
-        // TESTING for thread-safety, remove later
         CarlaMutex dataPendingMutex;
 
         CARLA_DECLARE_NON_COPY_CLASS(PostRtEvents)
@@ -360,8 +406,12 @@ struct CarlaPlugin::ProtectedData {
     // Post-poned events
 
     void postponeRtEvent(const PluginPostRtEvent& rtEvent) noexcept;
-    void postponeRtEvent(PluginPostRtEventType type, bool sendCallbackLater,
-                         int32_t value1, int32_t value2, int32_t value3, float valuef) noexcept;
+    void postponeParameterChangeRtEvent(bool sendCallbackLater, int32_t index, float value) noexcept;
+    void postponeProgramChangeRtEvent(bool sendCallbackLater, uint32_t index) noexcept;
+    void postponeMidiProgramChangeRtEvent(bool sendCallbackLater, uint32_t index) noexcept;
+    void postponeNoteOnRtEvent(bool sendCallbackLater, uint8_t channel, uint8_t note, uint8_t velocity) noexcept;
+    void postponeNoteOffRtEvent(bool sendCallbackLater, uint8_t channel, uint8_t note) noexcept;
+    void postponeMidiLearnRtEvent(bool sendCallbackLater, uint32_t parameter, uint8_t cc, uint8_t channel) noexcept;
 
     // -------------------------------------------------------------------
     // Library functions

@@ -14,23 +14,26 @@ from carla_host import VERSION
 
 # ------------------------------------------------------------------------------------------------------------
 
+SCRIPT_NAME = getenv("SCRIPT_NAME")
+
 options = {
-  "packages": ["re", "sip", "subprocess", "inspect"],
-  "excludes": ["PyQt5.QtNetwork", "PyQt5.QtSql", "PyQt5.QtTest", "PyQt5.QtXml", "XCTest"],
-  "create_shared_zip":    False,
-  "append_script_to_exe": True,
-  "optimize":   True,
-  "compressed": True
+  "zip_include_packages": ["*"],
+  "zip_exclude_packages": ["PyQt5"],
+  "replace_paths": [["*","@executable_path/"]],
+  "optimize": True,
 }
 
 boptions = {
-  "iconfile": "./resources/ico/carla.icns"
+  "iconfile": "./resources/ico/carla%s.icns" % ("-control" if SCRIPT_NAME == "Carla-Control" else "")
 }
+
+if SCRIPT_NAME in ("Carla", "Carla-Control"):
+  boptions["custom_info_plist"] = "./data/macos/%s.plist" % SCRIPT_NAME
 
 setup(name = "Carla",
       version = VERSION,
       description = "Carla Plugin Host",
       options = {"build_exe": options, "bdist_mac": boptions},
-      executables = [Executable("./source/frontend/%s.pyw" % getenv("SCRIPT_NAME"))])
+      executables = [Executable("./source/frontend/%s" % SCRIPT_NAME)])
 
 # ------------------------------------------------------------------------------------------------------------

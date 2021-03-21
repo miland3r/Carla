@@ -41,6 +41,7 @@ void Reader::read(const char *text, unsigned int length)
   Region curGroup;
   Region curRegion;
   Region *buildingRegion = nullptr;
+  bool inComment = false;
   bool inControl = false;
   bool inGroup = false;
   water::String defaultPath;
@@ -65,15 +66,31 @@ void Reader::read(const char *text, unsigned int length)
     // Check if it's a comment line.
     if (c == '/')
     {
-      // Skip to end of line.
-      while (p < end)
+      // Skip to end of line or c-style comment.
+      do
       {
         c = *++p;
+        if (inComment)
+        {
+          if (c != '*')
+            continue;
+          c = *++p;
+          if (c != '/')
+            continue;
+          inComment = false;
+        }
+        if (c == '*')
+        {
+          inComment = true;
+          continue;
+        }
         if ((c == '\n') || (c == '\r'))
         {
           break;
         }
       }
+      while (p < end);
+      inComment = false;
       p = handleLineEnd(p);
       continue;
     }
@@ -164,16 +181,31 @@ void Reader::read(const char *text, unsigned int length)
       // Comment.
       else if (c == '/')
       {
-        // Skip to end of line.
-        while (p < end)
+        // Skip to end of line or c-style comment.
+        do
         {
-          c = *p;
+          c = *++p;
+          if (inComment)
+          {
+            if (c != '*')
+              continue;
+            c = *++p;
+            if (c != '/')
+              continue;
+            inComment = false;
+          }
+          if (c == '*')
+          {
+            inComment = true;
+            continue;
+          }
           if ((c == '\r') || (c == '\n'))
           {
             break;
           }
-          p += 1;
         }
+        while (p < end);
+        inComment = false;
       }
       // Parameter.
       else

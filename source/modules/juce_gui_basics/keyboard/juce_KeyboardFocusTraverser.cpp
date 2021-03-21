@@ -2,17 +2,16 @@
   ==============================================================================
 
    This file is part of the JUCE library.
-   Copyright (c) 2017 - ROLI Ltd.
+   Copyright (c) 2020 - Raw Material Software Limited
 
    JUCE is an open source library subject to commercial or open-source
    licensing.
 
-   By using JUCE, you agree to the terms of both the JUCE 5 End-User License
-   Agreement and JUCE 5 Privacy Policy (both updated and effective as of the
-   27th April 2017).
+   By using JUCE, you agree to the terms of both the JUCE 6 End-User License
+   Agreement and JUCE Privacy Policy (both effective as of the 16th June 2020).
 
-   End User License Agreement: www.juce.com/juce-5-licence
-   Privacy Policy: www.juce.com/juce-5-privacy-policy
+   End User License Agreement: www.juce.com/juce-6-licence
+   Privacy Policy: www.juce.com/juce-privacy-policy
 
    Or: You may also use this code under the terms of the GPL v3 (see
    www.gnu.org/licenses).
@@ -29,41 +28,38 @@ namespace juce
 
 namespace KeyboardFocusHelpers
 {
-    // This will sort a set of components, so that they are ordered in terms of
-    // left-to-right and then top-to-bottom.
-    struct ScreenPositionComparator
+    static int getOrder (const Component* c)
     {
-        static int compareElements (const Component* first, const Component* second)
-        {
-            auto explicitOrder1 = getOrder (first);
-            auto explicitOrder2 = getOrder (second);
-
-            if (explicitOrder1 != explicitOrder2)
-                return explicitOrder1 - explicitOrder2;
-
-            auto yDiff = first->getY() - second->getY();
-
-            return yDiff == 0 ? first->getX() - second->getX()
-                              : yDiff;
-        }
-
-        static int getOrder (const Component* c)
-        {
-            auto order = c->getExplicitFocusOrder();
-            return order > 0 ? order : (std::numeric_limits<int>::max() / 2);
-        }
-    };
+        auto order = c->getExplicitFocusOrder();
+        return order > 0 ? order : (std::numeric_limits<int>::max() / 2);
+    }
 
     static void findAllFocusableComponents (Component* parent, Array<Component*>& comps)
     {
         if (parent->getNumChildComponents() != 0)
         {
             Array<Component*> localComps;
-            ScreenPositionComparator comparator;
 
             for (auto* c : parent->getChildren())
                 if (c->isVisible() && c->isEnabled())
-                    localComps.addSorted (comparator, c);
+                    localComps.add (c);
+
+            // This will sort so that they are ordered in terms of left-to-right
+            // and then top-to-bottom.
+            std::stable_sort (localComps.begin(), localComps.end(),
+                              [] (const Component* a, const Component* b)
+            {
+                auto explicitOrder1 = getOrder (a);
+                auto explicitOrder2 = getOrder (b);
+
+                if (explicitOrder1 != explicitOrder2)
+                    return explicitOrder1 < explicitOrder2;
+
+                if (a->getY() != b->getY())
+                    return a->getY() < b->getY();
+
+                return a->getX() < b->getX();
+            });
 
             for (auto* c : localComps)
             {

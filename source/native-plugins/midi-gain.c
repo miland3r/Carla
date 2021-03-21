@@ -168,8 +168,9 @@ static void midigain_set_parameter_value(NativePluginHandle handle, uint32_t ind
     }
 }
 
+// FIXME for v3.0, use const for the input buffer
 static void midigain_process(NativePluginHandle handle,
-                             const float** inBuffer, float** outBuffer, uint32_t frames,
+                             float** inBuffer, float** outBuffer, uint32_t frames,
                              const NativeMidiEvent* midiEvents, uint32_t midiEventCount)
 {
     const NativeHostDescriptor* const host = handlePtr->host;
@@ -261,9 +262,7 @@ static const NativePluginDescriptor midigainDesc = {
     .get_state = NULL,
     .set_state = NULL,
 
-    .dispatcher = NULL,
-
-    .render_inline_display = NULL
+    .dispatcher = NULL
 };
 
 // -----------------------------------------------------------------------

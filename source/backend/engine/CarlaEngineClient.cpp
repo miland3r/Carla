@@ -1,6 +1,6 @@
 /*
  * Carla Plugin Host
- * Copyright (C) 2011-2014 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -15,179 +15,16 @@
  * For a full copy of the GNU General Public License see the doc/GPL.txt file.
  */
 
+#include "CarlaEngineClient.hpp"
 #include "CarlaEngineUtils.hpp"
 
 #include "CarlaString.hpp"
-#include "CarlaStringList.hpp"
 
 CARLA_BACKEND_START_NAMESPACE
 
 // -----------------------------------------------------------------------
-// Carla Engine client (Abstract)
 
-struct CarlaEngineClient::ProtectedData {
-    const CarlaEngine& engine;
-
-    bool     active;
-    uint32_t latency;
-
-    CarlaStringList audioInList;
-    CarlaStringList audioOutList;
-    CarlaStringList cvInList;
-    CarlaStringList cvOutList;
-    CarlaStringList eventInList;
-    CarlaStringList eventOutList;
-
-    ProtectedData(const CarlaEngine& eng) noexcept
-        :  engine(eng),
-           active(false),
-           latency(0),
-           audioInList(),
-           audioOutList(),
-           cvInList(),
-           cvOutList(),
-           eventInList(),
-           eventOutList() {}
-
-#ifdef CARLA_PROPER_CPP11_SUPPORT
-    ProtectedData() = delete;
-    CARLA_DECLARE_NON_COPY_STRUCT(ProtectedData)
-#endif
-};
-
-CarlaEngineClient::CarlaEngineClient(const CarlaEngine& engine)
-    : pData(new ProtectedData(engine))
-{
-    carla_debug("CarlaEngineClient::CarlaEngineClient()");
-}
-
-CarlaEngineClient::~CarlaEngineClient() noexcept
-{
-    CARLA_SAFE_ASSERT(! pData->active);
-    carla_debug("CarlaEngineClient::~CarlaEngineClient()");
-
-    delete pData;
-}
-
-void CarlaEngineClient::activate() noexcept
-{
-    CARLA_SAFE_ASSERT(! pData->active);
-    carla_debug("CarlaEngineClient::activate()");
-
-    pData->active = true;
-}
-
-void CarlaEngineClient::deactivate() noexcept
-{
-    CARLA_SAFE_ASSERT(pData->active);
-    carla_debug("CarlaEngineClient::deactivate()");
-
-    pData->active = false;
-}
-
-bool CarlaEngineClient::isActive() const noexcept
-{
-    return pData->active;
-}
-
-bool CarlaEngineClient::isOk() const noexcept
-{
-    return true;
-}
-
-uint32_t CarlaEngineClient::getLatency() const noexcept
-{
-    return pData->latency;
-}
-
-void CarlaEngineClient::setLatency(const uint32_t samples) noexcept
-{
-    pData->latency = samples;
-}
-
-CarlaEnginePort* CarlaEngineClient::addPort(const EnginePortType portType, const char* const name, const bool isInput, const uint32_t indexOffset)
-{
-    CARLA_SAFE_ASSERT_RETURN(name != nullptr && name[0] != '\0', nullptr);
-    carla_debug("CarlaEngineClient::addPort(%i:%s, \"%s\", %s)", portType, EnginePortType2Str(portType), name, bool2str(isInput));
-
-    switch (portType)
-    {
-    case kEnginePortTypeNull:
-        break;
-    case kEnginePortTypeAudio:
-        _addAudioPortName(isInput, name);
-        return new CarlaEngineAudioPort(*this, isInput, indexOffset);
-    case kEnginePortTypeCV:
-        _addCVPortName(isInput, name);
-        return new CarlaEngineCVPort(*this, isInput, indexOffset);
-    case kEnginePortTypeEvent:
-        _addEventPortName(isInput, name);
-        return new CarlaEngineEventPort(*this, isInput, indexOffset);
-    }
-
-    carla_stderr("CarlaEngineClient::addPort(%i, \"%s\", %s) - invalid type", portType, name, bool2str(isInput));
-    return nullptr;
-}
-
-const CarlaEngine& CarlaEngineClient::getEngine() const noexcept
-{
-    return pData->engine;
-}
-
-EngineProcessMode CarlaEngineClient::getProcessMode() const noexcept
-{
-    return pData->engine.getProccessMode();
-}
-
-const char* CarlaEngineClient::getAudioPortName(const bool isInput, const uint index) const noexcept
-{
-    CarlaStringList& portList(isInput ? pData->audioInList : pData->audioOutList);
-    CARLA_SAFE_ASSERT_RETURN(index < portList.count(), nullptr);
-
-    return portList.getAt(index);
-}
-
-const char* CarlaEngineClient::getCVPortName(const bool isInput, const uint index) const noexcept
-{
-    CarlaStringList& portList(isInput ? pData->cvInList : pData->cvOutList);
-    CARLA_SAFE_ASSERT_RETURN(index < portList.count(), nullptr);
-
-    return portList.getAt(index);
-}
-
-const char* CarlaEngineClient::getEventPortName(const bool isInput, const uint index) const noexcept
-{
-    CarlaStringList& portList(isInput ? pData->eventInList : pData->eventOutList);
-    CARLA_SAFE_ASSERT_RETURN(index < portList.count(), nullptr);
-
-    return portList.getAt(index);
-}
-
-void CarlaEngineClient::_addAudioPortName(const bool isInput, const char* const name)
-{
-    CARLA_SAFE_ASSERT_RETURN(name != nullptr && name[0] != '\0',);
-
-    CarlaStringList& portList(isInput ? pData->audioInList : pData->audioOutList);
-    portList.append(name);
-}
-
-void CarlaEngineClient::_addCVPortName(const bool isInput, const char* const name)
-{
-    CARLA_SAFE_ASSERT_RETURN(name != nullptr && name[0] != '\0',);
-
-    CarlaStringList& portList(isInput ? pData->cvInList : pData->cvOutList);
-    portList.append(name);
-}
-
-void CarlaEngineClient::_addEventPortName(const bool isInput, const char* const name)
-{
-    CARLA_SAFE_ASSERT_RETURN(name != nullptr && name[0] != '\0',);
-
-    CarlaStringList& portList(isInput ? pData->eventInList : pData->eventOutList);
-    portList.append(name);
-}
-
-static void getUniquePortName(CarlaString& sname, const CarlaStringList& list)
+static void _getUniquePortName(CarlaString& sname, const CarlaStringList& list)
 {
     for (CarlaStringList::Itenerator it = list.begin2(); it.valid(); it.next())
     {
@@ -246,31 +83,260 @@ static void getUniquePortName(CarlaString& sname, const CarlaStringList& list)
     }
 }
 
-const char* CarlaEngineClient::_getUniquePortName(const char* const name)
+// -----------------------------------------------------------------------
+// Carla Engine Client
+
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+CarlaEngineClient::ProtectedData::ProtectedData(const CarlaEngine& eng,
+                                                EngineInternalGraph& eg,
+                                                const CarlaPluginPtr p) noexcept
+#else
+CarlaEngineClient::ProtectedData::ProtectedData(const CarlaEngine& eng) noexcept
+#endif
+    :  engine(eng),
+       active(false),
+       latency(0),
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+       cvSourcePorts(),
+       egraph(eg),
+       plugin(p),
+#endif
+       audioInList(),
+       audioOutList(),
+       cvInList(),
+       cvOutList(),
+       eventInList(),
+       eventOutList() {}
+
+CarlaEngineClient::ProtectedData::~ProtectedData()
+{
+    carla_debug("CarlaEngineClient::ProtectedData::~ProtectedData()");
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+    CARLA_SAFE_ASSERT(plugin.get() == nullptr);
+#endif
+}
+
+void CarlaEngineClient::ProtectedData::addAudioPortName(const bool isInput, const char* const name)
+{
+    CARLA_SAFE_ASSERT_RETURN(name != nullptr && name[0] != '\0',);
+
+    CarlaStringList& portList(isInput ? audioInList : audioOutList);
+    portList.append(name);
+}
+
+void CarlaEngineClient::ProtectedData::addCVPortName(const bool isInput, const char* const name)
+{
+    CARLA_SAFE_ASSERT_RETURN(name != nullptr && name[0] != '\0',);
+
+    CarlaStringList& portList(isInput ? cvInList : cvOutList);
+    portList.append(name);
+}
+
+void CarlaEngineClient::ProtectedData::addEventPortName(const bool isInput, const char* const name)
+{
+    CARLA_SAFE_ASSERT_RETURN(name != nullptr && name[0] != '\0',);
+
+    CarlaStringList& portList(isInput ? eventInList : eventOutList);
+    portList.append(name);
+}
+
+const char* CarlaEngineClient::ProtectedData::getUniquePortName(const char* const name)
 {
     CARLA_SAFE_ASSERT_RETURN(name != nullptr && name[0] != '\0', nullptr);
 
     CarlaString sname;
     sname = name;
 
-    getUniquePortName(sname, pData->audioInList);
-    getUniquePortName(sname, pData->audioOutList);
-    getUniquePortName(sname, pData->cvInList);
-    getUniquePortName(sname, pData->cvOutList);
-    getUniquePortName(sname, pData->eventInList);
-    getUniquePortName(sname, pData->eventOutList);
+    _getUniquePortName(sname, audioInList);
+    _getUniquePortName(sname, audioOutList);
+    _getUniquePortName(sname, cvInList);
+    _getUniquePortName(sname, cvOutList);
+    _getUniquePortName(sname, eventInList);
+    _getUniquePortName(sname, eventOutList);
 
     return sname.dup();
 }
 
-void CarlaEngineClient::_clearPorts()
+void CarlaEngineClient::ProtectedData::clearPorts()
 {
-    pData->audioInList.clear();
-    pData->audioOutList.clear();
-    pData->cvInList.clear();
-    pData->cvOutList.clear();
-    pData->eventInList.clear();
-    pData->eventOutList.clear();
+    audioInList.clear();
+    audioOutList.clear();
+    cvInList.clear();
+    cvOutList.clear();
+    eventInList.clear();
+    eventOutList.clear();
+}
+
+// -----------------------------------------------------------------------
+
+CarlaEngineClient::CarlaEngineClient(ProtectedData* const p)
+    : pData(p)
+{
+    carla_debug("CarlaEngineClient::CarlaEngineClient()");
+}
+
+CarlaEngineClient::~CarlaEngineClient() noexcept
+{
+    carla_debug("CarlaEngineClient::~CarlaEngineClient()");
+}
+
+void CarlaEngineClient::activate() noexcept
+{
+    CARLA_SAFE_ASSERT(! pData->active);
+    carla_debug("CarlaEngineClient::activate()");
+
+    pData->active = true;
+}
+
+void CarlaEngineClient::deactivate(const bool willClose) noexcept
+{
+    CARLA_SAFE_ASSERT(pData->active || willClose);
+    carla_debug("CarlaEngineClient::deactivate(%s)", bool2str(willClose));
+
+    pData->active = false;
+
+    if (willClose)
+    {
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+        pData->cvSourcePorts.resetGraphAndPlugin();
+        pData->plugin.reset();
+#endif
+    }
+}
+
+bool CarlaEngineClient::isActive() const noexcept
+{
+    return pData->active;
+}
+
+bool CarlaEngineClient::isOk() const noexcept
+{
+    return true;
+}
+
+uint32_t CarlaEngineClient::getLatency() const noexcept
+{
+    return pData->latency;
+}
+
+void CarlaEngineClient::setLatency(const uint32_t samples) noexcept
+{
+    pData->latency = samples;
+}
+
+CarlaEnginePort* CarlaEngineClient::addPort(const EnginePortType portType, const char* const name, const bool isInput, const uint32_t indexOffset)
+{
+    CARLA_SAFE_ASSERT_RETURN(name != nullptr && name[0] != '\0', nullptr);
+    carla_debug("CarlaEngineClient::addPort(%i:%s, \"%s\", %s, %u)", portType, EnginePortType2Str(portType), name, bool2str(isInput), indexOffset);
+
+    switch (portType)
+    {
+    case kEnginePortTypeNull:
+        break;
+    case kEnginePortTypeAudio:
+        pData->addAudioPortName(isInput, name);
+        return new CarlaEngineAudioPort(*this, isInput, indexOffset);
+    case kEnginePortTypeCV:
+        pData->addCVPortName(isInput, name);
+        return new CarlaEngineCVPort(*this, isInput, indexOffset);
+    case kEnginePortTypeEvent:
+        pData->addEventPortName(isInput, name);
+        return new CarlaEngineEventPort(*this, isInput, indexOffset);
+    }
+
+    carla_stderr("CarlaEngineClient::addPort(%i, \"%s\", %s) - invalid type", portType, name, bool2str(isInput));
+    return nullptr;
+}
+
+bool CarlaEngineClient::removePort(const EnginePortType portType, const char* const name, const bool isInput)
+{
+    CARLA_SAFE_ASSERT_RETURN(name != nullptr && name[0] != '\0', false);
+    carla_debug("CarlaEngineClient::removePort(%i:%s, \"%s\", %s)", portType, EnginePortType2Str(portType), name, bool2str(isInput));
+
+    switch (portType)
+    {
+    case kEnginePortTypeNull:
+        break;
+    case kEnginePortTypeAudio: {
+        CarlaStringList& portList(isInput ? pData->audioInList : pData->audioOutList);
+        portList.append(name);
+        return portList.removeOne(name);
+    }
+    case kEnginePortTypeCV: {
+        CarlaStringList& portList(isInput ? pData->cvInList : pData->cvOutList);
+        return portList.removeOne(name);
+    }
+    case kEnginePortTypeEvent: {
+        CarlaStringList& portList(isInput ? pData->eventInList : pData->eventOutList);
+        return portList.removeOne(name);
+    }
+    }
+
+    return false;
+}
+
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+CarlaEngineCVSourcePorts* CarlaEngineClient::createCVSourcePorts()
+{
+    pData->cvSourcePorts.setGraphAndPlugin(pData->egraph.getPatchbayGraphOrNull(), pData->plugin);
+    return &pData->cvSourcePorts;
+}
+#endif
+
+const CarlaEngine& CarlaEngineClient::getEngine() const noexcept
+{
+    return pData->engine;
+}
+
+EngineProcessMode CarlaEngineClient::getProcessMode() const noexcept
+{
+    return pData->engine.getProccessMode();
+}
+
+uint CarlaEngineClient::getPortCount(const EnginePortType portType, const bool isInput) const noexcept
+{
+    size_t ret = 0;
+
+    switch (portType)
+    {
+    case kEnginePortTypeNull:
+        break;
+    case kEnginePortTypeAudio:
+        ret = isInput ? pData->audioInList.count() : pData->audioOutList.count();
+        break;
+    case kEnginePortTypeCV:
+        ret = isInput ? pData->cvInList.count() : pData->cvOutList.count();
+        break;
+    case kEnginePortTypeEvent:
+        ret = isInput ? pData->eventInList.count() : pData->eventOutList.count();
+        break;
+    }
+
+    return static_cast<uint>(ret);
+}
+
+const char* CarlaEngineClient::getAudioPortName(const bool isInput, const uint index) const noexcept
+{
+    CarlaStringList& portList(isInput ? pData->audioInList : pData->audioOutList);
+    CARLA_SAFE_ASSERT_RETURN(index < portList.count(), nullptr);
+
+    return portList.getAt(index);
+}
+
+const char* CarlaEngineClient::getCVPortName(const bool isInput, const uint index) const noexcept
+{
+    CarlaStringList& portList(isInput ? pData->cvInList : pData->cvOutList);
+    CARLA_SAFE_ASSERT_RETURN(index < portList.count(), nullptr);
+
+    return portList.getAt(index);
+}
+
+const char* CarlaEngineClient::getEventPortName(const bool isInput, const uint index) const noexcept
+{
+    CarlaStringList& portList(isInput ? pData->eventInList : pData->eventOutList);
+    CARLA_SAFE_ASSERT_RETURN(index < portList.count(), nullptr);
+
+    return portList.getAt(index);
 }
 
 // -----------------------------------------------------------------------

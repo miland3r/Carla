@@ -1,6 +1,6 @@
 /*
  * Carla Plugin UI
- * Copyright (C) 2014-2018 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2014-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -187,7 +187,7 @@ public:
         fFirstShow = false;
 
         XMapRaised(fDisplay, fHostWindow);
-        XFlush(fDisplay);
+        XSync(fDisplay, False);
     }
 
     void hide() override
@@ -229,16 +229,25 @@ public:
 
                         if (fChildWindow != 0)
                         {
-                            XSizeHints sizeHints;
-                            carla_zeroStruct(sizeHints);
-
-                            if (!fChildWindowConfigured && XGetNormalHints(fDisplay, fChildWindow, &sizeHints))
+                            if (! fChildWindowConfigured)
                             {
+                                gErrorTriggered = false;
+                                const XErrorHandler oldErrorHandler = XSetErrorHandler(temporaryErrorHandler);
+
+                                XSizeHints sizeHints;
+                                carla_zeroStruct(sizeHints);
+
+                                if (XGetNormalHints(fDisplay, fChildWindow, &sizeHints) && !gErrorTriggered)
+                                    XSetNormalHints(fDisplay, fHostWindow, &sizeHints);
+                                else
+                                    fChildWindow = 0;
+
                                 fChildWindowConfigured = true;
-                                XSetNormalHints(fDisplay, fHostWindow, &sizeHints);
+                                XSetErrorHandler(oldErrorHandler);
                             }
 
-                            XResizeWindow(fDisplay, fChildWindow, width, height);
+                            if (fChildWindow != 0)
+                                XResizeWindow(fDisplay, fChildWindow, width, height);
                         }
 
                         fCallback->handlePluginUIResized(width, height);
@@ -290,7 +299,7 @@ public:
         {
             XRaiseWindow(fDisplay, fHostWindow);
             XSetInputFocus(fDisplay, fHostWindow, RevertToPointerRoot, CurrentTime);
-            XFlush(fDisplay);
+            XSync(fDisplay, False);
         }
     }
 
@@ -322,7 +331,7 @@ public:
         }
 
         if (forceUpdate)
-            XFlush(fDisplay);
+            XSync(fDisplay, False);
     }
 
     void setTitle(const char* const title) override
@@ -741,10 +750,19 @@ public:
             // winFlags |= WS_SIZEBOX;
         }
 
-        fWindow = CreateWindowEx(WS_EX_TOPMOST,
+#ifdef BUILDING_CARLA_FOR_WINE
+        const uint winType = WS_EX_DLGMODALFRAME;
+        const HWND parent  = nullptr;
+#else
+        const uint winType = WS_EX_TOOLWINDOW;
+        const HWND parent  = (HWND)parentId;
+#endif
+
+        fWindow = CreateWindowEx(winType,
                                  classNameBuf, "Carla Plugin UI", winFlags,
                                  CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
-                                 nullptr, nullptr, hInstance, nullptr);
+                                 parent, nullptr,
+                                 hInstance, nullptr);
 
         if (fWindow == nullptr) {
             const DWORD errorCode = ::GetLastError();
@@ -757,8 +775,14 @@ public:
 
         SetWindowLongPtr(fWindow, GWLP_USERDATA, (LONG_PTR)this);
 
+#ifndef BUILDING_CARLA_FOR_WINE
         if (parentId != 0)
             setTransientWinId(parentId);
+#endif
+        return;
+
+        // maybe unused
+        (void)parentId;
      }
 
     ~WindowsPluginUI() override

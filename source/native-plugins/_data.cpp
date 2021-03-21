@@ -1,6 +1,6 @@
 /*
  * Carla Native Plugins
- * Copyright (C) 2012-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2012-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -28,7 +28,7 @@
     nullptr, nullptr, nullptr, nullptr, nullptr, \
     nullptr, nullptr
 #define DESCFUNCS_WITHOUTCV \
-    DESCFUNCS_WITHCV, 0, 0
+    DESCFUNCS_WITHCV, 0, 0, nullptr, nullptr, 0, 0
 
 static const NativePluginDescriptor sNativePluginDescriptors[] = {
 
@@ -82,6 +82,29 @@ static const NativePluginDescriptor sNativePluginDescriptors[] = {
     /* maker     */ "falkTX",
     /* copyright */ "GNU GPL v2+",
     DESCFUNCS_WITHOUTCV
+},
+{
+    /* category  */ NATIVE_PLUGIN_CATEGORY_UTILITY,
+    /* hints     */ static_cast<NativePluginHints>(NATIVE_PLUGIN_IS_RTSAFE
+                                                  |NATIVE_PLUGIN_USES_CONTROL_VOLTAGE),
+    /* supports  */ NATIVE_PLUGIN_SUPPORTS_NOTHING,
+    /* audioIns  */ 0,
+    /* audioOuts */ 1,
+    /* midiIns   */ 0,
+    /* midiOuts  */ 0,
+    /* paramIns  */ 1,
+    /* paramOuts */ 0,
+    /* name      */ "CV to Audio",
+    /* label     */ "cv2audio",
+    /* maker     */ "falkTX",
+    /* copyright */ "GNU GPL v2+",
+    DESCFUNCS_WITHCV,
+    /* cvIns      */ 1,
+    /* cvOuts     */ 0,
+    /* bufnamefn  */ nullptr,
+    /* bufrangefn */ nullptr,
+    /* ui_width   */ 0,
+    /* ui_height  */ 0
 },
 {
     /* category  */ NATIVE_PLUGIN_CATEGORY_UTILITY,
@@ -181,6 +204,29 @@ static const NativePluginDescriptor sNativePluginDescriptors[] = {
 },
 {
     /* category  */ NATIVE_PLUGIN_CATEGORY_UTILITY,
+    /* hints     */ static_cast<NativePluginHints>(NATIVE_PLUGIN_IS_RTSAFE
+                                                  |NATIVE_PLUGIN_USES_CONTROL_VOLTAGE),
+    /* supports  */ NATIVE_PLUGIN_SUPPORTS_ALL_SOUND_OFF,
+    /* audioIns  */ 0,
+    /* audioOuts */ 0,
+    /* midiIns   */ 1,
+    /* midiOuts  */ 0,
+    /* paramIns  */ 4,
+    /* paramOuts */ 0,
+    /* name      */ "MIDI to CV",
+    /* label     */ "midi2cv",
+    /* maker     */ "falkTX, Bram Giesen, Jarno Verheesen",
+    /* copyright */ "GNU GPL v2+",
+    DESCFUNCS_WITHCV,
+    /* cvIns      */ 0,
+    /* cvOuts     */ 3,
+    /* bufnamefn  */ nullptr,
+    /* bufrangefn */ nullptr,
+    /* ui_width   */ 0,
+    /* ui_height  */ 0
+},
+{
+    /* category  */ NATIVE_PLUGIN_CATEGORY_UTILITY,
     /* hints     */ NATIVE_PLUGIN_IS_RTSAFE,
     /* supports  */ NATIVE_PLUGIN_SUPPORTS_EVERYTHING,
     /* audioIns  */ 0,
@@ -237,6 +283,7 @@ static const NativePluginDescriptor sNativePluginDescriptors[] = {
                                                   |NATIVE_PLUGIN_HAS_INLINE_DISPLAY
                                                   |NATIVE_PLUGIN_HAS_UI
                                                   |NATIVE_PLUGIN_NEEDS_UI_OPEN_SAVE
+                                                  |NATIVE_PLUGIN_REQUESTS_IDLE
                                                   |NATIVE_PLUGIN_USES_TIME),
     /* supports  */ NATIVE_PLUGIN_SUPPORTS_NOTHING,
     /* audioIns  */ 0,
@@ -260,6 +307,7 @@ static const NativePluginDescriptor sNativePluginDescriptors[] = {
     /* hints     */ static_cast<NativePluginHints>(NATIVE_PLUGIN_IS_RTSAFE
                                                   |NATIVE_PLUGIN_HAS_UI
                                                   |NATIVE_PLUGIN_NEEDS_UI_OPEN_SAVE
+                                                  |NATIVE_PLUGIN_REQUESTS_IDLE
                                                   |NATIVE_PLUGIN_USES_STATE
                                                   |NATIVE_PLUGIN_USES_TIME),
     /* supports  */ NATIVE_PLUGIN_SUPPORTS_NOTHING,
@@ -461,8 +509,12 @@ static const NativePluginDescriptor sNativePluginDescriptors[] = {
     /* maker     */ "falkTX",
     /* copyright */ "GNU GPL v2+",
     DESCFUNCS_WITHCV,
-    /* cvIns     */ 5,
-    /* cvOuts    */ 5,
+    /* cvIns      */ 5,
+    /* cvOuts     */ 5,
+    /* bufnamefn  */ nullptr,
+    /* bufrangefn */ nullptr,
+    /* ui_width   */ 0,
+    /* ui_height  */ 0
 },
 #endif
 
@@ -502,6 +554,23 @@ static const NativePluginDescriptor sNativePluginDescriptors[] = {
     /* paramOuts */ 0,
     /* name      */ "Notes",
     /* label     */ "notes",
+    /* maker     */ "falkTX",
+    /* copyright */ "GNU GPL v2+",
+    DESCFUNCS_WITHOUTCV
+},
+{
+    /* category  */ NATIVE_PLUGIN_CATEGORY_UTILITY,
+    /* hints     */ static_cast<NativePluginHints>(NATIVE_PLUGIN_IS_RTSAFE
+                                                  |NATIVE_PLUGIN_HAS_UI),
+    /* supports  */ NATIVE_PLUGIN_SUPPORTS_NOTHING,
+    /* audioIns  */ 0,
+    /* audioOuts */ 0,
+    /* midiIns   */ 1,
+    /* midiOuts  */ 1,
+    /* paramIns  */ 2,
+    /* paramOuts */ 2,
+    /* name      */ "XY Controller",
+    /* label     */ "xycontroller",
     /* maker     */ "falkTX",
     /* copyright */ "GNU GPL v2+",
     DESCFUNCS_WITHOUTCV

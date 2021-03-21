@@ -25,17 +25,24 @@ endif
 ifneq ($(MACOS),true)
 WINE_32BIT_FLAGS += -I/usr/include/wine/wine/windows
 WINE_32BIT_FLAGS += -I/usr/include/wine-development/windows
+WINE_32BIT_FLAGS += -I/opt/wine-devel/include/wine/windows
 WINE_32BIT_FLAGS += -L/usr/lib32/wine
+WINE_32BIT_FLAGS += -L/usr/lib/wine
 WINE_32BIT_FLAGS += -L/usr/lib/i386-linux-gnu/wine
 WINE_32BIT_FLAGS += -L/usr/lib/i386-linux-gnu/wine-development
+WINE_32BIT_FLAGS += -L/opt/wine-stable/lib
+WINE_32BIT_FLAGS += -L/opt/wine-stable/lib/wine
 WINE_32BIT_FLAGS += -L/opt/wine-staging/lib
 WINE_32BIT_FLAGS += -L/opt/wine-staging/lib/wine
 
 WINE_64BIT_FLAGS += -I/usr/include/wine/wine/windows
 WINE_64BIT_FLAGS += -I/usr/include/wine-development/windows
+WINE_64BIT_FLAGS += -I/opt/wine-devel/include/wine/windows
 WINE_64BIT_FLAGS += -L/usr/lib64/wine
 WINE_64BIT_FLAGS += -L/usr/lib/x86_64-linux-gnu/wine
 WINE_64BIT_FLAGS += -L/usr/lib/x86_64-linux-gnu/wine-development
+WINE_64BIT_FLAGS += -L/opt/wine-stable/lib64
+WINE_64BIT_FLAGS += -L/opt/wine-stable/lib64/wine
 WINE_64BIT_FLAGS += -L/opt/wine-staging/lib64
 WINE_64BIT_FLAGS += -L/opt/wine-staging/lib64/wine
 
@@ -225,12 +232,12 @@ $(OBJDIR)/%.cpp.win64.o: %.cpp
 $(OBJDIR)/%.cpp.wine32.o: %.cpp
 	-@mkdir -p $(OBJDIR)
 	@echo "Compiling $< (wine32)"
-	@$(WINECC) $< $(BUILD_CXX_FLAGS) $(32BIT_FLAGS) -c -o $@
+	@$(WINECC) $< $(BUILD_CXX_FLAGS) $(WINE_32BIT_FLAGS) -c -o $@
 
 $(OBJDIR)/%.cpp.wine64.o: %.cpp
 	-@mkdir -p $(OBJDIR)
 	@echo "Compiling $< (wine64)"
-	@$(WINECC) $< $(BUILD_CXX_FLAGS) $(64BIT_FLAGS) -c -o $@
+	@$(WINECC) $< $(BUILD_CXX_FLAGS) $(WINE_64BIT_FLAGS) -c -o $@
 
 # ---------------------------------------------------------------------------------------------------------------------
 

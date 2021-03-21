@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # Carla bridge for LV2 modguis
-# Copyright (C) 2015-2019 Filipe Coelho <falktx@falktx.com>
+# Copyright (C) 2015-2020 Filipe Coelho <falktx@falktx.com>
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License as
@@ -29,6 +29,15 @@ from PyQt5.QtCore import pyqtSignal, QThread
 from random import random
 
 PORTn = 8998 + int(random()*9000)
+
+# ------------------------------------------------------------------------------------------------------------
+# Imports (asyncio)
+
+try:
+    from asyncio import new_event_loop, set_event_loop
+    haveAsyncIO = True
+except:
+    haveAsyncIO = False
 
 # ------------------------------------------------------------------------------------------------------------
 # Imports (tornado)
@@ -194,10 +203,14 @@ class WebServerThread(QThread):
             debug=True)
 
         self.fPrepareWasCalled = False
+        self.fEventLoop = None
 
     def run(self):
         if not self.fPrepareWasCalled:
             self.fPrepareWasCalled = True
+            if haveAsyncIO:
+                self.fEventLoop = new_event_loop()
+                set_event_loop(self.fEventLoop)
             self.fApplication.listen(PORT, address="0.0.0.0")
             if int(os.getenv("MOD_LOG", "0")):
                 enable_pretty_logging()
@@ -207,4 +220,6 @@ class WebServerThread(QThread):
 
     def stopWait(self):
         IOLoop.instance().stop()
+        if self.fEventLoop is not None:
+            self.fEventLoop.call_soon_threadsafe(self.fEventLoop.stop)
         return self.wait(5000)

@@ -1,6 +1,6 @@
 /*
  * Carla JACK API for external applications
- * Copyright (C) 2016-2018 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2016-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -17,7 +17,26 @@
 
 #include "libjack.hpp"
 
-CARLA_BACKEND_USE_NAMESPACE
+// ---------------------------------------------------------------------------------------------------------------------
+
+CARLA_EXPORT
+int jack_carla_interposed_action(uint, uint, void*)
+{
+    static bool printWarning = true;
+
+    if (printWarning)
+    {
+        printWarning = false;
+        carla_stderr2("Non-exported jack_carla_interposed_action called, this should not happen!!");
+        carla_stderr("Printing some info:");
+        carla_stderr("\tLD_LIBRARY_PATH: '%s'", std::getenv("LD_LIBRARY_PATH"));
+        carla_stderr("\tLD_PRELOAD:      '%s'", std::getenv("LD_PRELOAD"));
+        std::fflush(stderr);
+    }
+
+    // ::kill(::getpid(), SIGKILL);
+    return 1337;
+}
 
 // --------------------------------------------------------------------------------------------------------------------
 
@@ -60,7 +79,7 @@ void jack_free(void* ptr)
 {
     carla_debug("%s(%p)", __FUNCTION__, ptr);
 
-    free(ptr);
+    std::free(ptr);
 }
 
 // --------------------------------------------------------------------------------------------------------------------

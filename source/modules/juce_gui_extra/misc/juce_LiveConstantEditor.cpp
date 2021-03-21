@@ -2,17 +2,16 @@
   ==============================================================================
 
    This file is part of the JUCE library.
-   Copyright (c) 2017 - ROLI Ltd.
+   Copyright (c) 2020 - Raw Material Software Limited
 
    JUCE is an open source library subject to commercial or open-source
    licensing.
 
-   By using JUCE, you agree to the terms of both the JUCE 5 End-User License
-   Agreement and JUCE 5 Privacy Policy (both updated and effective as of the
-   27th April 2017).
+   By using JUCE, you agree to the terms of both the JUCE 6 End-User License
+   Agreement and JUCE Privacy Policy (both effective as of the 16th June 2020).
 
-   End User License Agreement: www.juce.com/juce-5-licence
-   Privacy Policy: www.juce.com/juce-5-privacy-policy
+   End User License Agreement: www.juce.com/juce-6-licence
+   Privacy Policy: www.juce.com/juce-privacy-policy
 
    Or: You may also use this code under the terms of the GPL v3 (see
    www.gnu.org/licenses).
@@ -38,9 +37,9 @@ class AllComponentRepainter  : private Timer,
 {
 public:
     AllComponentRepainter()  {}
-    ~AllComponentRepainter() { clearSingletonInstance(); }
+    ~AllComponentRepainter() override  { clearSingletonInstance(); }
 
-    juce_DeclareSingleton (AllComponentRepainter, false)
+    JUCE_DECLARE_SINGLETON (AllComponentRepainter, false)
 
     void trigger()
     {
@@ -89,8 +88,8 @@ private:
     }
 };
 
-juce_ImplementSingleton (AllComponentRepainter)
-juce_ImplementSingleton (ValueList)
+JUCE_IMPLEMENT_SINGLETON (AllComponentRepainter)
+JUCE_IMPLEMENT_SINGLETON (ValueList)
 
 //==============================================================================
 int64 parseInt (String s)
@@ -144,10 +143,10 @@ LivePropertyEditorBase::LivePropertyEditorBase (LiveValueBase& v, CodeDocument& 
     valueEditor.setMultiLine (v.isString());
     valueEditor.setReturnKeyStartsNewLine (v.isString());
     valueEditor.setText (v.getStringValue (wasHex), dontSendNotification);
-    valueEditor.addListener (this);
+    valueEditor.onTextChange = [this] { applyNewValue (valueEditor.getText()); };
     sourceEditor.setReadOnly (true);
     sourceEditor.setFont (sourceEditor.getFont().withHeight (13.0f));
-    resetButton.addListener (this);
+    resetButton.onClick = [this] { applyNewValue (value.getOriginalStringValue (wasHex)); };
 }
 
 void LivePropertyEditorBase::paint (Graphics& g)
@@ -179,16 +178,6 @@ void LivePropertyEditorBase::resized()
 
     r.removeFromLeft (4);
     sourceEditor.setBounds (r);
-}
-
-void LivePropertyEditorBase::textEditorTextChanged (TextEditor&)
-{
-    applyNewValue (valueEditor.getText());
-}
-
-void LivePropertyEditorBase::buttonClicked (Button*)
-{
-    applyNewValue (value.getOriginalStringValue (wasHex));
 }
 
 void LivePropertyEditorBase::applyNewValue (const String& s)
@@ -290,7 +279,7 @@ public:
 
     void resized() override
     {
-        Rectangle<int> r (getLocalBounds().reduced (2, 0));
+        auto r = getLocalBounds().reduced (2, 0);
 
         for (int i = 0; i < editors.size(); ++i)
             editors.getUnchecked(i)->setBounds (r.removeFromTop (itemHeight));
@@ -322,6 +311,11 @@ public:
         setResizeLimits (500, 400, 10000, 10000);
         centreWithSize (getWidth(), getHeight());
         setVisible (true);
+    }
+
+    ~EditorWindow() override
+    {
+        setLookAndFeel (nullptr);
     }
 
     void closeButtonPressed() override
@@ -405,21 +399,21 @@ struct ColourEditorComp  : public Component,
 
     void paint (Graphics& g) override
     {
-        g.fillCheckerBoard (getLocalBounds(), 6, 6,
+        g.fillCheckerBoard (getLocalBounds().toFloat(), 6.0f, 6.0f,
                             Colour (0xffdddddd).overlaidWith (getColour()),
                             Colour (0xffffffff).overlaidWith (getColour()));
     }
 
     void mouseDown (const MouseEvent&) override
     {
-        auto* colourSelector = new ColourSelector();
+        auto colourSelector = std::make_unique<ColourSelector>();
         colourSelector->setName ("Colour");
         colourSelector->setCurrentColour (getColour());
         colourSelector->addChangeListener (this);
         colourSelector->setColour (ColourSelector::backgroundColourId, Colours::transparentBlack);
         colourSelector->setSize (300, 400);
 
-        CallOutBox::launchAsynchronously (colourSelector, getScreenBounds(), nullptr);
+        CallOutBox::launchAsynchronously (std::move (colourSelector), getScreenBounds(), nullptr);
     }
 
     void changeListenerCallback (ChangeBroadcaster* source) override
@@ -439,8 +433,7 @@ Component* createColourEditor (LivePropertyEditorBase& editor)
 }
 
 //==============================================================================
-struct SliderComp   : public Component,
-                      private Slider::Listener
+struct SliderComp   : public Component
 {
     SliderComp (LivePropertyEditorBase& e, bool useFloat)
         : editor (e), isFloat (useFloat)
@@ -448,7 +441,12 @@ struct SliderComp   : public Component,
         slider.setTextBoxStyle (Slider::NoTextBox, true, 0, 0);
         addAndMakeVisible (slider);
         updateRange();
-        slider.addListener (this);
+        slider.onDragEnd = [this] { updateRange(); };
+        slider.onValueChange = [this]
+        {
+            editor.applyNewValue (isFloat ? getAsString ((double) slider.getValue(), editor.wasHex)
+                                          : getAsString ((int64)  slider.getValue(), editor.wasHex));
+        };
     }
 
     virtual void updateRange()
@@ -461,16 +459,6 @@ struct SliderComp   : public Component,
         slider.setRange (v - range, v + range);
         slider.setValue (v, dontSendNotification);
     }
-
-    void sliderValueChanged (Slider*) override
-    {
-        editor.applyNewValue (isFloat ? getAsString ((double) slider.getValue(), editor.wasHex)
-                                      : getAsString ((int64)  slider.getValue(), editor.wasHex));
-
-    }
-
-    void sliderDragStarted (Slider*) override  {}
-    void sliderDragEnded (Slider*) override    { updateRange(); }
 
     void resized() override
     {
@@ -485,15 +473,17 @@ struct SliderComp   : public Component,
 //==============================================================================
 struct BoolSliderComp  : public SliderComp
 {
-    BoolSliderComp (LivePropertyEditorBase& e) : SliderComp (e, false) {}
+    BoolSliderComp (LivePropertyEditorBase& e)
+        : SliderComp (e, false)
+    {
+        slider.onValueChange = [this] { editor.applyNewValue (slider.getValue() > 0.5 ? "true" : "false"); };
+    }
 
     void updateRange() override
     {
         slider.setRange (0.0, 1.0, dontSendNotification);
         slider.setValue (editor.value.getStringValue (false) == "true", dontSendNotification);
     }
-
-    void sliderValueChanged (Slider*) override  { editor.applyNewValue (slider.getValue() > 0.5 ? "true" : "false"); }
 };
 
 Component* createIntegerSlider (LivePropertyEditorBase& editor)  { return new SliderComp (editor, false); }

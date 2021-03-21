@@ -1,6 +1,6 @@
 /*
  * Carla Plugin Host
- * Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -16,6 +16,7 @@
  */
 
 #include "CarlaEngineGraph.hpp"
+#include "CarlaEngineInit.hpp"
 #include "CarlaEngineInternal.hpp"
 #include "CarlaBackendUtils.hpp"
 #include "CarlaMathUtils.hpp"
@@ -28,7 +29,9 @@
 #if defined(__clang__)
 # pragma clang diagnostic push
 # pragma clang diagnostic ignored "-Wconversion"
+# pragma clang diagnostic ignored "-Wdeprecated-copy"
 # pragma clang diagnostic ignored "-Weffc++"
+# pragma clang diagnostic ignored "-Wzero-as-null-pointer-constant"
 #elif defined(__GNUC__) && (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6))
 # pragma GCC diagnostic push
 # pragma GCC diagnostic ignored "-Wconversion"
@@ -1134,7 +1137,9 @@ private:
 
 // -----------------------------------------
 
-CarlaEngine* CarlaEngine::newRtAudio(const AudioApi api)
+namespace EngineInit {
+
+CarlaEngine* newRtAudio(const AudioApi api)
 {
     initRtAudioAPIsIfNeeded();
 
@@ -1174,14 +1179,14 @@ CarlaEngine* CarlaEngine::newRtAudio(const AudioApi api)
     return new CarlaEngineRtAudio(rtApi);
 }
 
-uint CarlaEngine::getRtAudioApiCount()
+uint getRtAudioApiCount()
 {
     initRtAudioAPIsIfNeeded();
 
     return static_cast<uint>(gRtAudioApis.size());
 }
 
-const char* CarlaEngine::getRtAudioApiName(const uint index)
+const char* getRtAudioApiName(const uint index)
 {
     initRtAudioAPIsIfNeeded();
 
@@ -1190,7 +1195,7 @@ const char* CarlaEngine::getRtAudioApiName(const uint index)
     return CarlaBackend::getRtAudioApiName(gRtAudioApis[index]);
 }
 
-const char* const* CarlaEngine::getRtAudioApiDeviceNames(const uint index)
+const char* const* getRtAudioApiDeviceNames(const uint index)
 {
     initRtAudioAPIsIfNeeded();
 
@@ -1223,7 +1228,7 @@ const char* const* CarlaEngine::getRtAudioApiDeviceNames(const uint index)
     return gDeviceNames;
 }
 
-const EngineDriverDeviceInfo* CarlaEngine::getRtAudioDeviceInfo(const uint index, const char* const deviceName)
+const EngineDriverDeviceInfo* getRtAudioDeviceInfo(const uint index, const char* const deviceName)
 {
     initRtAudioAPIsIfNeeded();
 
@@ -1314,6 +1319,8 @@ const EngineDriverDeviceInfo* CarlaEngine::getRtAudioDeviceInfo(const uint index
     }
 
     return &devInfo;
+}
+
 }
 
 // -----------------------------------------

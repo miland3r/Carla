@@ -19,11 +19,6 @@
 
 #include "CarlaPipeUtils.hpp"
 
-#ifdef CARLA_OS_HAIKU
-# include "CarlaStringList.hpp"
-# define CARLA_PIPE_WITHOUT_CALLBACK
-#endif
-
 namespace CB = CarlaBackend;
 
 // -------------------------------------------------------------------------------------------------------------------
@@ -35,10 +30,6 @@ public:
         : CarlaPipeClient(),
           fCallbackFunc(callbackFunc),
           fCallbackPtr(callbackPtr),
-#ifdef CARLA_PIPE_WITHOUT_CALLBACK
-          fMsgsReceived(),
-          fLastMsgReceived(nullptr),
-#endif
           fLastReadLine(nullptr)
     {
         CARLA_SAFE_ASSERT(fCallbackFunc != nullptr);
@@ -51,59 +42,47 @@ public:
             delete[] fLastReadLine;
             fLastReadLine = nullptr;
         }
-#ifdef CARLA_PIPE_WITHOUT_CALLBACK
-        if (fLastMsgReceived != nullptr)
-        {
-            delete[] fLastMsgReceived;
-            fLastMsgReceived = nullptr;
-        }
-#endif
-    }
-
-    const char* idlePipeAndReturnMessage()
-    {
-        CarlaPipeClient::idlePipe();
-
-#ifdef CARLA_PIPE_WITHOUT_CALLBACK
-        if (fMsgsReceived.count() == 0)
-            return nullptr;
-
-        delete[] fLastMsgReceived;
-        fLastMsgReceived = fMsgsReceived.getAndRemoveFirst();
-        return fLastMsgReceived;
-#else
-        return nullptr;
-#endif
     }
 
     const char* readlineblock(const uint timeout) noexcept
     {
-#ifdef CARLA_PIPE_WITHOUT_CALLBACK
-        if (fMsgsReceived.count() != 0)
-        {
-            delete[] fLastMsgReceived;
-            fLastMsgReceived = fMsgsReceived.getAndRemoveFirst();
-            return fLastMsgReceived;
-        }
-#endif
-
         delete[] fLastReadLine;
-        fLastReadLine = CarlaPipeClient::_readlineblock(timeout);
+        fLastReadLine = CarlaPipeClient::_readlineblock(true, 0, timeout);
         return fLastReadLine;
+    }
+
+    bool readlineblock_bool(const uint timeout) noexcept
+    {
+        if (const char* const line = CarlaPipeClient::_readlineblock(false, 0, timeout))
+            return std::strcmp(line, "true") == 0;
+
+        return false;
+    }
+
+    int readlineblock_int(const uint timeout) noexcept
+    {
+        if (const char* const line = CarlaPipeClient::_readlineblock(false, 0, timeout))
+            return std::atoi(line);
+
+        return 0;
+    }
+
+    double readlineblock_float(const uint timeout) noexcept
+    {
+        if (const char* const line = CarlaPipeClient::_readlineblock(false, 0, timeout))
+            return std::atof(line);
+
+        return 0.0;
     }
 
     bool msgReceived(const char* const msg) noexcept override
     {
-#ifdef CARLA_PIPE_WITHOUT_CALLBACK
-        fMsgsReceived.append(msg);
-#else
         if (fCallbackFunc != nullptr)
         {
             try {
                 fCallbackFunc(fCallbackPtr, msg);
             } CARLA_SAFE_EXCEPTION("msgReceived");
         }
-#endif
 
         return true;
     }
@@ -111,10 +90,6 @@ public:
 private:
     const CarlaPipeCallbackFunc fCallbackFunc;
     void* const fCallbackPtr;
-#ifdef CARLA_PIPE_WITHOUT_CALLBACK
-    CarlaStringList fMsgsReceived;
-    const char* fLastMsgReceived;
-#endif
     const char* fLastReadLine;
 
     CARLA_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ExposedCarlaPipeClient)
@@ -135,11 +110,11 @@ CarlaPipeClientHandle carla_pipe_client_new(const char* argv[], CarlaPipeCallbac
     return pipe;
 }
 
-const char* carla_pipe_client_idle(CarlaPipeClientHandle handle)
+void carla_pipe_client_idle(CarlaPipeClientHandle handle)
 {
-    CARLA_SAFE_ASSERT_RETURN(handle != nullptr, nullptr);
+    CARLA_SAFE_ASSERT_RETURN(handle != nullptr,);
 
-    return ((ExposedCarlaPipeClient*)handle)->idlePipeAndReturnMessage();
+    ((ExposedCarlaPipeClient*)handle)->idlePipe();
 }
 
 bool carla_pipe_client_is_running(CarlaPipeClientHandle handle)
@@ -168,6 +143,27 @@ const char* carla_pipe_client_readlineblock(CarlaPipeClientHandle handle, uint t
     CARLA_SAFE_ASSERT_RETURN(handle != nullptr, nullptr);
 
     return ((ExposedCarlaPipeClient*)handle)->readlineblock(timeout);
+}
+
+bool carla_pipe_client_readlineblock_bool(CarlaPipeClientHandle handle, uint timeout)
+{
+    CARLA_SAFE_ASSERT_RETURN(handle != nullptr, false);
+
+    return ((ExposedCarlaPipeClient*)handle)->readlineblock_bool(timeout);
+}
+
+int carla_pipe_client_readlineblock_int(CarlaPipeClientHandle handle, uint timeout)
+{
+    CARLA_SAFE_ASSERT_RETURN(handle != nullptr, 0);
+
+    return ((ExposedCarlaPipeClient*)handle)->readlineblock_int(timeout);
+}
+
+double carla_pipe_client_readlineblock_float(CarlaPipeClientHandle handle, uint timeout)
+{
+    CARLA_SAFE_ASSERT_RETURN(handle != nullptr, 0.0);
+
+    return ((ExposedCarlaPipeClient*)handle)->readlineblock_float(timeout);
 }
 
 bool carla_pipe_client_write_msg(CarlaPipeClientHandle handle, const char* msg)
@@ -213,6 +209,8 @@ void carla_pipe_client_destroy(CarlaPipeClientHandle handle)
 
 // -------------------------------------------------------------------------------------------------------------------
 
-#include "CarlaPipeUtils.cpp"
+#ifndef CARLA_PLUGIN_EXPORT
+# include "CarlaPipeUtils.cpp"
+#endif
 
 // -------------------------------------------------------------------------------------------------------------------

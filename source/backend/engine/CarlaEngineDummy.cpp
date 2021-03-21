@@ -1,6 +1,6 @@
 /*
  * Carla Plugin Host
- * Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -16,6 +16,7 @@
  */
 
 #include "CarlaEngineGraph.hpp"
+#include "CarlaEngineInit.hpp"
 #include "CarlaEngineInternal.hpp"
 
 #include <ctime>
@@ -231,9 +232,11 @@ protected:
         carla_zeroFloats(audioIns[1], bufferSize);
         carla_zeroStructs(pData->events.in,  kMaxEngineEventInternalCount);
 
+        int64_t oldTime, newTime;
+
         while (! shouldThreadExit())
         {
-            const int64_t oldTime = getTimeInMicroseconds();
+            oldTime = getTimeInMicroseconds();
 
             const PendingRtEventsRunner prt(this, bufferSize, true);
 
@@ -243,7 +246,7 @@ protected:
 
             pData->graph.process(pData, audioIns, audioOuts, bufferSize);
 
-            const int64_t newTime = getTimeInMicroseconds();
+            newTime = getTimeInMicroseconds();
             CARLA_SAFE_ASSERT_CONTINUE(newTime >= oldTime);
 
             const int64_t remainingTime = cycleTime - (newTime - oldTime);
@@ -266,7 +269,7 @@ protected:
         std::free(audioOuts[0]);
         std::free(audioOuts[1]);
 
-        carla_stdout("CarlaEngineDummy audio thread finished");
+        carla_stdout("CarlaEngineDummy audio thread finished with %u Xruns", pData->xruns);
     }
 
     // -------------------------------------------------------------------
@@ -279,9 +282,14 @@ private:
 
 // -----------------------------------------
 
-CarlaEngine* CarlaEngine::newDummy()
+namespace EngineInit {
+
+CarlaEngine* newDummy()
 {
+    carla_debug("EngineInit::newDummy()");
     return new CarlaEngineDummy();
+}
+
 }
 
 // -----------------------------------------

@@ -1,6 +1,6 @@
 /*
  * Carla Plugin Host
- * Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -19,6 +19,7 @@
 #define CARLA_ENGINE_HPP_INCLUDED
 
 #include "CarlaBackend.h"
+#include "CarlaPluginPtr.hpp"
 
 namespace water {
 class MemoryOutputStream;
@@ -52,7 +53,7 @@ enum EngineType {
     kEngineTypeJack = 1,
 
     /*!
-     * Juce engine type, used to provide Native Audio and MIDI support.
+     * JUCE engine type, used to provide Native Audio and MIDI support.
      */
     kEngineTypeJuce = 2,
 
@@ -74,7 +75,7 @@ enum EngineType {
     /*!
      * Dummy engine type, does not send audio or MIDI anywhere.
      */
-    kEngineTypeDummy = 6,
+    kEngineTypeDummy = 6
 };
 
 /*!
@@ -163,6 +164,11 @@ enum EngineControlEventType {
     kEngineControlEventTypeAllNotesOff = 5
 };
 
+/*!
+ * Special value for EngineEvent channel field, indicating a non-midi parameter event.
+ */
+static const uint8_t kEngineEventNonMidiChannel = 0x30;
+
 // -----------------------------------------------------------------------
 
 /*!
@@ -171,7 +177,9 @@ enum EngineControlEventType {
 struct CARLA_API EngineControlEvent {
     EngineControlEventType type; //!< Control-Event type.
     uint16_t param;              //!< Parameter Id, midi bank or midi program.
-    float    value;              //!< Parameter value, normalized to 0.0f<->1.0f.
+    int8_t   midiValue;          //!< Raw midi value, >= 0 if applicable, -1 otherwise.
+    float    normalizedValue;    //!< Parameter value, normalized to 0.0f<->1.0f.
+    bool     handled;            //!< Indicates that event was handled/received at least once.
 
     /*!
      * Convert this control event into MIDI data.
@@ -225,14 +233,17 @@ struct CARLA_API EngineEvent {
  * Engine options.
  */
 struct CARLA_API EngineOptions {
-    EngineProcessMode   processMode;
+    EngineProcessMode processMode;
     EngineTransportMode transportMode;
-    const char*         transportExtra;
+    const char* transportExtra;
 
     bool forceStereo;
+    bool resetXruns;
     bool preferPluginBridges;
     bool preferUiBridges;
     bool uisAlwaysOnTop;
+    uint bgColor;
+    uint fgColor;
     float uiScale;
 
     uint maxParameters;
@@ -249,6 +260,9 @@ struct CARLA_API EngineOptions {
     int oscPortUDP;
 #endif
 
+    const char* pathAudio;
+    const char* pathMIDI;
+
     const char* pathLADSPA;
     const char* pathDSSI;
     const char* pathLV2;
@@ -259,6 +273,7 @@ struct CARLA_API EngineOptions {
 
     const char* binaryDir;
     const char* resourceDir;
+    const char* clientNamePrefix;
 
     bool preventBadBehaviour;
     uintptr_t frontendWinId;
@@ -353,7 +368,7 @@ class CARLA_API CarlaEnginePort
 {
 protected:
     /*!
-     * The constructor.
+     * The constructor, protected.
      * All constructor parameters are constant and will never change in the lifetime of the port.
      */
     CarlaEnginePort(const CarlaEngineClient& client, bool isInputPort, uint32_t indexOffset) noexcept;
@@ -377,15 +392,23 @@ public:
     /*!
      * Check if this port is an input.
      */
-    bool isInput() const noexcept
+    inline bool isInput() const noexcept
     {
         return kIsInput;
     }
 
     /*!
+     * Get the index offset as passed in the constructor.
+     */
+    inline uint32_t getIndexOffset() const noexcept
+    {
+        return kIndexOffset;
+    }
+
+    /*!
      * Get this ports' engine client.
      */
-    const CarlaEngineClient& getEngineClient() const noexcept
+    inline const CarlaEngineClient& getEngineClient() const noexcept
     {
         return kClient;
     }
@@ -425,7 +448,7 @@ public:
     /*!
      * Get the type of the port, in this case kEnginePortTypeAudio.
      */
-    EnginePortType getType() const noexcept final
+    inline EnginePortType getType() const noexcept final
     {
         return kEnginePortTypeAudio;
     }
@@ -439,7 +462,7 @@ public:
      * Direct access to the port's audio buffer.
      * May be null.
      */
-    float* getBuffer() const noexcept
+    inline float* getBuffer() const noexcept
     {
         return fBuffer;
     }
@@ -472,7 +495,7 @@ public:
     /*!
      * Get the type of the port, in this case kEnginePortTypeCV.
      */
-    EnginePortType getType() const noexcept final
+    inline EnginePortType getType() const noexcept final
     {
         return kEnginePortTypeCV;
     }
@@ -486,14 +509,29 @@ public:
      * Direct access to the port's CV buffer.
      * May be null.
      */
-    float* getBuffer() const noexcept
+    inline float* getBuffer() const noexcept
     {
         return fBuffer;
     }
 
+    /*!
+     * Get min/max range for this CV port.
+     */
+    inline void getRange(float& min, float& max) const noexcept
+    {
+        min = fMinimum;
+        max = fMaximum;
+    }
+
+    /*!
+     * Set min/max range for this CV port.
+     */
+    void setRange(float min, float max) noexcept;
+
 #ifndef DOXYGEN
 protected:
     float* fBuffer;
+    float fMinimum, fMaximum;
 
     CARLA_DECLARE_NON_COPY_CLASS(CarlaEngineCVPort)
 #endif
@@ -519,7 +557,7 @@ public:
     /*!
      * Get the type of the port, in this case kEnginePortTypeEvent.
      */
-    EnginePortType getType() const noexcept final
+    inline EnginePortType getType() const noexcept final
     {
         return kEnginePortTypeEvent;
     }
@@ -539,12 +577,12 @@ public:
      * Get the event at @a index.
      * @note You must only call this for input ports.
      */
-    virtual const EngineEvent& getEvent(uint32_t index) const noexcept;
+    virtual EngineEvent& getEvent(uint32_t index) const noexcept;
 
     /*!
      * Get the event at @a index, faster unchecked version.
      */
-    virtual const EngineEvent& getEventUnchecked(uint32_t index) const noexcept;
+    virtual EngineEvent& getEventUnchecked(uint32_t index) const noexcept;
 
     /*!
      * Write a control event into the buffer.
@@ -557,7 +595,8 @@ public:
      * Arguments are the same as in the EngineControlEvent struct.
      * @note You must only call this for output ports.
      */
-    virtual bool writeControlEvent(uint32_t time, uint8_t channel, EngineControlEventType type, uint16_t param, float value = 0.0f) noexcept;
+    virtual bool writeControlEvent(uint32_t time, uint8_t channel, EngineControlEventType type,
+                                   uint16_t param, int8_t midiValue, float normalizedValue) noexcept;
 
     /*!
      * Write a MIDI event into the buffer.
@@ -580,9 +619,10 @@ public:
 
 #ifndef DOXYGEN
 protected:
-    EngineEvent* fBuffer;
     const EngineProcessMode kProcessMode;
+    EngineEvent* fBuffer;
     friend class CarlaPluginInstance;
+    friend class CarlaEngineCVSourcePorts;
 
     CARLA_DECLARE_NON_COPY_CLASS(CarlaEngineEventPort)
 #endif
@@ -591,20 +631,69 @@ protected:
 // -----------------------------------------------------------------------
 
 /*!
- * Carla Engine client.
+ * Carla Engine Meta CV Port.
+ * FIXME needs a better name...
+ */
+class CARLA_API CarlaEngineCVSourcePorts
+{
+public:
+    /*!
+     * The destructor.
+     */
+    virtual ~CarlaEngineCVSourcePorts();
+
+    /*!
+     * Add a CV port as a source of events.
+     */
+    virtual bool addCVSource(CarlaEngineCVPort* port, uint32_t portIndexOffset, bool reconfigureNow);
+
+    /*!
+     * Remove a CV port as a source of events.
+     */
+    virtual bool removeCVSource(uint32_t portIndexOffset);
+
+    /*!
+     * Get events and add them to an event port.
+     * FIXME needs a better name...
+     */
+    virtual void initPortBuffers(const float* const* buffers, uint32_t frames,
+                                 bool sampleAccurate, CarlaEngineEventPort* eventPort);
+
+    /*!
+     * Set value range for a CV port.
+     */
+    bool setCVSourceRange(uint32_t portIndexOffset, float minimum, float maximum);
+
+    /*!
+     * Destroy all ports.
+     */
+    void cleanup();
+
+#ifndef DOXYGEN
+protected:
+    /** @internal */
+    struct ProtectedData;
+    ProtectedData* const pData;
+
+    /*!
+     * The constructor, protected.
+     */
+    CarlaEngineCVSourcePorts();
+
+    CARLA_DECLARE_NON_COPY_CLASS(CarlaEngineCVSourcePorts)
+#endif
+};
+
+// -----------------------------------------------------------------------
+
+/*!
+ * Carla Engine Client.
  * Each plugin requires one client from the engine (created via CarlaEngine::addClient()).
  * @note This is a virtual class, some engine types provide custom functionality.
  */
 class CARLA_API CarlaEngineClient
 {
 public:
-    /*!
-     * The constructor, protected.
-     * All constructor parameters are constant and will never change in the lifetime of the client.
-     * Client starts in deactivated state.
-     */
-    CarlaEngineClient(const CarlaEngine& engine);
-
     /*!
      * The destructor.
      */
@@ -620,7 +709,7 @@ public:
      * Deactivate this client.
      * Client must be activated before calling this function.
      */
-    virtual void deactivate() noexcept;
+    virtual void deactivate(bool willClose) noexcept;
 
     /*!
      * Check if the client is activated.
@@ -651,6 +740,19 @@ public:
     virtual CarlaEnginePort* addPort(EnginePortType portType, const char* name, bool isInput, uint32_t indexOffset);
 
     /*!
+     * Remove a previously added port via addPort().
+     */
+    virtual bool removePort(EnginePortType portType, const char* name, bool isInput);
+
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+    /*!
+     * Create an instance of CV source ports.
+     * Must be called only once per client.
+     */
+    virtual CarlaEngineCVSourcePorts* createCVSourcePorts();
+#endif
+
+    /*!
      * Get this client's engine.
      */
     const CarlaEngine& getEngine() const noexcept;
@@ -659,6 +761,11 @@ public:
      * Get the engine's process mode.
      */
     EngineProcessMode getProcessMode() const noexcept;
+
+    /*!
+     * Get port count for a type and mode.
+     */
+    uint getPortCount(EnginePortType portType, bool isInput) const noexcept;
 
     /*!
      * Get an audio port name.
@@ -677,17 +784,14 @@ public:
 
 #ifndef DOXYGEN
 protected:
-    /*!
-     * Internal data, for CarlaEngineClient subclasses only.
-     */
+    /** @internal */
     struct ProtectedData;
     ProtectedData* const pData;
 
-    void _addAudioPortName(bool, const char*);
-    void _addCVPortName(bool, const char*);
-    void _addEventPortName(bool, const char*);
-    const char* _getUniquePortName(const char*);
-    void _clearPorts();
+    /*!
+     * The constructor, protected.
+     */
+    CarlaEngineClient(ProtectedData* pData);
 
     CARLA_DECLARE_NON_COPY_CLASS(CarlaEngineClient)
 #endif
@@ -826,7 +930,7 @@ public:
      * Add new engine client.
      * @note This function must only be called within a plugin class.
      */
-    virtual CarlaEngineClient* addClient(CarlaPlugin* plugin);
+    virtual CarlaEngineClient* addClient(CarlaPluginPtr plugin);
 
     /*!
      * Get the current CPU load estimated by the engine.
@@ -865,10 +969,10 @@ public:
      */
     bool addPlugin(BinaryType btype, PluginType ptype,
                    const char* filename, const char* name, const char* label, int64_t uniqueId,
-                   const void* extra, uint options);
+                   const void* extra, uint options = PLUGIN_OPTIONS_NULL);
 
     /*!
-     * Add new plugin, using native binary type and default options.
+     * Add new plugin, using native binary type.
      * @see ENGINE_CALLBACK_PLUGIN_ADDED
      */
     bool addPlugin(PluginType ptype,
@@ -879,7 +983,7 @@ public:
      * Remove plugin with id @a id.
      * @see ENGINE_CALLBACK_PLUGIN_REMOVED
      */
-    bool removePlugin(uint id);
+    virtual bool removePlugin(uint id);
 
     /*!
      * Remove all plugins.
@@ -910,7 +1014,7 @@ public:
     /*!
      * Switch plugins with id @a idA and @a idB.
      */
-    bool switchPlugins(uint idA, uint idB) noexcept;
+    virtual bool switchPlugins(uint idA, uint idB) noexcept;
 #endif
 
     /*!
@@ -925,12 +1029,12 @@ public:
     /*!
      * Get plugin with id @a id.
      */
-    CarlaPlugin* getPlugin(uint id) const noexcept;
+    CarlaPluginPtr getPlugin(uint id) const noexcept;
 
     /*!
      * Get plugin with id @a id, faster unchecked version.
      */
-    CarlaPlugin* getPluginUnchecked(uint id) const noexcept;
+    CarlaPluginPtr getPluginUnchecked(uint id) const noexcept;
 
     /*!
      * Get a unique plugin name within the engine.
@@ -961,7 +1065,14 @@ public:
 
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
     /*!
+     * Get the currently set project folder.
+     * @note Valid for both standalone and plugin versions.
+     */
+    virtual const char* getCurrentProjectFolder() const noexcept;
+
+    /*!
      * Get the currently set project filename.
+     * @note Valid only for both standalone version.
      */
     const char* getCurrentProjectFilename() const noexcept;
 
@@ -1030,7 +1141,7 @@ public:
      * Call the main engine callback, if set.
      * May be called by plugins.
      */
-    virtual void callback(bool sendHost, bool sendOsc,
+    virtual void callback(bool sendHost, bool sendOSC,
                           EngineCallbackOpcode action, uint pluginId,
                           int value1, int value2, int value3, float valuef, const char* valueStr) noexcept;
 
@@ -1046,7 +1157,8 @@ public:
      * Call the file callback, if set.
      * May be called by plugins.
      */
-    const char* runFileCallback(FileCallbackOpcode action, bool isDir, const char* title, const char* filter) noexcept;
+    virtual const char* runFileCallback(FileCallbackOpcode action,
+                                        bool isDir, const char* title, const char* filter) noexcept;
 
     /*!
      * Set the file callback to @a func.
@@ -1070,9 +1182,15 @@ public:
     virtual bool patchbayDisconnect(bool external, uint connectionId);
 
     /*!
+     * Set the position of a group.
+     */
+    virtual bool patchbaySetGroupPos(bool sendHost, bool sendOSC, bool external,
+                                     uint groupId, int x1, int y1, int x2, int y2);
+
+    /*!
      * Force the engine to resend all patchbay clients, ports and connections again.
      */
-    virtual bool patchbayRefresh(bool sendHost, bool sendOsc, bool external);
+    virtual bool patchbayRefresh(bool sendHost, bool sendOSC, bool external);
 #endif
 
     // -------------------------------------------------------------------
@@ -1173,23 +1291,6 @@ public:
 #endif
 
     // -------------------------------------------------------------------
-    // Helper functions
-
-    /*!
-     * Return internal data, needed for EventPorts when used in Rack, Patchbay and Bridge modes.
-     * @note RT call
-     */
-    EngineEvent* getInternalEventBuffer(bool isInput) const noexcept;
-
-#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
-    /*!
-     * Virtual functions for handling external graph ports.
-     */
-    virtual bool connectExternalGraphPort(uint, uint, const char*);
-    virtual bool disconnectExternalGraphPort(uint, uint, const char*);
-#endif
-
-    // -------------------------------------------------------------------
 
 protected:
     /*!
@@ -1201,8 +1302,9 @@ protected:
     /*!
      * Some internal classes read directly from pData or call protected functions.
      */
-    friend class CarlaEngineThread;
+    friend class CarlaEngineEventPort;
     friend class CarlaEngineOsc;
+    friend class CarlaEngineThread;
     friend class CarlaPluginInstance;
     friend class EngineInternalGraph;
     friend class PendingRtEventsRunner;
@@ -1210,6 +1312,7 @@ protected:
     friend class ScopedEngineEnvironmentLocker;
     friend class ScopedThreadStopper;
     friend class PatchbayGraph;
+    friend struct ExternalGraph;
     friend struct RackGraph;
 
     // -------------------------------------------------------------------
@@ -1245,7 +1348,16 @@ protected:
     /*!
      * Common load project function for main engine and plugin.
      */
-    bool loadProjectInternal(water::XmlDocument& xmlDoc);
+    bool loadProjectInternal(water::XmlDocument& xmlDoc, bool alwaysLoadConnections);
+
+    // -------------------------------------------------------------------
+    // Helper functions
+
+    /*!
+     * Return internal data, needed for EventPorts when used in Rack, Patchbay and Bridge modes.
+     * @note RT call
+     */
+    EngineEvent* getInternalEventBuffer(bool isInput) const noexcept;
 
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
     // -------------------------------------------------------------------
@@ -1255,69 +1367,21 @@ protected:
      * Virtual functions for handling patchbay state.
      * Do not free returned data.
      */
+    struct PatchbayPosition { const char* name; int x1, y1, x2, y2, pluginId; bool dealloc; };
     virtual const char* const* getPatchbayConnections(bool external) const;
-    virtual void restorePatchbayConnection(bool external,
-                                           const char* sourcePort,
-                                           const char* targetPort);
-#endif
+    virtual const PatchbayPosition* getPatchbayPositions(bool external, uint& count) const;
+    virtual void restorePatchbayConnection(bool external, const char* sourcePort, const char* targetPort);
+    // returns true if plugin name mapping found, ppos.name updated to its converted name
+    virtual bool restorePatchbayGroupPosition(bool external, PatchbayPosition& ppos);
 
-    // -------------------------------------------------------------------
-
-public:
     /*!
-     * Native audio APIs.
+     * Virtual functions for handling external graph ports.
      */
-    enum AudioApi {
-        AUDIO_API_NULL,
-        // common
-        AUDIO_API_JACK,
-        AUDIO_API_OSS,
-        // linux
-        AUDIO_API_ALSA,
-        AUDIO_API_PULSEAUDIO,
-        // macos
-        AUDIO_API_COREAUDIO,
-        // windows
-        AUDIO_API_ASIO,
-        AUDIO_API_DIRECTSOUND,
-        AUDIO_API_WASAPI
-    };
+    virtual bool connectExternalGraphPort(uint, uint, const char*);
+    virtual bool disconnectExternalGraphPort(uint, uint, const char*);
+#endif
 
     // -------------------------------------------------------------------
-    // Engine initializers
-
-    // JACK
-    static CarlaEngine* newJack();
-
-#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
-    // Dummy
-    static CarlaEngine* newDummy();
-#endif
-
-#ifdef BUILD_BRIDGE
-    // Bridge
-    static CarlaEngine* newBridge(const char* audioPoolBaseName,
-                                  const char* rtClientBaseName,
-                                  const char* nonRtClientBaseName,
-                                  const char* nonRtServerBaseName);
-#else
-# ifdef USING_JUCE
-    // Juce
-    static CarlaEngine*       newJuce(AudioApi api);
-    static uint               getJuceApiCount();
-    static const char*        getJuceApiName(uint index);
-    static const char* const* getJuceApiDeviceNames(uint index);
-    static const EngineDriverDeviceInfo* getJuceDeviceInfo(uint index, const char* deviceName);
-    static bool               showJuceDeviceControlPanel(uint index, const char* deviceName);
-# else
-    // RtAudio
-    static CarlaEngine*       newRtAudio(AudioApi api);
-    static uint               getRtAudioApiCount();
-    static const char*        getRtAudioApiName(uint index);
-    static const char* const* getRtAudioApiDeviceNames(uint index);
-    static const EngineDriverDeviceInfo* getRtAudioDeviceInfo(uint index, const char* deviceName);
-# endif
-#endif
 
     CARLA_DECLARE_NON_COPY_CLASS(CarlaEngine)
 };

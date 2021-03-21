@@ -27,7 +27,7 @@
  * @{
  */
 
-// -----------------------------------------------------------------------
+// --------------------------------------------------------------------------------------------------------------------
 // Native Plugin Class
 
 class NativePluginClass
@@ -225,11 +225,36 @@ protected:
         pHost->dispatcher(pHost->handle, NATIVE_HOST_OPCODE_HOST_IDLE, 0, 0, nullptr, 0.0f);
     }
 
-    void hostQueueDrawInlineDisplay()
+    bool hostRequestIdle() const
+    {
+        CARLA_SAFE_ASSERT_RETURN(pHost != nullptr, 0);
+
+        return pHost->dispatcher(pHost->handle, NATIVE_HOST_OPCODE_REQUEST_IDLE, 0, 0, nullptr, 0.0f) == 1;
+    }
+
+    bool hostQueueDrawInlineDisplay()
+    {
+        CARLA_SAFE_ASSERT_RETURN(pHost != nullptr, 0);
+
+        return pHost->dispatcher(pHost->handle, NATIVE_HOST_OPCODE_QUEUE_INLINE_DISPLAY, 0, 0, nullptr, 0.0f) == 1;
+    }
+
+    const char* hostGetFilePath(const char* const filetype) const
+    {
+        CARLA_SAFE_ASSERT_RETURN(pHost != nullptr, nullptr);
+
+        return (const char*)(uintptr_t)pHost->dispatcher(pHost->handle,
+                                                         NATIVE_HOST_OPCODE_GET_FILE_PATH,
+                                                         0, 0,
+                                                         (void*)const_cast<char*>(filetype),
+                                                         0.0f);
+    }
+
+    void hostSendPreviewBufferData(const char type, const uint32_t size, const void* const buffer)
     {
         CARLA_SAFE_ASSERT_RETURN(pHost != nullptr,);
 
-        pHost->dispatcher(pHost->handle, NATIVE_HOST_OPCODE_QUEUE_INLINE_DISPLAY, 0, 0, nullptr, 0.0f);
+        pHost->dispatcher(pHost->handle, NATIVE_HOST_OPCODE_PREVIEW_BUFFER_DATA, type, size, const_cast<void*>(buffer), 0.0f);
     }
 
     // -------------------------------------------------------------------
@@ -300,7 +325,7 @@ protected:
 
     virtual void deactivate() {}
 
-    virtual void process(const float** inBuffer, float** outBuffer, uint32_t frames,
+    virtual void process(const float* const* inBuffer, float** outBuffer, uint32_t frames,
                          const NativeMidiEvent* midiEvents, uint32_t midiEventCount) = 0;
 
     // -------------------------------------------------------------------
@@ -387,12 +412,23 @@ protected:
         CARLA_SAFE_ASSERT_RETURN(uiName != nullptr && uiName[0] != '\0',);
     }
 
+    virtual bool uiMIDIEvent(uint8_t size, const uint8_t data[])
+    {
+        return false;
+
+        // unused
+        (void)size;
+        (void)data;
+    }
+
     virtual const NativeInlineDisplayImageSurface* renderInlineDisplay(const uint32_t width, const uint32_t height)
     {
         CARLA_SAFE_ASSERT_RETURN(width > 0 && height > 0, nullptr);
 
         return nullptr;
     }
+
+    virtual void idle() {}
 
     // -------------------------------------------------------------------
 
@@ -480,8 +516,9 @@ public:
         handlePtr->deactivate();
     }
 
+    // FIXME for v3.0, use const for the input buffer
     static void _process(NativePluginHandle handle,
-                         const float** inBuffer, float** outBuffer, const uint32_t frames,
+                         float** inBuffer, float** outBuffer, const uint32_t frames,
                          const NativeMidiEvent* midiEvents, uint32_t midiEventCount)
     {
         handlePtr->process(inBuffer, outBuffer, frames, midiEvents, midiEventCount);
@@ -521,6 +558,14 @@ public:
             return 0;
         case NATIVE_PLUGIN_OPCODE_GET_INTERNAL_HANDLE:
             return 0;
+        case NATIVE_PLUGIN_OPCODE_IDLE:
+            handlePtr->idle();
+            return 0;
+        case NATIVE_PLUGIN_OPCODE_UI_MIDI_EVENT:
+            CARLA_SAFE_ASSERT_RETURN(index >= 0 && index < UINT8_MAX, 0);
+            CARLA_SAFE_ASSERT_RETURN(ptr != nullptr, 0);
+            return handlePtr->uiMIDIEvent(static_cast<uint8_t>(index),
+                                          static_cast<uint8_t*>(ptr));
         }
 
         return 0;
@@ -542,7 +587,7 @@ public:
 
 /**@}*/
 
-// ---------------------------------------------------------------------------------------------------------------------
+// --------------------------------------------------------------------------------------------------------------------
 // -Weffc++ compat ext widget
 
 extern "C" {
@@ -559,7 +604,7 @@ typedef struct _NativeInlineDisplayImageSurfaceCompat {
 
 }
 
-// -----------------------------------------------------------------------
+// --------------------------------------------------------------------------------------------------------------------
 
 #define PluginClassEND(ClassName)                                            \
 public:                                                                      \
@@ -595,8 +640,8 @@ public:                                                                      \
     ClassName::_set_state,              \
     ClassName::_dispatcher,             \
     ClassName::_render_inline_display,  \
-    0, 0
+    0, 0, nullptr, nullptr, 0, 0
 
-// -----------------------------------------------------------------------
+// --------------------------------------------------------------------------------------------------------------------
 
 #endif // CARLA_NATIVE_HPP_INCLUDED

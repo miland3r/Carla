@@ -95,6 +95,9 @@
 #define JACK_POSITION_MASK (JackPositionBBT|JackPositionTimecode|JackBBTFrameOffset|JackAudioVideoRatio|JackVideoFrameOffset)
 #define EXTENDED_TIME_INFO
 
+#define JACK_UUID_SIZE 36
+#define JACK_UUID_STRING_SIZE (JACK_UUID_SIZE+1) /* includes trailing null */
+
 extern "C" {
 
 enum JackOptions {
@@ -133,7 +136,8 @@ enum JackPortFlags {
     JackPortIsOutput   = 0x02,
     JackPortIsPhysical = 0x04,
     JackPortCanMonitor = 0x08,
-    JackPortIsTerminal = 0x10
+    JackPortIsTerminal = 0x10,
+    JackPortIsControlVoltage = 0x100
 };
 
 enum JackTransportState {
@@ -299,6 +303,7 @@ JACKBRIDGE_API char* jackbridge_get_uuid_for_client_name(jack_client_t* client, 
 JACKBRIDGE_API char* jackbridge_get_client_name_by_uuid(jack_client_t* client, const char* uuid);
 
 JACKBRIDGE_API bool jackbridge_uuid_parse(const char* buf, jack_uuid_t* uuid);
+JACKBRIDGE_API void jackbridge_uuid_unparse(jack_uuid_t uuid, char buf[JACK_UUID_STRING_SIZE]);
 
 JACKBRIDGE_API bool jackbridge_activate(jack_client_t* client);
 JACKBRIDGE_API bool jackbridge_deactivate(jack_client_t* client);

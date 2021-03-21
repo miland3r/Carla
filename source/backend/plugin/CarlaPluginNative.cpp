@@ -1,6 +1,6 @@
 /*
  * Carla Native Plugin
- * Copyright (C) 2012-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2012-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -18,6 +18,7 @@
 #include "CarlaPluginInternal.hpp"
 #include "CarlaEngine.hpp"
 
+#include "CarlaBackendUtils.hpp"
 #include "CarlaMathUtils.hpp"
 #include "CarlaNative.h"
 
@@ -96,7 +97,9 @@ CARLA_BACKEND_START_NAMESPACE
 // Fallback data
 
 static const CustomData  kCustomDataFallback = { nullptr, nullptr, nullptr };
-static const EngineEvent kNullEngineEvent    = { kEngineEventTypeNull, 0, 0, {} };
+static EngineEvent kNullEngineEvent = {
+    kEngineEventTypeNull, 0, 0, {{ kEngineControlEventTypeNull, 0, -1, 0.0f, true }}
+};
 
 // -----------------------------------------------------------------------
 
@@ -249,11 +252,14 @@ public:
           fHost(),
           fDescriptor(nullptr),
           fIsProcessing(false),
-          fIsOffline(false),
+          fIsOffline(engine->isOffline()),
           fIsUiAvailable(false),
           fIsUiVisible(false),
+          fNeedsIdle(false),
           fInlineDisplayNeedsRedraw(false),
           fInlineDisplayLastRedrawTime(0),
+          fLastProjectFilename(),
+          fLastProjectFolder(),
           fAudioAndCvInBuffers(nullptr),
           fAudioAndCvOutBuffers(nullptr),
           fMidiEventInCount(0),
@@ -310,7 +316,7 @@ public:
         pData->masterMutex.lock();
 
         if (pData->client != nullptr && pData->client->isActive())
-            pData->client->deactivate();
+            pData->client->deactivate(true);
 
         CARLA_ASSERT(! fIsProcessing);
 
@@ -343,7 +349,7 @@ public:
 
         if (fHost.uiName != nullptr)
         {
-            delete[] fHost.uiName;
+            std::free(const_cast<char*>(fHost.uiName));
             fHost.uiName = nullptr;
         }
 
@@ -438,6 +444,9 @@ public:
             options |= PLUGIN_OPTION_SEND_PITCHBEND;
         if (fDescriptor->supports & NATIVE_PLUGIN_SUPPORTS_ALL_SOUND_OFF)
             options |= PLUGIN_OPTION_SEND_ALL_SOUND_OFF;
+
+        if (fDescriptor->midiIns > 0)
+            options |= PLUGIN_OPTION_SKIP_SENDING_NOTES;
 
         if (fDescriptor->supports & NATIVE_PLUGIN_SUPPORTS_PROGRAM_CHANGES)
             options |= PLUGIN_OPTION_SEND_PROGRAM_CHANGES;
@@ -577,6 +586,52 @@ public:
         return CarlaPlugin::getParameterUnit(parameterId, strBuf);
     }
 
+    bool getParameterComment(const uint32_t parameterId, char* const strBuf) const noexcept override
+    {
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor->get_parameter_info != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(fHandle != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, false);
+
+        // FIXME - try
+        if (const NativeParameter* const param = fDescriptor->get_parameter_info(fHandle, parameterId))
+        {
+            if (param->comment != nullptr)
+            {
+                std::strncpy(strBuf, param->comment, STR_MAX);
+                return true;
+            }
+
+            return CarlaPlugin::getParameterComment(parameterId, strBuf);
+        }
+
+        carla_safe_assert("const Parameter* const param = fDescriptor->get_parameter_info(fHandle, parameterId)", __FILE__, __LINE__);
+        return CarlaPlugin::getParameterComment(parameterId, strBuf);
+    }
+
+    bool getParameterGroupName(const uint32_t parameterId, char* const strBuf) const noexcept override
+    {
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(fDescriptor->get_parameter_info != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(fHandle != nullptr, false);
+        CARLA_SAFE_ASSERT_RETURN(parameterId < pData->param.count, false);
+
+        // FIXME - try
+        if (const NativeParameter* const param = fDescriptor->get_parameter_info(fHandle, parameterId))
+        {
+            if (param->groupName != nullptr)
+            {
+                std::strncpy(strBuf, param->groupName, STR_MAX);
+                return true;
+            }
+
+            return CarlaPlugin::getParameterGroupName(parameterId, strBuf);
+        }
+
+        carla_safe_assert("const Parameter* const param = fDescriptor->get_parameter_info(fHandle, parameterId)", __FILE__, __LINE__);
+        return CarlaPlugin::getParameterGroupName(parameterId, strBuf);
+    }
+
     bool getParameterScalePointLabel(const uint32_t parameterId, const uint32_t scalePointId, char* const strBuf) const noexcept override
     {
         CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr, false);
@@ -608,7 +663,7 @@ public:
     // -------------------------------------------------------------------
     // Set data (state)
 
-    void prepareForSave() override
+    void prepareForSave(bool) override
     {
         CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr,);
         CARLA_SAFE_ASSERT_RETURN(fHandle != nullptr,);
@@ -645,18 +700,10 @@ public:
         CARLA_SAFE_ASSERT_RETURN(fHandle != nullptr,);
         CARLA_SAFE_ASSERT_RETURN(newName != nullptr && newName[0] != '\0',);
 
-        char uiName[std::strlen(newName)+6+1];
-        std::strcpy(uiName, newName);
-        std::strcat(uiName, " (GUI)");
-
-        if (fHost.uiName != nullptr)
-            delete[] fHost.uiName;
-        fHost.uiName = carla_strdup(uiName);
-
-        if (fDescriptor->dispatcher != nullptr && fIsUiVisible)
-            fDescriptor->dispatcher(fHandle, NATIVE_PLUGIN_OPCODE_UI_NAME_CHANGED, 0, 0, uiName, 0.0f);
-
         CarlaPlugin::setName(newName);
+
+        if (pData->uiTitle.isEmpty())
+            setWindowTitle(nullptr);
     }
 
     void setCtrlChannel(const int8_t channel, const bool sendOsc, const bool sendCallback) noexcept override
@@ -665,6 +712,36 @@ public:
             pData->midiprog.current = fCurMidiProgs[channel];
 
         CarlaPlugin::setCtrlChannel(channel, sendOsc, sendCallback);
+    }
+
+    void setWindowTitle(const char* const title) noexcept
+    {
+        CarlaString uiName;
+
+        if (title != nullptr)
+        {
+            uiName = title;
+        }
+        else
+        {
+            uiName  = pData->name;
+            uiName += " (GUI)";
+        }
+
+        std::free(const_cast<char*>(fHost.uiName));
+        fHost.uiName = uiName.releaseBufferPointer();
+
+        if (fDescriptor->dispatcher != nullptr && fIsUiVisible)
+        {
+            try {
+                fDescriptor->dispatcher(fHandle,
+                                        NATIVE_PLUGIN_OPCODE_UI_NAME_CHANGED,
+                                        0, 0,
+                                        const_cast<char*>(fHost.uiName),
+                                        0.0f);
+            } CARLA_SAFE_EXCEPTION("set custom ui title");
+        }
+
     }
 
     // -------------------------------------------------------------------
@@ -859,6 +936,12 @@ public:
     // -------------------------------------------------------------------
     // Set ui stuff
 
+    void setCustomUITitle(const char* const title) noexcept override
+    {
+        setWindowTitle(title);
+        CarlaPlugin::setCustomUITitle(title);
+    }
+
     void showCustomUI(const bool yesNo) override
     {
         CARLA_SAFE_ASSERT_RETURN(fDescriptor != nullptr,);
@@ -921,6 +1004,12 @@ public:
 
     void idle() override
     {
+        if (fNeedsIdle)
+        {
+            fNeedsIdle = false;
+            fDescriptor->dispatcher(fHandle, NATIVE_PLUGIN_OPCODE_IDLE, 0, 0, nullptr, 0.0f);
+        }
+
         if (fInlineDisplayNeedsRedraw)
         {
             // TESTING
@@ -942,7 +1031,13 @@ public:
                                             0, 0, 0, 0.0f, nullptr);
                 }
             }
+            else
+            {
+                fInlineDisplayNeedsRedraw = false;
+            }
         }
+
+        CarlaPlugin::idle();
     }
 
     void uiIdle() override
@@ -976,9 +1071,7 @@ public:
 
         clearBuffers();
 
-        const float sampleRate((float)pData->engine->getSampleRate());
-
-        uint32_t aIns, aOuts, cvIns, cvOuts, mIns, mOuts, params, j;
+        uint32_t aIns, aOuts, cvIns, cvOuts, mIns, mOuts, j;
 
         bool forcedStereoIn, forcedStereoOut;
         forcedStereoIn = forcedStereoOut = false;
@@ -992,7 +1085,6 @@ public:
         cvOuts = fDescriptor->cvOuts;
         mIns   = fDescriptor->midiIns;
         mOuts  = fDescriptor->midiOuts;
-        params = (fDescriptor->get_parameter_count != nullptr && fDescriptor->get_parameter_info != nullptr) ? fDescriptor->get_parameter_count(fHandle) : 0;
 
         if ((pData->options & PLUGIN_OPTION_FORCE_STEREO) != 0 && (aIns == 1 || aOuts == 1) && mIns <= 1 && mOuts <= 1)
         {
@@ -1060,11 +1152,6 @@ public:
             needsCtrlOut = (mOuts == 1);
         }
 
-        if (params > 0)
-        {
-            pData->param.createNew(params, true);
-        }
-
         const uint portNameSize(pData->engine->getMaxPortNameSize());
         CarlaString portName;
 
@@ -1079,7 +1166,11 @@ public:
                 portName += ":";
             }
 
-            if (aIns > 1 && ! forcedStereoIn)
+            if (fDescriptor->get_buffer_port_name != nullptr)
+            {
+                portName += fDescriptor->get_buffer_port_name(fHandle, forcedStereoIn ? 0 : j, false);
+            }
+            else if (aIns > 1 && ! forcedStereoIn)
             {
                 portName += "input_";
                 portName += CarlaString(j+1);
@@ -1112,7 +1203,11 @@ public:
                 portName += ":";
             }
 
-            if (aOuts > 1 && ! forcedStereoOut)
+            if (fDescriptor->get_buffer_port_name != nullptr)
+            {
+                portName += fDescriptor->get_buffer_port_name(fHandle, forcedStereoOut ? 0 : j, true);
+            }
+            else if (aOuts > 1 && ! forcedStereoOut)
             {
                 portName += "output_";
                 portName += CarlaString(j+1);
@@ -1145,7 +1240,11 @@ public:
                 portName += ":";
             }
 
-            if (cvIns > 1)
+            if (fDescriptor->get_buffer_port_name != nullptr)
+            {
+                portName += fDescriptor->get_buffer_port_name(fHandle, fDescriptor->audioIns + j, false);
+            }
+            else if (cvIns > 1)
             {
                 portName += "cv_input_";
                 portName += CarlaString(j+1);
@@ -1155,8 +1254,21 @@ public:
 
             portName.truncate(portNameSize);
 
+            float min = -1.0f, max = 1.0f;
+            if (fDescriptor->get_buffer_port_range != nullptr)
+            {
+                if (const NativePortRange* const range = fDescriptor->get_buffer_port_range(fHandle,
+                                                                                            fDescriptor->audioIns + j,
+                                                                                            false))
+                {
+                    min = range->minimum;
+                    max = range->maximum;
+                }
+            }
+
             pData->cvIn.ports[j].port   = (CarlaEngineCVPort*)pData->client->addPort(kEnginePortTypeCV, portName, true, j);
             pData->cvIn.ports[j].rindex = j;
+            pData->cvIn.ports[j].port->setRange(min, max);
         }
 
         // CV Outs
@@ -1170,7 +1282,11 @@ public:
                 portName += ":";
             }
 
-            if (cvOuts > 1)
+            if (fDescriptor->get_buffer_port_name != nullptr)
+            {
+                portName += fDescriptor->get_buffer_port_name(fHandle, fDescriptor->audioOuts + j, true);
+            }
+            else if (cvOuts > 1)
             {
                 portName += "cv_output_";
                 portName += CarlaString(j+1);
@@ -1180,8 +1296,21 @@ public:
 
             portName.truncate(portNameSize);
 
+            float min = -1.0f, max = 1.0f;
+            if (fDescriptor->get_buffer_port_range != nullptr)
+            {
+                if (const NativePortRange* const range = fDescriptor->get_buffer_port_range(fHandle,
+                                                                                            fDescriptor->audioOuts + j,
+                                                                                            true))
+                {
+                    min = range->minimum;
+                    max = range->maximum;
+                }
+            }
+
             pData->cvOut.ports[j].port   = (CarlaEngineCVPort*)pData->client->addPort(kEnginePortTypeCV, portName, false, j);
             pData->cvOut.ports[j].rindex = j;
+            pData->cvOut.ports[j].port->setRange(min, max);
         }
 
         // MIDI Input (only if multiple)
@@ -1232,7 +1361,105 @@ public:
             pData->event.portOut = fMidiOut.ports[0];
         }
 
-        for (j=0; j < params; ++j)
+        reloadParameters(&needsCtrlIn, &needsCtrlOut);
+
+        if (needsCtrlIn || mIns == 1)
+        {
+            portName.clear();
+
+            if (processMode == ENGINE_PROCESS_MODE_SINGLE_CLIENT)
+            {
+                portName  = pData->name;
+                portName += ":";
+            }
+
+            portName += "events-in";
+            portName.truncate(portNameSize);
+
+            pData->event.portIn = (CarlaEngineEventPort*)pData->client->addPort(kEnginePortTypeEvent, portName, true, 0);
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+            pData->event.cvSourcePorts = pData->client->createCVSourcePorts();
+#endif
+        }
+
+        if (needsCtrlOut || mOuts == 1)
+        {
+            portName.clear();
+
+            if (processMode == ENGINE_PROCESS_MODE_SINGLE_CLIENT)
+            {
+                portName  = pData->name;
+                portName += ":";
+            }
+
+            portName += "events-out";
+            portName.truncate(portNameSize);
+
+            pData->event.portOut = (CarlaEngineEventPort*)pData->client->addPort(kEnginePortTypeEvent, portName, false, 0);
+        }
+
+        if (forcedStereoIn || forcedStereoOut)
+            pData->options |= PLUGIN_OPTION_FORCE_STEREO;
+        else
+            pData->options &= ~PLUGIN_OPTION_FORCE_STEREO;
+
+        // plugin hints
+        pData->hints = 0x0;
+
+        if (aOuts > 0 && (aIns == aOuts || aIns == 1))
+            pData->hints |= PLUGIN_CAN_DRYWET;
+
+        if (aOuts > 0)
+            pData->hints |= PLUGIN_CAN_VOLUME;
+
+        if (aOuts >= 2 && aOuts % 2 == 0)
+            pData->hints |= PLUGIN_CAN_BALANCE;
+
+        // native plugin hints
+        if (fDescriptor->hints & NATIVE_PLUGIN_IS_RTSAFE)
+            pData->hints |= PLUGIN_IS_RTSAFE;
+        if (fDescriptor->hints & NATIVE_PLUGIN_IS_SYNTH)
+            pData->hints |= PLUGIN_IS_SYNTH;
+        if (fDescriptor->hints & NATIVE_PLUGIN_HAS_UI)
+            pData->hints |= PLUGIN_HAS_CUSTOM_UI;
+        if (fDescriptor->hints & NATIVE_PLUGIN_NEEDS_FIXED_BUFFERS)
+            pData->hints |= PLUGIN_NEEDS_FIXED_BUFFERS;
+        if (fDescriptor->hints & NATIVE_PLUGIN_NEEDS_UI_MAIN_THREAD)
+            pData->hints |= PLUGIN_NEEDS_UI_MAIN_THREAD;
+        if (fDescriptor->hints & NATIVE_PLUGIN_USES_MULTI_PROGS)
+            pData->hints |= PLUGIN_USES_MULTI_PROGS;
+        if (fDescriptor->hints & NATIVE_PLUGIN_HAS_INLINE_DISPLAY)
+            pData->hints |= PLUGIN_HAS_INLINE_DISPLAY;
+
+        // extra plugin hints
+        pData->extraHints = 0x0;
+
+        bufferSizeChanged(pData->engine->getBufferSize());
+        reloadPrograms(true);
+
+        if (pData->active)
+            activate();
+
+        carla_debug("CarlaPluginNative::reload() - end");
+    }
+
+    void reloadParameters(bool* const needsCtrlIn, bool* const needsCtrlOut)
+    {
+        carla_debug("CarlaPluginNative::reloadParameters() - start");
+
+        const float sampleRate = static_cast<float>(pData->engine->getSampleRate());
+        const uint32_t params = (fDescriptor->get_parameter_count != nullptr && fDescriptor->get_parameter_info != nullptr)
+                              ? fDescriptor->get_parameter_count(fHandle)
+                              : 0;
+
+        pData->param.clear();
+
+        if (params > 0)
+        {
+            pData->param.createNew(params, true);
+        }
+
+        for (uint32_t j=0; j < params; ++j)
         {
             const NativeParameter* const paramInfo(fDescriptor->get_parameter_info(fHandle, j));
 
@@ -1300,20 +1527,27 @@ public:
             if (paramInfo->hints & NATIVE_PARAMETER_IS_OUTPUT)
             {
                 pData->param.data[j].type = PARAMETER_OUTPUT;
-                needsCtrlOut = true;
+                if (needsCtrlOut != nullptr)
+                    *needsCtrlOut = true;
             }
             else
             {
                 pData->param.data[j].type = PARAMETER_INPUT;
-                needsCtrlIn = true;
+                if (needsCtrlIn != nullptr)
+                    *needsCtrlIn = true;
             }
 
             // extra parameter hints
             if (paramInfo->hints & NATIVE_PARAMETER_IS_ENABLED)
+            {
                 pData->param.data[j].hints |= PARAMETER_IS_ENABLED;
 
-            if (paramInfo->hints & NATIVE_PARAMETER_IS_AUTOMABLE)
-                pData->param.data[j].hints |= PARAMETER_IS_AUTOMABLE;
+                if (paramInfo->hints & NATIVE_PARAMETER_IS_AUTOMABLE)
+                {
+                    pData->param.data[j].hints |= PARAMETER_IS_AUTOMABLE;
+                    pData->param.data[j].hints |= PARAMETER_CAN_BE_CV_CONTROLLED;
+                }
+            }
 
             if (paramInfo->hints & NATIVE_PARAMETER_IS_LOGARITHMIC)
                 pData->param.data[j].hints |= PARAMETER_IS_LOGARITHMIC;
@@ -1329,81 +1563,7 @@ public:
             pData->param.ranges[j].stepLarge = stepLarge;
         }
 
-        if (needsCtrlIn || mIns == 1)
-        {
-            portName.clear();
-
-            if (processMode == ENGINE_PROCESS_MODE_SINGLE_CLIENT)
-            {
-                portName  = pData->name;
-                portName += ":";
-            }
-
-            portName += "events-in";
-            portName.truncate(portNameSize);
-
-            pData->event.portIn = (CarlaEngineEventPort*)pData->client->addPort(kEnginePortTypeEvent, portName, true, 0);
-        }
-
-        if (needsCtrlOut || mOuts == 1)
-        {
-            portName.clear();
-
-            if (processMode == ENGINE_PROCESS_MODE_SINGLE_CLIENT)
-            {
-                portName  = pData->name;
-                portName += ":";
-            }
-
-            portName += "events-out";
-            portName.truncate(portNameSize);
-
-            pData->event.portOut = (CarlaEngineEventPort*)pData->client->addPort(kEnginePortTypeEvent, portName, false, 0);
-        }
-
-        if (forcedStereoIn || forcedStereoOut)
-            pData->options |= PLUGIN_OPTION_FORCE_STEREO;
-        else
-            pData->options &= ~PLUGIN_OPTION_FORCE_STEREO;
-
-        // plugin hints
-        pData->hints = 0x0;
-
-        if (aOuts > 0 && (aIns == aOuts || aIns == 1))
-            pData->hints |= PLUGIN_CAN_DRYWET;
-
-        if (aOuts > 0)
-            pData->hints |= PLUGIN_CAN_VOLUME;
-
-        if (aOuts >= 2 && aOuts % 2 == 0)
-            pData->hints |= PLUGIN_CAN_BALANCE;
-
-        // native plugin hints
-        if (fDescriptor->hints & NATIVE_PLUGIN_IS_RTSAFE)
-            pData->hints |= PLUGIN_IS_RTSAFE;
-        if (fDescriptor->hints & NATIVE_PLUGIN_IS_SYNTH)
-            pData->hints |= PLUGIN_IS_SYNTH;
-        if (fDescriptor->hints & NATIVE_PLUGIN_HAS_UI)
-            pData->hints |= PLUGIN_HAS_CUSTOM_UI;
-        if (fDescriptor->hints & NATIVE_PLUGIN_NEEDS_FIXED_BUFFERS)
-            pData->hints |= PLUGIN_NEEDS_FIXED_BUFFERS;
-        if (fDescriptor->hints & NATIVE_PLUGIN_NEEDS_UI_MAIN_THREAD)
-            pData->hints |= PLUGIN_NEEDS_UI_MAIN_THREAD;
-        if (fDescriptor->hints & NATIVE_PLUGIN_USES_MULTI_PROGS)
-            pData->hints |= PLUGIN_USES_MULTI_PROGS;
-        if (fDescriptor->hints & NATIVE_PLUGIN_HAS_INLINE_DISPLAY)
-            pData->hints |= PLUGIN_HAS_INLINE_DISPLAY;
-
-        // extra plugin hints
-        pData->extraHints = 0x0;
-
-        bufferSizeChanged(pData->engine->getBufferSize());
-        reloadPrograms(true);
-
-        if (pData->active)
-            activate();
-
-        carla_debug("CarlaPluginNative::reload() - end");
+        carla_debug("CarlaPluginNative::reloadParameters() - end");
     }
 
     void reloadPrograms(const bool doInit) override
@@ -1529,7 +1689,7 @@ public:
         }
     }
 
-    const EngineEvent& findNextEvent()
+    EngineEvent& findNextEvent()
     {
         if (fMidiIn.count == 1)
         {
@@ -1580,8 +1740,8 @@ public:
         return kNullEngineEvent;
     }
 
-    void process(const float** const audioIn, float** const audioOut,
-                 const float** const cvIn, float** const cvOut, const uint32_t frames) override
+    void process(const float* const* const audioIn, float** const audioOut,
+                 const float* const* const cvIn, float** const cvOut, const uint32_t frames) override
     {
         // --------------------------------------------------------------------------------------------------------
         // Check if active
@@ -1736,7 +1896,7 @@ public:
 #ifndef BUILD_BRIDGE
             bool allNotesOffSent = false;
 #endif
-            bool sampleAccurate  = (pData->options & PLUGIN_OPTION_FIXED_BUFFERS) == 0;
+            const bool isSampleAccurate = (pData->options & PLUGIN_OPTION_FIXED_BUFFERS) == 0;
 
             uint32_t startTime  = 0;
             uint32_t timeOffset = 0;
@@ -1747,9 +1907,14 @@ public:
             else
                 nextBankId = 0;
 
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+            if (cvIn != nullptr && pData->event.cvSourcePorts != nullptr)
+                pData->event.cvSourcePorts->initPortBuffers(cvIn + pData->cvIn.count, frames, isSampleAccurate, pData->event.portIn);
+#endif
+
             for (;;)
             {
-                const EngineEvent& event(findNextEvent());
+                EngineEvent& event(findNextEvent());
 
                 if (event.type == kEngineEventTypeNull)
                     break;
@@ -1764,7 +1929,7 @@ public:
                     eventTime = timeOffset;
                 }
 
-                if (sampleAccurate && eventTime > timeOffset)
+                if (isSampleAccurate && eventTime > timeOffset)
                 {
                     if (processSingle(audioIn, audioOut, cvIn, cvOut, eventTime - timeOffset, timeOffset))
                     {
@@ -1799,7 +1964,7 @@ public:
                     break;
 
                 case kEngineEventTypeControl: {
-                    const EngineControlEvent& ctrlEvent = event.ctrl;
+                    EngineControlEvent& ctrlEvent(event.ctrl);
 
                     switch (ctrlEvent.type)
                     {
@@ -1807,28 +1972,40 @@ public:
                         break;
 
                     case kEngineControlEventTypeParameter: {
-#ifndef BUILD_BRIDGE
+                        float value;
+
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+                        // non-midi
+                        if (event.channel == kEngineEventNonMidiChannel)
+                        {
+                            const uint32_t k = ctrlEvent.param;
+                            CARLA_SAFE_ASSERT_CONTINUE(k < pData->param.count);
+
+                            ctrlEvent.handled = true;
+                            value = pData->param.getFinalUnnormalizedValue(k, ctrlEvent.normalizedValue);
+                            setParameterValueRT(k, value, true);
+                            continue;
+                        }
+
                         // Control backend stuff
                         if (event.channel == pData->ctrlChannel)
                         {
-                            float value;
-
                             if (MIDI_IS_CONTROL_BREATH_CONTROLLER(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_DRYWET) > 0)
                             {
-                                value = ctrlEvent.value;
+                                ctrlEvent.handled = true;
+                                value = ctrlEvent.normalizedValue;
                                 setDryWetRT(value, true);
                             }
-
-                            if (MIDI_IS_CONTROL_CHANNEL_VOLUME(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_VOLUME) > 0)
+                            else if (MIDI_IS_CONTROL_CHANNEL_VOLUME(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_VOLUME) > 0)
                             {
-                                value = ctrlEvent.value*127.0f/100.0f;
+                                ctrlEvent.handled = true;
+                                value = ctrlEvent.normalizedValue*127.0f/100.0f;
                                 setVolumeRT(value, true);
                             }
-
-                            if (MIDI_IS_CONTROL_BALANCE(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_BALANCE) > 0)
+                            else if (MIDI_IS_CONTROL_BALANCE(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_BALANCE) > 0)
                             {
                                 float left, right;
-                                value = ctrlEvent.value/0.5f - 1.0f;
+                                value = ctrlEvent.normalizedValue/0.5f - 1.0f;
 
                                 if (value < 0.0f)
                                 {
@@ -1846,6 +2023,7 @@ public:
                                     right = 1.0f;
                                 }
 
+                                ctrlEvent.handled = true;
                                 setBalanceLeftRT(left, true);
                                 setBalanceRightRT(right, true);
                             }
@@ -1856,34 +2034,19 @@ public:
                         {
                             if (pData->param.data[k].midiChannel != event.channel)
                                 continue;
-                            if (pData->param.data[k].midiCC != ctrlEvent.param)
+                            if (pData->param.data[k].mappedControlIndex != ctrlEvent.param)
                                 continue;
                             if (pData->param.data[k].type != PARAMETER_INPUT)
                                 continue;
                             if ((pData->param.data[k].hints & PARAMETER_IS_AUTOMABLE) == 0)
                                 continue;
 
-                            float value;
-
-                            if (pData->param.data[k].hints & PARAMETER_IS_BOOLEAN)
-                            {
-                                value = (ctrlEvent.value < 0.5f) ? pData->param.ranges[k].min : pData->param.ranges[k].max;
-                            }
-                            else
-                            {
-                                if (pData->param.data[k].hints & PARAMETER_IS_LOGARITHMIC)
-                                    value = pData->param.ranges[k].getUnnormalizedLogValue(ctrlEvent.value);
-                                else
-                                    value = pData->param.ranges[k].getUnnormalizedValue(ctrlEvent.value);
-
-                                if (pData->param.data[k].hints & PARAMETER_IS_INTEGER)
-                                    value = std::rint(value);
-                            }
-
+                            ctrlEvent.handled = true;
+                            value = pData->param.getFinalUnnormalizedValue(k, ctrlEvent.normalizedValue);
                             setParameterValueRT(k, value, true);
                         }
 
-                        if ((pData->options & PLUGIN_OPTION_SEND_CONTROL_CHANGES) != 0 && ctrlEvent.param < MAX_MIDI_CONTROL)
+                        if ((pData->options & PLUGIN_OPTION_SEND_CONTROL_CHANGES) != 0 && ctrlEvent.param < MAX_MIDI_VALUE)
                         {
                             if (fMidiEventInCount >= kPluginMaxMidiEvents)
                                 continue;
@@ -1891,13 +2054,17 @@ public:
                             NativeMidiEvent& nativeEvent(fMidiInEvents[fMidiEventInCount++]);
                             carla_zeroStruct(nativeEvent);
 
-                            nativeEvent.time    = sampleAccurate ? startTime : eventTime;
+                            nativeEvent.time    = isSampleAccurate ? startTime : eventTime;
                             nativeEvent.data[0] = uint8_t(MIDI_STATUS_CONTROL_CHANGE | (event.channel & MIDI_CHANNEL_BIT));
                             nativeEvent.data[1] = uint8_t(ctrlEvent.param);
-                            nativeEvent.data[2] = uint8_t(ctrlEvent.value*127.0f);
+                            nativeEvent.data[2] = uint8_t(ctrlEvent.normalizedValue*127.0f);
                             nativeEvent.size    = 3;
                         }
 
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+                        if (! ctrlEvent.handled)
+                            checkForMidiLearn(event);
+#endif
                         break;
                     } // case kEngineControlEventTypeParameter
 
@@ -1915,7 +2082,7 @@ public:
                             NativeMidiEvent& nativeEvent(fMidiInEvents[fMidiEventInCount++]);
                             carla_zeroStruct(nativeEvent);
 
-                            nativeEvent.time    = sampleAccurate ? startTime : eventTime;
+                            nativeEvent.time    = isSampleAccurate ? startTime : eventTime;
                             nativeEvent.data[0] = uint8_t(MIDI_STATUS_CONTROL_CHANGE | (event.channel & MIDI_CHANNEL_BIT));
                             nativeEvent.data[1] = MIDI_CONTROL_BANK_SELECT;
                             nativeEvent.data[2] = uint8_t(ctrlEvent.param);
@@ -1943,10 +2110,7 @@ public:
 
                                         if (event.channel == pData->ctrlChannel)
                                         {
-                                            pData->postponeRtEvent(kPluginPostRtEventMidiProgramChange,
-                                                                   true,
-                                                                   static_cast<int32_t>(k),
-                                                                   0, 0, 0.0f);
+                                            pData->postponeMidiProgramChangeRtEvent(true, k);
                                         }
 
                                         break;
@@ -1962,7 +2126,7 @@ public:
                             NativeMidiEvent& nativeEvent(fMidiInEvents[fMidiEventInCount++]);
                             carla_zeroStruct(nativeEvent);
 
-                            nativeEvent.time    = sampleAccurate ? startTime : eventTime;
+                            nativeEvent.time    = isSampleAccurate ? startTime : eventTime;
                             nativeEvent.data[0] = uint8_t(MIDI_STATUS_PROGRAM_CHANGE | (event.channel & MIDI_CHANNEL_BIT));
                             nativeEvent.data[1] = uint8_t(ctrlEvent.param);
                             nativeEvent.size    = 2;
@@ -1978,7 +2142,7 @@ public:
                             NativeMidiEvent& nativeEvent(fMidiInEvents[fMidiEventInCount++]);
                             carla_zeroStruct(nativeEvent);
 
-                            nativeEvent.time    = sampleAccurate ? startTime : eventTime;
+                            nativeEvent.time    = isSampleAccurate ? startTime : eventTime;
                             nativeEvent.data[0] = uint8_t(MIDI_STATUS_CONTROL_CHANGE | (event.channel & MIDI_CHANNEL_BIT));
                             nativeEvent.data[1] = MIDI_CONTROL_ALL_SOUND_OFF;
                             nativeEvent.data[2] = 0;
@@ -2003,7 +2167,7 @@ public:
                             NativeMidiEvent& nativeEvent(fMidiInEvents[fMidiEventInCount++]);
                             carla_zeroStruct(nativeEvent);
 
-                            nativeEvent.time    = sampleAccurate ? startTime : eventTime;
+                            nativeEvent.time    = isSampleAccurate ? startTime : eventTime;
                             nativeEvent.data[0] = uint8_t(MIDI_STATUS_CONTROL_CHANGE | (event.channel & MIDI_CHANNEL_BIT));
                             nativeEvent.data[1] = MIDI_CONTROL_ALL_NOTES_OFF;
                             nativeEvent.data[2] = 0;
@@ -2028,6 +2192,8 @@ public:
 
                     uint8_t status = uint8_t(MIDI_GET_STATUS_FROM_DATA(midiEvent.data));
 
+                    if ((status == MIDI_STATUS_NOTE_OFF || status == MIDI_STATUS_NOTE_ON) && (pData->options & PLUGIN_OPTION_SKIP_SENDING_NOTES))
+                        continue;
                     if (status == MIDI_STATUS_CHANNEL_PRESSURE && (pData->options & PLUGIN_OPTION_SEND_CHANNEL_PRESSURE) == 0)
                         continue;
                     if (status == MIDI_STATUS_CONTROL_CHANGE && (pData->options & PLUGIN_OPTION_SEND_CONTROL_CHANGES) == 0)
@@ -2045,7 +2211,7 @@ public:
                     carla_zeroStruct(nativeEvent);
 
                     nativeEvent.port = midiEvent.port;
-                    nativeEvent.time = sampleAccurate ? startTime : eventTime;
+                    nativeEvent.time = isSampleAccurate ? startTime : eventTime;
                     nativeEvent.size = midiEvent.size;
 
                     nativeEvent.data[0] = uint8_t(status | (event.channel & MIDI_CHANNEL_BIT));
@@ -2055,20 +2221,11 @@ public:
 
                     if (status == MIDI_STATUS_NOTE_ON)
                     {
-                        pData->postponeRtEvent(kPluginPostRtEventNoteOn,
-                                               true,
-                                               event.channel,
-                                               midiEvent.data[1],
-                                               midiEvent.data[2],
-                                               0.0f);
+                        pData->postponeNoteOnRtEvent(true, event.channel, midiEvent.data[1], midiEvent.data[2]);
                     }
                     else if (status == MIDI_STATUS_NOTE_OFF)
                     {
-                        pData->postponeRtEvent(kPluginPostRtEventNoteOff,
-                                               true,
-                                               event.channel,
-                                               midiEvent.data[1],
-                                               0, 0.0f);
+                        pData->postponeNoteOffRtEvent(true, event.channel, midiEvent.data[1]);
                     }
                 } break;
                 } // switch (event.type)
@@ -2106,18 +2263,23 @@ public:
                 curValue = fDescriptor->get_parameter_value(fHandle, k);
                 pData->param.ranges[k].fixValue(curValue);
 
-                if (pData->param.data[k].midiCC > 0)
+                if (pData->param.data[k].mappedControlIndex > 0)
                 {
                     value = pData->param.ranges[k].getNormalizedValue(curValue);
-                    pData->event.portOut->writeControlEvent(0, pData->param.data[k].midiChannel, kEngineControlEventTypeParameter, static_cast<uint16_t>(pData->param.data[k].midiCC), value);
+                    pData->event.portOut->writeControlEvent(0,
+                                                            pData->param.data[k].midiChannel,
+                                                            kEngineControlEventTypeParameter,
+                                                            static_cast<uint16_t>(pData->param.data[k].mappedControlIndex),
+                                                            -1,
+                                                            value);
                 }
             }
         } // End of Control Output
 #endif
     }
 
-    bool processSingle(const float** const audioIn, float** const audioOut,
-                       const float** const cvIn, float** const cvOut,
+    bool processSingle(const float* const* const audioIn, float** const audioOut,
+                       const float* const* const cvIn, float** const cvOut,
                        const uint32_t frames, const uint32_t timeOffset)
     {
         CARLA_SAFE_ASSERT_RETURN(frames > 0, false);
@@ -2181,18 +2343,18 @@ public:
         if (fHandle2 == nullptr)
         {
             fDescriptor->process(fHandle,
-                                 const_cast<const float**>(fAudioAndCvInBuffers), fAudioAndCvOutBuffers, frames,
+                                 fAudioAndCvInBuffers, fAudioAndCvOutBuffers, frames,
                                  fMidiInEvents, fMidiEventInCount);
         }
         else
         {
             fDescriptor->process(fHandle,
-                                 (fAudioAndCvInBuffers != nullptr)  ? const_cast<const float**>(&fAudioAndCvInBuffers[0]) : nullptr,
+                                 (fAudioAndCvInBuffers != nullptr)  ? &fAudioAndCvInBuffers[0]  : nullptr,
                                  (fAudioAndCvOutBuffers != nullptr) ? &fAudioAndCvOutBuffers[0] : nullptr,
                                  frames, fMidiInEvents, fMidiEventInCount);
 
             fDescriptor->process(fHandle2,
-                                 (fAudioAndCvInBuffers != nullptr)  ? const_cast<const float**>(&fAudioAndCvInBuffers[1]) : nullptr,
+                                 (fAudioAndCvInBuffers != nullptr)  ? &fAudioAndCvInBuffers[1]  : nullptr,
                                  (fAudioAndCvOutBuffers != nullptr) ? &fAudioAndCvOutBuffers[1] : nullptr,
                                  frames, fMidiInEvents, fMidiEventInCount);
         }
@@ -2471,7 +2633,18 @@ public:
         if (! fIsUiVisible)
             return;
 
-        // TODO
+        if (fDescriptor->dispatcher != nullptr)
+        {
+            uint8_t data[3] = {
+                uint8_t(MIDI_STATUS_NOTE_ON | (channel & MIDI_CHANNEL_BIT)),
+                note,
+                velo
+            };
+            fDescriptor->dispatcher(fHandle, NATIVE_PLUGIN_OPCODE_UI_MIDI_EVENT,
+                                    3, 0,
+                                    data,
+                                    0.0f);
+        }
     }
 
     void uiNoteOff(const uint8_t channel, const uint8_t note) noexcept override
@@ -2486,12 +2659,23 @@ public:
         if (fDescriptor == nullptr || fHandle == nullptr)
             return;
 
-        // TODO
+        if (fDescriptor->dispatcher != nullptr)
+        {
+            uint8_t data[3] = {
+                uint8_t(MIDI_STATUS_NOTE_OFF | (channel & MIDI_CHANNEL_BIT)),
+                note,
+                0
+            };
+            fDescriptor->dispatcher(fHandle, NATIVE_PLUGIN_OPCODE_UI_MIDI_EVENT,
+                                    3, 0,
+                                    data,
+                                    0.0f);
+        }
     }
 
     // -------------------------------------------------------------------
 
-    const NativeInlineDisplayImageSurface* renderInlineDisplay(const uint32_t width, const uint32_t height)
+    const NativeInlineDisplayImageSurface* renderInlineDisplay(const uint32_t width, const uint32_t height) const
     {
         CARLA_SAFE_ASSERT_RETURN(fDescriptor->hints & NATIVE_PLUGIN_HAS_INLINE_DISPLAY, nullptr);
         CARLA_SAFE_ASSERT_RETURN(fDescriptor->render_inline_display, nullptr);
@@ -2555,60 +2739,128 @@ protected:
         return pData->engine->runFileCallback(FILE_CALLBACK_SAVE, isDir, title, filter);
     }
 
-    intptr_t handleDispatcher(const NativeHostDispatcherOpcode opcode, const int32_t index, const intptr_t value, void* const ptr, const float opt)
+    intptr_t handleDispatcher(const NativeHostDispatcherOpcode opcode,
+                              const int32_t index, const intptr_t value, void* const ptr, const float opt)
     {
-        carla_debug("CarlaPluginNative::handleDispatcher(%i, %i, " P_INTPTR ", %p, %f)",
-                    opcode, index, value, ptr, static_cast<double>(opt));
-
-        intptr_t ret = 0;
+#ifdef DEBUG
+        if (opcode != NATIVE_HOST_OPCODE_QUEUE_INLINE_DISPLAY && opcode != NATIVE_HOST_OPCODE_REQUEST_IDLE) {
+            carla_debug("CarlaPluginNative::handleDispatcher(%i, %i, " P_INTPTR ", %p, %f)",
+                        opcode, index, value, ptr, static_cast<double>(opt));
+        }
+#endif
 
         switch (opcode)
         {
         case NATIVE_HOST_OPCODE_NULL:
             break;
+
         case NATIVE_HOST_OPCODE_UPDATE_PARAMETER:
             // TODO
             pData->engine->callback(true, true, ENGINE_CALLBACK_UPDATE, pData->id, -1, 0, 0, 0.0f, nullptr);
             break;
+
         case NATIVE_HOST_OPCODE_UPDATE_MIDI_PROGRAM:
             // TODO
             pData->engine->callback(true, true, ENGINE_CALLBACK_UPDATE, pData->id, -1, 0, 0, 0.0f, nullptr);
             break;
+
         case NATIVE_HOST_OPCODE_RELOAD_PARAMETERS:
-            reload(); // FIXME
+            reloadParameters(nullptr, nullptr);
             pData->engine->callback(true, true, ENGINE_CALLBACK_RELOAD_PARAMETERS, pData->id, -1, 0, 0, 0.0f, nullptr);
             break;
+
         case NATIVE_HOST_OPCODE_RELOAD_MIDI_PROGRAMS:
             reloadPrograms(false);
             pData->engine->callback(true, true, ENGINE_CALLBACK_RELOAD_PROGRAMS, pData->id, -1, 0, 0, 0.0f, nullptr);
             break;
+
         case NATIVE_HOST_OPCODE_RELOAD_ALL:
             reload();
             pData->engine->callback(true, true, ENGINE_CALLBACK_RELOAD_ALL, pData->id, -1, 0, 0, 0.0f, nullptr);
             break;
+
         case NATIVE_HOST_OPCODE_UI_UNAVAILABLE:
             pData->engine->callback(true, true, ENGINE_CALLBACK_UI_STATE_CHANGED, pData->id, -1, 0, 0, 0.0f, nullptr);
             fIsUiAvailable = false;
             break;
+
         case NATIVE_HOST_OPCODE_HOST_IDLE:
             pData->engine->callback(true, false, ENGINE_CALLBACK_IDLE, 0, 0, 0, 0, 0.0f, nullptr);
             break;
+
         case NATIVE_HOST_OPCODE_INTERNAL_PLUGIN:
-            ret = 1;
-            break;
+            return 1;
+
         case NATIVE_HOST_OPCODE_QUEUE_INLINE_DISPLAY:
-            fInlineDisplayNeedsRedraw = true;
+            switch (pData->engine->getProccessMode())
+            {
+            case ENGINE_PROCESS_MODE_MULTIPLE_CLIENTS:
+            case ENGINE_PROCESS_MODE_PATCHBAY:
+                fInlineDisplayNeedsRedraw = true;
+                break;
+            default:
+                break;
+            }
             break;
+
         case NATIVE_HOST_OPCODE_UI_TOUCH_PARAMETER:
             CARLA_SAFE_ASSERT_RETURN(index >= 0, 0);
             pData->engine->touchPluginParameter(pData->id, static_cast<uint32_t>(index), value != 0);
             break;
+
+        case NATIVE_HOST_OPCODE_REQUEST_IDLE:
+            fNeedsIdle = true;
+            break;
+
+        case NATIVE_HOST_OPCODE_GET_FILE_PATH:
+            CARLA_SAFE_ASSERT_RETURN(ptr != nullptr, 0);
+            {
+                const EngineOptions& opts(pData->engine->getOptions());
+                const char* const filetype = (const char*)ptr;
+                const char* ret = nullptr;
+
+                if (std::strcmp(filetype, "carla") == 0)
+                {
+                    ret = pData->engine->getCurrentProjectFilename();
+
+                    if (fLastProjectFilename != ret)
+                    {
+                        fLastProjectFilename = ret;
+
+                        bool found;
+                        const size_t r = fLastProjectFilename.rfind(CARLA_OS_SEP, &found);
+                        if (found)
+                        {
+                            fLastProjectFolder = ret;
+                            fLastProjectFolder[r] = '\0';
+                        }
+                        else
+                        {
+                            fLastProjectFolder.clear();
+                        }
+                    }
+
+                    ret = fLastProjectFolder.buffer();
+                }
+
+                else if (std::strcmp(filetype, "audio") == 0)
+                    ret = opts.pathAudio;
+                else if (std::strcmp(filetype, "midi") == 0)
+                    ret = opts.pathMIDI;
+
+                return static_cast<intptr_t>((uintptr_t)ret);
+            }
+            break;
+
+        case NATIVE_HOST_OPCODE_UI_RESIZE:
+        case NATIVE_HOST_OPCODE_PREVIEW_BUFFER_DATA:
+            // unused here
+            break;
         }
 
-        return ret;
+        return 0;
 
         // unused for now
-        (void)ptr;
         (void)opt;
     }
 
@@ -2627,7 +2879,8 @@ public:
 
     // -------------------------------------------------------------------
 
-    bool init(const char* const name, const char* const label, const uint options)
+    bool init(const CarlaPluginPtr plugin,
+              const char* const name, const char* const label, const uint options)
     {
         CARLA_SAFE_ASSERT_RETURN(pData->engine != nullptr, false);
 
@@ -2702,17 +2955,25 @@ public:
         {
             CARLA_ASSERT(fHost.uiName == nullptr);
 
-            char uiName[std::strlen(pData->name)+6+1];
-            std::strcpy(uiName, pData->name);
-            std::strcat(uiName, " (GUI)");
+            CarlaString uiName;
 
-            fHost.uiName = carla_strdup(uiName);
+            if (pData->uiTitle.isNotEmpty())
+            {
+                uiName = pData->uiTitle;
+            }
+            else
+            {
+                uiName  = pData->name;
+                uiName += " (GUI)";
+            }
+
+            fHost.uiName = uiName.releaseBufferPointer();
         }
 
         // ---------------------------------------------------------------
         // register client
 
-        pData->client = pData->engine->addClient(this);
+        pData->client = pData->engine->addClient(plugin);
 
         if (pData->client == nullptr || ! pData->client->isOk())
         {
@@ -2732,7 +2993,7 @@ public:
         }
 
         // ---------------------------------------------------------------
-        // set default options
+        // set options
 
         bool hasMidiProgs = false;
 
@@ -2755,28 +3016,43 @@ public:
         else if (options & PLUGIN_OPTION_FORCE_STEREO)
             pData->options |= PLUGIN_OPTION_FORCE_STEREO;
 
-        if (fDescriptor->supports & NATIVE_PLUGIN_SUPPORTS_CHANNEL_PRESSURE)
-            pData->options |= PLUGIN_OPTION_SEND_CHANNEL_PRESSURE;
-        if (fDescriptor->supports & NATIVE_PLUGIN_SUPPORTS_NOTE_AFTERTOUCH)
-            pData->options |= PLUGIN_OPTION_SEND_NOTE_AFTERTOUCH;
-        if (fDescriptor->supports & NATIVE_PLUGIN_SUPPORTS_PITCHBEND)
-            pData->options |= PLUGIN_OPTION_SEND_PITCHBEND;
-        if (fDescriptor->supports & NATIVE_PLUGIN_SUPPORTS_ALL_SOUND_OFF)
-            pData->options |= PLUGIN_OPTION_SEND_ALL_SOUND_OFF;
-
         if (fDescriptor->supports & NATIVE_PLUGIN_SUPPORTS_CONTROL_CHANGES)
-        {
-            if (options & PLUGIN_OPTION_SEND_CONTROL_CHANGES)
+            if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_CONTROL_CHANGES))
                 pData->options |= PLUGIN_OPTION_SEND_CONTROL_CHANGES;
-        }
+
+        if (fDescriptor->supports & NATIVE_PLUGIN_SUPPORTS_CHANNEL_PRESSURE)
+            if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_CHANNEL_PRESSURE))
+                pData->options |= PLUGIN_OPTION_SEND_CHANNEL_PRESSURE;
+
+        if (fDescriptor->supports & NATIVE_PLUGIN_SUPPORTS_NOTE_AFTERTOUCH)
+            if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_NOTE_AFTERTOUCH))
+                pData->options |= PLUGIN_OPTION_SEND_NOTE_AFTERTOUCH;
+
+        if (fDescriptor->supports & NATIVE_PLUGIN_SUPPORTS_PITCHBEND)
+            if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_PITCHBEND))
+                pData->options |= PLUGIN_OPTION_SEND_PITCHBEND;
+
+        if (fDescriptor->supports & NATIVE_PLUGIN_SUPPORTS_ALL_SOUND_OFF)
+            if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_ALL_SOUND_OFF))
+                pData->options |= PLUGIN_OPTION_SEND_ALL_SOUND_OFF;
+
+        if (fDescriptor->midiIns > 0)
+            if (isPluginOptionInverseEnabled(options, PLUGIN_OPTION_SKIP_SENDING_NOTES))
+                pData->options |= PLUGIN_OPTION_SKIP_SENDING_NOTES;
 
         if (fDescriptor->supports & NATIVE_PLUGIN_SUPPORTS_PROGRAM_CHANGES)
         {
+            if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_PROGRAM_CHANGES))
+                pData->options |= PLUGIN_OPTION_SEND_PROGRAM_CHANGES;
+
+            // makes no sense for a plugin to set program changes supported, but it has no midi programs
             CARLA_SAFE_ASSERT(! hasMidiProgs);
-            pData->options |= PLUGIN_OPTION_SEND_PROGRAM_CHANGES;
         }
         else if (hasMidiProgs)
-            pData->options |= PLUGIN_OPTION_MAP_PROGRAM_CHANGES;
+        {
+            if (isPluginOptionEnabled(options, PLUGIN_OPTION_MAP_PROGRAM_CHANGES))
+                pData->options |= PLUGIN_OPTION_MAP_PROGRAM_CHANGES;
+        }
 
         return true;
     }
@@ -2792,8 +3068,13 @@ private:
     bool fIsOffline;
     bool fIsUiAvailable;
     bool fIsUiVisible;
+    volatile bool fNeedsIdle;
+
     bool fInlineDisplayNeedsRedraw;
     int64_t fInlineDisplayLastRedrawTime;
+
+    CarlaString fLastProjectFilename;
+    CarlaString fLastProjectFolder;
 
     float**         fAudioAndCvInBuffers;
     float**         fAudioAndCvOutBuffers;
@@ -2877,27 +3158,25 @@ private:
 
 // -----------------------------------------------------------------------
 
-CarlaPlugin* CarlaPlugin::newNative(const Initializer& init)
+CarlaPluginPtr CarlaPlugin::newNative(const Initializer& init)
 {
-    carla_debug("CarlaPlugin::newNative({%p, \"%s\", \"%s\", \"%s\", " P_INT64 "})", init.engine, init.filename, init.name, init.label, init.uniqueId);
+    carla_debug("CarlaPlugin::newNative({%p, \"%s\", \"%s\", \"%s\", " P_INT64 "})",
+                init.engine, init.filename, init.name, init.label, init.uniqueId);
 
-    CarlaPluginNative* const plugin(new CarlaPluginNative(init.engine, init.id));
+    std::shared_ptr<CarlaPluginNative> plugin(new CarlaPluginNative(init.engine, init.id));
 
-    if (! plugin->init(init.name, init.label, init.options))
-    {
-        delete plugin;
+    if (! plugin->init(plugin, init.name, init.label, init.options))
         return nullptr;
-    }
 
     return plugin;
 }
 
 // used in CarlaStandalone.cpp
-const void* carla_render_inline_display_internal(CarlaPlugin* plugin, uint32_t width, uint32_t height);
+const void* carla_render_inline_display_internal(const CarlaPluginPtr& plugin, uint32_t width, uint32_t height);
 
-const void* carla_render_inline_display_internal(CarlaPlugin* plugin, uint32_t  width, uint32_t height)
+const void* carla_render_inline_display_internal(const CarlaPluginPtr& plugin, uint32_t  width, uint32_t height)
 {
-    CarlaPluginNative* const nativePlugin = (CarlaPluginNative*)plugin;
+    const std::shared_ptr<CarlaPluginNative>& nativePlugin((const std::shared_ptr<CarlaPluginNative>&)plugin);
 
     return nativePlugin->renderInlineDisplay(width, height);
 }

@@ -2,7 +2,7 @@
   ==============================================================================
 
    This file is part of the JUCE library.
-   Copyright (c) 2017 - ROLI Ltd.
+   Copyright (c) 2020 - Raw Material Software Limited
 
    JUCE is an open source library subject to commercial or open-source
    licensing.
@@ -23,10 +23,16 @@
 namespace juce
 {
 
-#if JUCE_MAC || JUCE_IOS
+#if ! DOXYGEN && (JUCE_MAC || JUCE_IOS)
 
 struct CoreAudioLayouts
 {
+    //==============================================================================
+    enum
+    {
+        coreAudioHOASN3DLayoutTag = (190U<<16) | 0 // kAudioChannelLayoutTag_HOA_ACN_SN3D
+    };
+
     //==============================================================================
     /** Convert CoreAudio's native AudioChannelLayout to JUCE's AudioChannelSet.
 
@@ -52,6 +58,9 @@ struct CoreAudioLayouts
     */
     static AudioChannelLayoutTag toCoreAudio (const AudioChannelSet& set)
     {
+        if (set.getAmbisonicOrder() >= 0)
+            return coreAudioHOASN3DLayoutTag | static_cast<unsigned> (set.size());
+
         for (auto* tbl = SpeakerLayoutTable::get(); tbl->tag != 0; ++tbl)
         {
             AudioChannelSet caSet;
@@ -125,6 +134,15 @@ struct CoreAudioLayouts
         }
 
         auto numChannels = tag & 0xffff;
+        if (tag >= coreAudioHOASN3DLayoutTag && tag <= (coreAudioHOASN3DLayoutTag | 0xffff))
+        {
+            auto sqrtMinusOne   = std::sqrt (static_cast<float> (numChannels)) - 1.0f;
+            auto ambisonicOrder = jmax (0, static_cast<int> (std::floor (sqrtMinusOne)));
+
+            if (static_cast<float> (ambisonicOrder) == sqrtMinusOne)
+                return AudioChannelSet::ambisonic (ambisonicOrder).getChannelTypes();
+        }
+
         for (UInt32 i = 0; i < numChannels; ++i)
             speakers.add (static_cast<AudioChannelSet::ChannelType> (AudioChannelSet::discreteChannel0 + i));
 
@@ -145,6 +163,9 @@ private:
 
         for (auto* tbl = SpeakerLayoutTable::get(); tbl->tag != 0; ++tbl)
             tags.addIfNotAlreadyThere (tbl->tag);
+
+        for (unsigned order = 0; order <= 5; ++order)
+            tags.addIfNotAlreadyThere (coreAudioHOASN3DLayoutTag | ((order + 1) * (order + 1)));
 
         return tags;
     }
@@ -215,8 +236,10 @@ private:
                 { kAudioChannelLayoutTag_AAC_6_0, { centre, left, right, leftSurround, rightSurround, centreSurround } },
                 { kAudioChannelLayoutTag_AAC_6_1, { centre, left, right, leftSurround, rightSurround, centreSurround, LFE } },
                 { kAudioChannelLayoutTag_AAC_7_0, { centre, left, right, leftSurround, rightSurround, leftSurroundRear, rightSurroundRear } },
+#if MAC_OS_X_VERSION_MIN_REQUIRED > MAC_OS_X_VERSION_10_8
                 { kAudioChannelLayoutTag_AAC_7_1_B, { centre, left, right, leftSurround, rightSurround, leftSurroundRear, rightSurroundRear, LFE } },
                 { kAudioChannelLayoutTag_AAC_7_1_C, { centre, left, right, leftSurround, rightSurround, LFE, topFrontLeft, topFrontRight } },
+#endif
                 { kAudioChannelLayoutTag_AAC_Octagonal, { centre, left, right, leftSurround, rightSurround, leftSurroundRear, rightSurroundRear, centreSurround } },
                 { kAudioChannelLayoutTag_TMH_10_2_std, { left, right, centre, topFrontCentre, leftSurroundSide, rightSurroundSide, leftSurround, rightSurround, topFrontLeft, topFrontRight, wideLeft, wideRight, topRearCentre, centreSurround, LFE, LFE2 } },
                 { kAudioChannelLayoutTag_AC3_1_0_1, { centre, LFE } },

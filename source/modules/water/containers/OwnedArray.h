@@ -28,7 +28,7 @@
 
 #include "ArrayAllocationBase.h"
 
-#include "CarlaJuceUtils.hpp"
+#include "CarlaScopeUtils.hpp"
 
 namespace water {
 
@@ -300,7 +300,7 @@ public:
         if (indexToInsertAt < 0)
             return add (newObject);
 
-        size_t uindexToInsertAt = indexToInsertAt;
+        size_t uindexToInsertAt = static_cast<size_t>(indexToInsertAt);
 
         if (uindexToInsertAt > numUsed)
             uindexToInsertAt = numUsed;
@@ -391,7 +391,7 @@ public:
     {
         if (indexToChange >= 0)
         {
-            ScopedPointer<ObjectClass> toDelete;
+            CarlaScopedPointer<ObjectClass> toDelete;
 
             {
                 if (indexToChange < numUsed)
@@ -555,7 +555,7 @@ public:
     */
     void remove (const size_t indexToRemove, bool deleteObject = true)
     {
-        ScopedPointer<ObjectClass> toDelete;
+        CarlaScopedPointer<ObjectClass> toDelete;
 
         if (indexToRemove < numUsed)
         {
@@ -715,7 +715,7 @@ public:
         @param newIndex         the index at which you'd like this object to end up. If this
                                 is less than zero, it will be moved to the end of the array
     */
-    void move (const size_t currentIndex, const size_t newIndex) noexcept
+    void move (const size_t currentIndex, size_t newIndex) noexcept
     {
         if (currentIndex != newIndex)
         {

@@ -40,20 +40,6 @@ char* jack_get_client_name(jack_client_t* client)
     return jclient->name;
 }
 
-CARLA_EXPORT
-char* jack_get_uuid_for_client_name(jack_client_t* client, const char* name)
-{
-    carla_stderr2("%s(%p, %s)", __FUNCTION__, client, name);
-    return nullptr;
-}
-
-CARLA_EXPORT
-char* jack_get_client_name_by_uuid(jack_client_t* client, const char* uuid)
-{
-    carla_stderr2("%s(%p, %s)", __FUNCTION__, client, uuid);
-    return nullptr;
-}
-
 // --------------------------------------------------------------------------------------------------------------------
 
 CARLA_EXPORT

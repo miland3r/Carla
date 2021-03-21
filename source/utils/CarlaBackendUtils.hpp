@@ -80,6 +80,23 @@ const char* BinaryType2Str(const BinaryType type) noexcept
 }
 
 static inline
+const char* FileType2Str(const FileType type) noexcept
+{
+    switch (type)
+    {
+    case FILE_NONE:
+        return "FILE_NONE";
+    case FILE_AUDIO:
+        return "FILE_AUDIO";
+    case FILE_MIDI:
+        return "FILE_MIDI";
+    }
+
+    carla_stderr("CarlaBackend::FileType2Str(%i) - invalid type", type);
+    return nullptr;
+}
+
+static inline
 const char* PluginType2Str(const PluginType type) noexcept
 {
     switch (type)
@@ -100,6 +117,10 @@ const char* PluginType2Str(const PluginType type) noexcept
         return "PLUGIN_VST3";
     case PLUGIN_AU:
         return "PLUGIN_AU";
+    case PLUGIN_DLS:
+        return "PLUGIN_DLS";
+    case PLUGIN_GIG:
+        return "PLUGIN_GIG";
     case PLUGIN_SF2:
         return "PLUGIN_SF2";
     case PLUGIN_SFZ:
@@ -211,10 +232,10 @@ const char* EngineCallbackOpcode2Str(const EngineCallbackOpcode opcode) noexcept
     case ENGINE_CALLBACK_PARAMETER_DEFAULT_CHANGED:
         return "ENGINE_CALLBACK_PARAMETER_DEFAULT_CHANGED";
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+    case ENGINE_CALLBACK_PARAMETER_MAPPED_CONTROL_INDEX_CHANGED:
+        return "ENGINE_CALLBACK_PARAMETER_MAPPED_CONTROL_INDEX_CHANGED";
     case ENGINE_CALLBACK_PARAMETER_MIDI_CHANNEL_CHANGED:
         return "ENGINE_CALLBACK_PARAMETER_MIDI_CHANNEL_CHANGED";
-    case ENGINE_CALLBACK_PARAMETER_MIDI_CC_CHANGED:
-        return "ENGINE_CALLBACK_PARAMETER_MIDI_CC_CHANGED";
     case ENGINE_CALLBACK_OPTION_CHANGED:
         return "ENGINE_CALLBACK_OPTION_CHANGED";
 #endif
@@ -292,6 +313,12 @@ const char* EngineCallbackOpcode2Str(const EngineCallbackOpcode opcode) noexcept
         return "ENGINE_CALLBACK_PATCHBAY_PORT_GROUP_REMOVED";
     case ENGINE_CALLBACK_PATCHBAY_PORT_GROUP_CHANGED:
         return "ENGINE_CALLBACK_PATCHBAY_PORT_GROUP_CHANGED";
+    case ENGINE_CALLBACK_PARAMETER_MAPPED_RANGE_CHANGED:
+        return "ENGINE_CALLBACK_PARAMETER_MAPPED_RANGE_CHANGED";
+    case ENGINE_CALLBACK_PATCHBAY_CLIENT_POSITION_CHANGED:
+        return "ENGINE_CALLBACK_PATCHBAY_CLIENT_POSITION_CHANGED";
+    case ENGINE_CALLBACK_EMBED_UI_RESIZED:
+        return "ENGINE_CALLBACK_EMBED_UI_RESIZED";
     }
 
     carla_stderr("CarlaBackend::EngineCallbackOpcode2Str(%i) - invalid opcode", opcode);
@@ -319,6 +346,8 @@ const char* EngineOption2Str(const EngineOption option) noexcept
         return "ENGINE_OPTION_UIS_ALWAYS_ON_TOP";
     case ENGINE_OPTION_MAX_PARAMETERS:
         return "ENGINE_OPTION_MAX_PARAMETERS";
+    case ENGINE_OPTION_RESET_XRUNS:
+        return "ENGINE_OPTION_RESET_XRUNS";
     case ENGINE_OPTION_UI_BRIDGES_TIMEOUT:
         return "ENGINE_OPTION_UI_BRIDGES_TIMEOUT";
     case ENGINE_OPTION_AUDIO_BUFFER_SIZE:
@@ -337,6 +366,8 @@ const char* EngineOption2Str(const EngineOption option) noexcept
         return "ENGINE_OPTION_OSC_PORT_UDP";
     case ENGINE_OPTION_OSC_PORT_TCP:
         return "ENGINE_OPTION_OSC_PORT_TCP";
+    case ENGINE_OPTION_FILE_PATH:
+        return "ENGINE_OPTION_FILE_PATH";
     case ENGINE_OPTION_PLUGIN_PATH:
         return "ENGINE_OPTION_PLUGIN_PATH";
     case ENGINE_OPTION_PATH_BINARIES:
@@ -345,6 +376,10 @@ const char* EngineOption2Str(const EngineOption option) noexcept
         return "ENGINE_OPTION_PATH_RESOURCES";
     case ENGINE_OPTION_PREVENT_BAD_BEHAVIOUR:
         return "ENGINE_OPTION_PREVENT_BAD_BEHAVIOUR";
+    case ENGINE_OPTION_FRONTEND_BACKGROUND_COLOR:
+        return "ENGINE_OPTION_FRONTEND_BACKGROUND_COLOR";
+    case ENGINE_OPTION_FRONTEND_FOREGROUND_COLOR:
+        return "ENGINE_OPTION_FRONTEND_FOREGROUND_COLOR";
     case ENGINE_OPTION_FRONTEND_UI_SCALE:
         return "ENGINE_OPTION_FRONTEND_UI_SCALE";
     case ENGINE_OPTION_FRONTEND_WIN_ID:
@@ -365,6 +400,8 @@ const char* EngineOption2Str(const EngineOption option) noexcept
 #endif
     case ENGINE_OPTION_DEBUG_CONSOLE_OUTPUT:
         return "ENGINE_OPTION_DEBUG_CONSOLE_OUTPUT";
+    case ENGINE_OPTION_CLIENT_NAME_PREFIX:
+        return "ENGINE_OPTION_CLIENT_NAME_PREFIX";
     }
 
     carla_stderr("CarlaBackend::EngineOption2Str(%i) - invalid option", option);
@@ -488,6 +525,39 @@ BinaryType getBinaryTypeFromString(const char* const ctype) noexcept
 // -----------------------------------------------------------------------
 
 static inline
+const char* getPluginCategoryAsString(const PluginCategory category) noexcept
+{
+    carla_debug("CarlaBackend::getPluginCategoryAsString(%i:%s)", category, PluginCategory2Str(category));
+
+    switch (category)
+    {
+    case PLUGIN_CATEGORY_NONE:
+        return "none";
+    case PLUGIN_CATEGORY_SYNTH:
+        return "synth";
+    case PLUGIN_CATEGORY_DELAY:
+        return "delay";
+    case PLUGIN_CATEGORY_EQ:
+        return "eq";
+    case PLUGIN_CATEGORY_FILTER:
+        return "filter";
+    case PLUGIN_CATEGORY_DISTORTION:
+        return "distortion";
+    case PLUGIN_CATEGORY_DYNAMICS:
+        return "dynamics";
+    case PLUGIN_CATEGORY_MODULATOR:
+        return "modulator";
+    case PLUGIN_CATEGORY_UTILITY:
+        return "utility";
+    case PLUGIN_CATEGORY_OTHER:
+        return "other";
+    }
+
+    carla_stderr("CarlaBackend::getPluginCategoryAsString(%i) - invalid category", category);
+    return "NONE";
+}
+
+static inline
 const char* getPluginTypeAsString(const PluginType type) noexcept
 {
     carla_debug("CarlaBackend::getPluginTypeAsString(%i:%s)", type, PluginType2Str(type));
@@ -509,7 +579,11 @@ const char* getPluginTypeAsString(const PluginType type) noexcept
     case PLUGIN_VST3:
         return "VST3";
     case PLUGIN_AU:
-        return "AU";;
+        return "AU";
+    case PLUGIN_DLS:
+        return "DLS";
+    case PLUGIN_GIG:
+        return "GIG";
     case PLUGIN_SF2:
         return "SF2";
     case PLUGIN_SFZ:
@@ -551,7 +625,11 @@ PluginType getPluginTypeFromString(const char* const ctype) noexcept
         return PLUGIN_VST3;
     if (stype == "au" || stype == "audiounit")
         return PLUGIN_AU;
-    if (stype == "sf2")
+    if (stype == "dls")
+        return PLUGIN_DLS;
+    if (stype == "gig")
+        return PLUGIN_GIG;
+    if (stype == "sf2" || stype == "sf3")
         return PLUGIN_SF2;
     if (stype == "sfz")
         return PLUGIN_SFZ;
@@ -641,7 +719,39 @@ PluginCategory getPluginCategoryFromName(const char* const name) noexcept
     if (sname.contains("tool"))
         return PLUGIN_CATEGORY_UTILITY;
 
+    // synth
+    if (sname.contains("synth"))
+        return PLUGIN_CATEGORY_SYNTH;
+
+    // other
+    if (sname.contains("misc"))
+        return PLUGIN_CATEGORY_OTHER;
+    if (sname.contains("other"))
+        return PLUGIN_CATEGORY_OTHER;
+
     return PLUGIN_CATEGORY_NONE;
+}
+
+// -----------------------------------------------------------------------
+
+static inline
+bool isPluginOptionEnabled(const uint options, const uint option)
+{
+    if (options == PLUGIN_OPTIONS_NULL)
+        return true;
+    if (options & option)
+        return true;
+    return false;
+}
+
+static inline
+bool isPluginOptionInverseEnabled(const uint options, const uint option)
+{
+    if (options == PLUGIN_OPTIONS_NULL)
+        return false;
+    if (options & option)
+        return true;
+    return false;
 }
 
 // -----------------------------------------------------------------------

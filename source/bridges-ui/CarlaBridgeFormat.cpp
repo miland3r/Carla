@@ -42,7 +42,8 @@ CarlaBridgeFormat::CarlaBridgeFormat() noexcept
       fLastMsgTimer(-1),
       fToolkit(nullptr),
       fLib(nullptr),
-      fLibFilename()
+      fLibFilename(),
+      fBase64ReservedChunk()
 {
     carla_debug("CarlaBridgeFormat::CarlaBridgeFormat()");
 
@@ -120,6 +121,50 @@ bool CarlaBridgeFormat::msgReceived(const char* const msg) noexcept
     if (fLastMsgTimer > 0)
         --fLastMsgTimer;
 
+    if (std::strcmp(msg, "atom") == 0)
+    {
+        uint32_t index, atomTotalSize, base64Size;
+        const char* base64atom;
+
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(index), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(atomTotalSize), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(base64Size), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(base64atom, false, base64Size), true);
+
+        carla_getChunkFromBase64String_impl(fBase64ReservedChunk, base64atom);
+        CARLA_SAFE_ASSERT_UINT2_RETURN(fBase64ReservedChunk.size() >= sizeof(LV2_Atom),
+                                       fBase64ReservedChunk.size(), sizeof(LV2_Atom), true);
+
+#ifdef CARLA_PROPER_CPP11_SUPPORT
+        const LV2_Atom* const atom((const LV2_Atom*)fBase64ReservedChunk.data());
+#else
+        const LV2_Atom* const atom((const LV2_Atom*)&fBase64ReservedChunk.front());
+#endif
+        const uint32_t atomTotalSizeCheck(lv2_atom_total_size(atom));
+
+        CARLA_SAFE_ASSERT_UINT2_RETURN(atomTotalSizeCheck == atomTotalSize, atomTotalSizeCheck, atomTotalSize, true);
+        CARLA_SAFE_ASSERT_UINT2_RETURN(atomTotalSizeCheck == fBase64ReservedChunk.size(),
+                                       atomTotalSizeCheck, fBase64ReservedChunk.size(), true);
+
+        dspAtomReceived(index, atom);
+        return true;
+    }
+
+    if (std::strcmp(msg, "urid") == 0)
+    {
+        uint32_t urid, size;
+        const char* uri;
+
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(urid), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(size), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(uri, false, size), true);
+
+        if (urid != 0)
+            dspURIDReceived(urid, uri);
+
+        return true;
+    }
+
     if (std::strcmp(msg, "control") == 0)
     {
         uint32_t index;
@@ -129,6 +174,18 @@ bool CarlaBridgeFormat::msgReceived(const char* const msg) noexcept
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsFloat(value), true);
 
         dspParameterChanged(index, value);
+        return true;
+    }
+
+    if (std::strcmp(msg, "parameter") == 0)
+    {
+        const char* uri;
+        float value;
+
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(uri, true), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsFloat(value), true);
+
+        dspParameterChanged(uri, value);
         return true;
     }
 
@@ -158,13 +215,12 @@ bool CarlaBridgeFormat::msgReceived(const char* const msg) noexcept
         const char* key;
         const char* value;
 
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(key), true);
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(value), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(key, true), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(value, false), true);
 
         dspStateChanged(key, value);
 
         delete[] key;
-        delete[] value;
         return true;
     }
 
@@ -182,69 +238,25 @@ bool CarlaBridgeFormat::msgReceived(const char* const msg) noexcept
         return true;
     }
 
-    if (std::strcmp(msg, "atom") == 0)
-    {
-        uint32_t index, atomTotalSize;
-        const char* base64atom;
-
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(index), true);
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(atomTotalSize), true);
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(base64atom), true);
-
-        std::vector<uint8_t> chunk(carla_getChunkFromBase64String(base64atom));
-        delete[] base64atom;
-        CARLA_SAFE_ASSERT_RETURN(chunk.size() >= sizeof(LV2_Atom), true);
-
-#ifdef CARLA_PROPER_CPP11_SUPPORT
-        const LV2_Atom* const atom((const LV2_Atom*)chunk.data());
-#else
-        const LV2_Atom* const atom((const LV2_Atom*)&chunk.front());
-#endif
-        const uint32_t atomTotalSizeCheck(lv2_atom_total_size(atom));
-
-        CARLA_SAFE_ASSERT_RETURN(atomTotalSizeCheck == atomTotalSize, true);
-        CARLA_SAFE_ASSERT_RETURN(atomTotalSizeCheck == chunk.size(), true);
-
-        dspAtomReceived(index, atom);
-        return true;
-    }
-
-    if (std::strcmp(msg, "urid") == 0)
-    {
-        uint32_t urid;
-        const char* uri;
-
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(urid), true);
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(uri), true);
-
-        if (urid != 0)
-            dspURIDReceived(urid, uri);
-
-        delete[] uri;
-        return true;
-    }
-
     if (std::strcmp(msg, "uiOptions") == 0)
     {
-        double sampleRate;
-        bool useTheme, useThemeColors;
-        float uiScale;
-        const char* windowTitle;
+        BridgeFormatOptions opts;
         uint64_t transientWindowId;
 
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsDouble(sampleRate), true);
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsFloat(uiScale), true);
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsBool(useTheme), true);
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsBool(useThemeColors), true);
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(windowTitle), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsDouble(opts.sampleRate), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(opts.bgColor), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsUInt(opts.fgColor), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsFloat(opts.uiScale), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsBool(opts.useTheme), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsBool(opts.useThemeColors), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(opts.windowTitle, true), true);
         CARLA_SAFE_ASSERT_RETURN(readNextLineAsULong(transientWindowId), true);
+        opts.transientWindowId = transientWindowId;
 
         fGotOptions = true;
-        uiOptionsChanged(sampleRate, uiScale,
-                         useTheme, useThemeColors,
-                         windowTitle, static_cast<uintptr_t>(transientWindowId));
+        uiOptionsChanged(opts);
 
-        delete[] windowTitle;
+        delete[] opts.windowTitle;
         return true;
     }
 
@@ -253,6 +265,7 @@ bool CarlaBridgeFormat::msgReceived(const char* const msg) noexcept
     if (std::strcmp(msg, "show") == 0)
     {
         fToolkit->show();
+        fToolkit->focus();
         return true;
     }
 
@@ -281,11 +294,9 @@ bool CarlaBridgeFormat::msgReceived(const char* const msg) noexcept
     {
         const char* title;
 
-        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(title), true);
+        CARLA_SAFE_ASSERT_RETURN(readNextLineAsString(title, false), true);
 
         fToolkit->setTitle(title);
-
-        delete[] title;
         return true;
     }
 

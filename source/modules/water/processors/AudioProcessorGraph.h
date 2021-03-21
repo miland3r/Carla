@@ -88,7 +88,7 @@ public:
         //==============================================================================
         friend class AudioProcessorGraph;
 
-        const ScopedPointer<AudioProcessor> processor;
+        const CarlaScopedPointer<AudioProcessor> processor;
         bool isPrepared;
 
         Node (uint32 nodeId, AudioProcessor*) noexcept;
@@ -381,7 +381,7 @@ private:
 
     friend class AudioGraphIOProcessor;
     struct AudioProcessorGraphBufferHelpers;
-    ScopedPointer<AudioProcessorGraphBufferHelpers> audioAndCVBuffers;
+    CarlaScopedPointer<AudioProcessorGraphBufferHelpers> audioAndCVBuffers;
 
     MidiBuffer* currentMidiInputBuffer;
     MidiBuffer currentMidiOutputBuffer;
@@ -389,6 +389,7 @@ private:
     bool isPrepared, needsReorder;
     CarlaRecursiveMutex reorderMutex;
 
+public:
     void clearRenderingSequence();
     void buildRenderingSequence();
     bool isAnInputTo (uint32 possibleInputId, uint32 possibleDestinationId, int recursionCheck) const;

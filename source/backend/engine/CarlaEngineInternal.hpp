@@ -1,6 +1,6 @@
 /*
  * Carla Plugin Host
- * Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -20,6 +20,8 @@
 
 #include "CarlaEngineThread.hpp"
 #include "CarlaEngineUtils.hpp"
+#include "CarlaPlugin.hpp"
+#include "LinkedList.hpp"
 
 #ifndef BUILD_BRIDGE
 # include "CarlaEngineOsc.hpp"
@@ -27,8 +29,12 @@
 #endif
 
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+# include "water/processors/AudioProcessorGraph.h"
+# include "water/containers/Array.h"
 # include "water/memory/Atomic.h"
 #endif
+
+#include <vector>
 
 // FIXME only use CARLA_PREVENT_HEAP_ALLOCATION for structs
 // maybe separate macro
@@ -81,10 +87,24 @@ public:
     void setSampleRate(double sampleRate);
     void setOffline(bool offline);
 
-    bool isReady() const noexcept;
+    bool isRack() const noexcept
+    {
+        return fIsRack;
+    }
+
+    bool isReady() const noexcept
+    {
+        return fIsReady;
+    }
+
+    uint32_t getNumAudioOuts() const noexcept
+    {
+        return fNumAudioOuts;
+    }
 
     RackGraph*     getRackGraph() const noexcept;
     PatchbayGraph* getPatchbayGraph() const noexcept;
+    PatchbayGraph* getPatchbayGraphOrNull() const noexcept;
 
     void process(CarlaEngine::ProtectedData* data, const float* const* inBuf, float* const* outBuf, uint32_t frames);
 
@@ -92,10 +112,11 @@ public:
     void processRack(CarlaEngine::ProtectedData* data, const float* inBuf[2], float* outBuf[2], uint32_t frames);
 
     // used for internal patchbay mode
-    void addPlugin(CarlaPlugin* plugin);
-    void replacePlugin(CarlaPlugin* oldPlugin, CarlaPlugin* newPlugin);
-    void renamePlugin(CarlaPlugin* plugin, const char* newName);
-    void removePlugin(CarlaPlugin* plugin);
+    void addPlugin(CarlaPluginPtr plugin);
+    void replacePlugin(CarlaPluginPtr oldPlugin, CarlaPluginPtr newPlugin);
+    void renamePlugin(CarlaPluginPtr plugin, const char* newName);
+    void switchPlugins(CarlaPluginPtr pluginA, CarlaPluginPtr pluginB);
+    void removePlugin(CarlaPluginPtr plugin);
     void removeAllPlugins();
 
     bool isUsingExternalHost() const noexcept;
@@ -105,7 +126,8 @@ public:
 
 private:
     bool fIsRack;
-    bool fIsReady;
+    uint32_t fNumAudioOuts;
+    volatile bool fIsReady;
 
     union {
         RackGraph*     fRack;
@@ -204,8 +226,19 @@ struct EngineNextAction {
 // EnginePluginData
 
 struct EnginePluginData {
-    CarlaPlugin* plugin;
+    CarlaPluginPtr plugin;
     float peaks[4];
+
+    EnginePluginData()
+        : plugin(nullptr),
+#ifdef CARLA_PROPER_CPP11_SUPPORT
+          peaks{0.0f, 0.0f, 0.0f, 0.0f} {}
+#else
+          peaks()
+    {
+        carla_zeroStruct(peaks);
+    }
+#endif
 };
 
 // -----------------------------------------------------------------------
@@ -228,7 +261,9 @@ struct CarlaEngine::ProtectedData {
 
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
     bool loadingProject;
+    bool ignoreClientPrefix; // backwards compat only
     CarlaString currentProjectFilename;
+    CarlaString currentProjectFolder;
 #endif
 
     uint32_t bufferSize;
@@ -254,6 +289,7 @@ struct CarlaEngine::ProtectedData {
     float dspLoad;
 #endif
     float peaks[4];
+    std::vector<CarlaPluginPtr> pluginsToDelete;
 
     EngineInternalEvents events;
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
@@ -264,8 +300,8 @@ struct CarlaEngine::ProtectedData {
 
     // -------------------------------------------------------------------
 
-    ProtectedData(CarlaEngine* engine) noexcept;
-    ~ProtectedData() noexcept;
+    ProtectedData(CarlaEngine* engine);
+    ~ProtectedData();
 
     // -------------------------------------------------------------------
 
@@ -273,6 +309,10 @@ struct CarlaEngine::ProtectedData {
     void close();
 
     void initTime(const char* features);
+
+    // -------------------------------------------------------------------
+
+    void deletePluginsAsNeeded();
 
     // -------------------------------------------------------------------
 

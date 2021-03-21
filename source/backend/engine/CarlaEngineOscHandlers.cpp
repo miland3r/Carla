@@ -29,13 +29,17 @@ CARLA_BACKEND_START_NAMESPACE
 
 // -----------------------------------------------------------------------
 
-int CarlaEngineOsc::handleMessage(const bool isTCP, const char* const path, const int argc, const lo_arg* const* const argv, const char* const types, const lo_message msg)
+int CarlaEngineOsc::handleMessage(const bool isTCP, const char* const path,
+                                  const int argc, const lo_arg* const* const argv, const char* const types,
+                                  const lo_message msg)
 {
     CARLA_SAFE_ASSERT_RETURN(fName.isNotEmpty(), 1);
     CARLA_SAFE_ASSERT_RETURN(path != nullptr && path[0] != '\0', 1);
+    CARLA_SAFE_ASSERT_RETURN(path[0] == '/', 1);
 #ifdef DEBUG
-    if (std::strstr(path, "/bridge_pong") == nullptr) {
-        carla_debug("CarlaEngineOsc::handleMessage(%s, \"%s\", %i, %p, \"%s\", %p)", bool2str(isTCP), path, argc, argv, types, msg);
+    if (std::strncmp(path, "/bridge_pong", 12) != 0) {
+        carla_debug("CarlaEngineOsc::handleMessage(%s, \"%s\", %i, %p, \"%s\", %p)",
+                    bool2str(isTCP), path, argc, argv, types, msg);
     }
 #endif
 
@@ -50,9 +54,11 @@ int CarlaEngineOsc::handleMessage(const bool isTCP, const char* const path, cons
         CARLA_SAFE_ASSERT_RETURN(fServerUDP != nullptr, 1);
     }
 
+    const lo_address source = lo_message_get_source(msg);
+
     // Initial path check
     if (std::strcmp(path, "/register") == 0)
-        return handleMsgRegister(isTCP, argc, argv, types);
+        return handleMsgRegister(isTCP, argc, argv, types, source);
 
     if (std::strcmp(path, "/unregister") == 0)
         return handleMsgUnregister(isTCP, argc, argv, types);
@@ -63,56 +69,73 @@ int CarlaEngineOsc::handleMessage(const bool isTCP, const char* const path, cons
         return handleMsgControl(path + 6, argc, argv, types);
     }
 
-    const std::size_t nameSize(fName.length());
-
     // Check if message is for this client
-    if (std::strlen(path) <= nameSize || std::strncmp(path+1, fName, nameSize) != 0)
+    std::size_t bytesAfterName;
+    if (fControlDataTCP.owner != nullptr && std::strcmp(lo_address_get_hostname(source), fControlDataTCP.owner) == 0)
     {
-        carla_stderr("CarlaEngineOsc::handleMessage() - message not for this client -> '%s' != '/%s/'",
-                     path, fName.buffer());
-        return 1;
+        if (const char* const slash = std::strchr(path+1, '/'))
+        {
+            bytesAfterName = static_cast<std::size_t>(slash - path);
+        }
+        else
+        {
+            carla_stderr("CarlaEngineOsc::handleMessage() - message '%s' is invalid", path);
+            return 1;
+        }
+    }
+    else
+    {
+        bytesAfterName = fName.length();
+
+        if (std::strlen(path) <= bytesAfterName || std::strncmp(path+1, fName, bytesAfterName) != 0)
+        {
+            carla_stderr("CarlaEngineOsc::handleMessage() - message not for this client -> '%s' != '/%s/'",
+                        path, fName.buffer());
+            return 1;
+        }
+
+        ++bytesAfterName;
     }
 
     // Get plugin id from path, "/carla/23/method" -> 23
     uint pluginId = 0;
     std::size_t offset;
 
-    if (std::isdigit(path[nameSize+2]))
+    if (! std::isdigit(path[bytesAfterName+1]))
     {
-        if (std::isdigit(path[nameSize+3]))
+        carla_stderr("CarlaEngineOsc::handleMessage() - invalid message '%s'", path);
+        return 1;
+    }
+
+    if (std::isdigit(path[bytesAfterName+2]))
+    {
+        if (std::isdigit(path[bytesAfterName+4]))
         {
-            if (std::isdigit(path[nameSize+5]))
-            {
-                carla_stderr2("CarlaEngineOsc::handleMessage() - invalid plugin id, over 999? (value: \"%s\")", path+(nameSize+1));
-                return 1;
-            }
-            else if (std::isdigit(path[nameSize+4]))
-            {
-                // 3 digits, /xyz/method
-                offset    = 6;
-                pluginId += uint(path[nameSize+2]-'0')*100;
-                pluginId += uint(path[nameSize+3]-'0')*10;
-                pluginId += uint(path[nameSize+4]-'0');
-            }
-            else
-            {
-                // 2 digits, /xy/method
-                offset    = 5;
-                pluginId += uint(path[nameSize+2]-'0')*10;
-                pluginId += uint(path[nameSize+3]-'0');
-            }
+            carla_stderr2("CarlaEngineOsc::handleMessage() - invalid plugin id, over 999? (value: \"%s\")",
+                          path+bytesAfterName);
+            return 1;
+        }
+        else if (std::isdigit(path[bytesAfterName+3]))
+        {
+            // 3 digits, /xyz/method
+            offset    = 5;
+            pluginId += uint(path[bytesAfterName+1]-'0')*100;
+            pluginId += uint(path[bytesAfterName+2]-'0')*10;
+            pluginId += uint(path[bytesAfterName+3]-'0');
         }
         else
         {
-            // single digit, /x/method
+            // 2 digits, /xy/method
             offset    = 4;
-            pluginId += uint(path[nameSize+2]-'0');
+            pluginId += uint(path[bytesAfterName+1]-'0')*10;
+            pluginId += uint(path[bytesAfterName+2]-'0');
         }
     }
     else
     {
-        carla_stderr("CarlaEngineOsc::handleMessage() - invalid message '%s'", path);
-        return 1;
+        // single digit, /x/method
+        offset    = 3;
+        pluginId += uint(path[bytesAfterName+1]-'0');
     }
 
     if (pluginId > fEngine->getCurrentPluginCount())
@@ -122,7 +145,7 @@ int CarlaEngineOsc::handleMessage(const bool isTCP, const char* const path, cons
     }
 
     // Get plugin
-    CarlaPlugin* const plugin(fEngine->getPluginUnchecked(pluginId));
+    const CarlaPluginPtr plugin = fEngine->getPluginUnchecked(pluginId);
 
     if (plugin == nullptr || plugin->getId() != pluginId)
     {
@@ -131,9 +154,9 @@ int CarlaEngineOsc::handleMessage(const bool isTCP, const char* const path, cons
     }
 
     // Get method from path, "/Carla/i/method" -> "method"
-    char method[32+1];
-    method[32] = '\0';
-    std::strncpy(method, path + (nameSize + offset), 32);
+    char method[48];
+    std::strncpy(method, path + (bytesAfterName + offset), 47);
+    method[47] = '\0';
 
     if (method[0] == '\0')
     {
@@ -160,8 +183,10 @@ int CarlaEngineOsc::handleMessage(const bool isTCP, const char* const path, cons
         return 0; //handleMsgSetControlChannel(plugin, argc, argv, types); // TODO
     if (std::strcmp(method, "set_parameter_value") == 0)
         return handleMsgSetParameterValue(plugin, argc, argv, types);
-    if (std::strcmp(method, "set_parameter_midi_cc") == 0)
-        return handleMsgSetParameterMidiCC(plugin, argc, argv, types);
+    if (std::strcmp(method, "set_parameter_mapped_control_index") == 0)
+        return handleMsgSetParameterMappedControlIndex(plugin, argc, argv, types);
+    if (std::strcmp(method, "set_parameter_mapped_range") == 0)
+        return handleMsgSetParameterMappedRange(plugin, argc, argv, types);
     if (std::strcmp(method, "set_parameter_midi_channel") == 0)
         return handleMsgSetParameterMidiChannel(plugin, argc, argv, types);
     if (std::strcmp(method, "set_program") == 0)
@@ -185,13 +210,13 @@ int CarlaEngineOsc::handleMessage(const bool isTCP, const char* const path, cons
 // -----------------------------------------------------------------------
 
 int CarlaEngineOsc::handleMsgRegister(const bool isTCP,
-                                      const int argc, const lo_arg* const* const argv, const char* const types)
+                                      const int argc, const lo_arg* const* const argv, const char* const types,
+                                      const lo_address source)
 {
     carla_debug("CarlaEngineOsc::handleMsgRegister()");
     CARLA_ENGINE_OSC_CHECK_OSC_TYPES(1, "s");
 
     const char* const url = &argv[0]->s;
-    const lo_address addr = lo_address_new_from_url(url);
 
     CarlaOscData& oscData(isTCP ? fControlDataTCP : fControlDataUDP);
 
@@ -200,27 +225,33 @@ int CarlaEngineOsc::handleMsgRegister(const bool isTCP,
         carla_stderr("OSC backend already registered to %s", oscData.owner);
 
         char* const path = lo_url_get_path(url);
+        const size_t pathlen = std::strlen(path);
+        CARLA_SAFE_ASSERT_RETURN(pathlen < 32, 0);
 
-        char targetPath[std::strlen(path)+18];
+        char targetPath[pathlen+12];
         std::strcpy(targetPath, path);
         std::strcat(targetPath, "/exit-error");
 
-        lo_send_from(addr, isTCP ? fServerTCP : fServerUDP, LO_TT_IMMEDIATE,
+        lo_send_from(source, isTCP ? fServerTCP : fServerUDP, LO_TT_IMMEDIATE,
                      targetPath, "s", "OSC already registered to another client");
 
         free(path);
     }
     else
     {
-        carla_stdout("OSC backend registered to %s", url);
-
-        const char* const host  = lo_address_get_hostname(addr);
-        const char* const port  = lo_address_get_port(addr);
+        const char* const host  = lo_address_get_hostname(source);
+        /* */ char* const port  = lo_url_get_port(url); // NOTE: lo_address_get_port is buggy against TCP
         const lo_address target = lo_address_new_with_proto(isTCP ? LO_TCP : LO_UDP, host, port);
 
-        oscData.owner  = carla_strdup_safe(url);
+        oscData.owner  = carla_strdup_safe(host);
         oscData.path   = carla_strdup_free(lo_url_get_path(url));
         oscData.target = target;
+
+        char* const targeturl = lo_address_get_url(target);
+        carla_stdout("OSC %s backend registered to %s, path: %s, target: %s (host: %s, port: %s)",
+                     isTCP ? "TCP" : "UDP", url, oscData.path, targeturl, host, port);
+        free(targeturl);
+        free(port);
 
         if (isTCP)
         {
@@ -237,7 +268,7 @@ int CarlaEngineOsc::handleMsgRegister(const bool isTCP,
 
             for (uint i=0, count=fEngine->getCurrentPluginCount(); i < count; ++i)
             {
-                CarlaPlugin* const plugin(fEngine->getPluginUnchecked(i));
+                const CarlaPluginPtr plugin = fEngine->getPluginUnchecked(i);
                 CARLA_SAFE_ASSERT_CONTINUE(plugin != nullptr);
 
                 fEngine->callback(false, true, ENGINE_CALLBACK_PLUGIN_ADDED, i, 0, 0, 0, 0.0f, plugin->getName());
@@ -247,7 +278,6 @@ int CarlaEngineOsc::handleMsgRegister(const bool isTCP,
         }
     }
 
-    lo_address_free(addr);
     return 0;
 }
 
@@ -349,6 +379,25 @@ int CarlaEngineOsc::handleMsgControl(const char* const method,
         CARLA_SAFE_ASSERT_RETURN_OSC_ERR(connectionId >= 0);
 
         ok = fEngine->patchbayDisconnect(external, static_cast<uint32_t>(connectionId));
+    }
+    else if (std::strcmp(method, "patchbay_set_group_pos") == 0)
+    {
+        CARLA_SAFE_ASSERT_RETURN_OSC_ERR(argc == 7);
+        CARLA_SAFE_ASSERT_RETURN_OSC_ERR(types[1] == 'i');
+        CARLA_SAFE_ASSERT_RETURN_OSC_ERR(types[2] == 'i');
+        CARLA_SAFE_ASSERT_RETURN_OSC_ERR(types[3] == 'i');
+        CARLA_SAFE_ASSERT_RETURN_OSC_ERR(types[4] == 'i');
+        CARLA_SAFE_ASSERT_RETURN_OSC_ERR(types[5] == 'i');
+        CARLA_SAFE_ASSERT_RETURN_OSC_ERR(types[6] == 'i');
+
+        const bool external = argv[1]->i != 0;
+
+        const int32_t groupId = argv[2]->i;
+        CARLA_SAFE_ASSERT_RETURN_OSC_ERR(groupId >= 0);
+
+        ok = fEngine->patchbaySetGroupPos(true, false,
+                                          external, static_cast<uint32_t>(groupId),
+                                          argv[3]->i, argv[4]->i, argv[5]->i, argv[6]->i);
     }
     else if (std::strcmp(method, "patchbay_refresh") == 0)
     {
@@ -630,18 +679,33 @@ int CarlaEngineOsc::handleMsgSetParameterValue(CARLA_ENGINE_OSC_HANDLE_ARGS)
     return 0;
 }
 
-int CarlaEngineOsc::handleMsgSetParameterMidiCC(CARLA_ENGINE_OSC_HANDLE_ARGS)
+int CarlaEngineOsc::handleMsgSetParameterMappedControlIndex(CARLA_ENGINE_OSC_HANDLE_ARGS)
 {
-    carla_debug("CarlaEngineOsc::handleMsgSetParameterMidiCC()");
+    carla_debug("CarlaEngineOsc::handleMsgSetParameterMappedIndex()");
     CARLA_ENGINE_OSC_CHECK_OSC_TYPES(2, "ii");
 
     const int32_t index = argv[0]->i;
-    const int32_t cc    = argv[1]->i;
+    const int32_t ctrl  = argv[1]->i;
 
     CARLA_SAFE_ASSERT_RETURN(index >= 0, 0);
-    CARLA_SAFE_ASSERT_RETURN(cc >= -1 && cc < MAX_MIDI_CONTROL, 0);
+    CARLA_SAFE_ASSERT_RETURN(ctrl >= CONTROL_INDEX_NONE && ctrl <= CONTROL_INDEX_MAX_ALLOWED, 0);
 
-    plugin->setParameterMidiCC(static_cast<uint32_t>(index), static_cast<int16_t>(cc), false, true);
+    plugin->setParameterMappedControlIndex(static_cast<uint32_t>(index), static_cast<int16_t>(ctrl), false, true, true);
+    return 0;
+}
+
+int CarlaEngineOsc::handleMsgSetParameterMappedRange(CARLA_ENGINE_OSC_HANDLE_ARGS)
+{
+    carla_debug("CarlaEngineOsc::handleMsgSetParameterMappedRange()");
+    CARLA_ENGINE_OSC_CHECK_OSC_TYPES(2, "iff");
+
+    const int32_t index   = argv[0]->i;
+    const float   minimum = argv[1]->f;
+    const float   maximum = argv[2]->f;
+
+    CARLA_SAFE_ASSERT_RETURN(index >= 0, 0);
+
+    plugin->setParameterMappedRange(static_cast<uint32_t>(index), minimum, maximum, false, true);
     return 0;
 }
 

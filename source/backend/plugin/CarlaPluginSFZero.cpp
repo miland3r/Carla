@@ -1,6 +1,6 @@
 /*
  * Carla SFZero Plugin
- * Copyright (C) 2018-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2018-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -16,6 +16,7 @@
  */
 
 #include "CarlaPluginInternal.hpp"
+#include "CarlaBackendUtils.hpp"
 #include "CarlaEngine.hpp"
 
 #include "sfzero/SFZero.h"
@@ -67,7 +68,7 @@ public:
         pData->masterMutex.lock();
 
         if (pData->client != nullptr && pData->client->isActive())
-            pData->client->deactivate();
+            pData->client->deactivate(true);
 
         if (pData->active)
         {
@@ -125,6 +126,7 @@ public:
         options |= PLUGIN_OPTION_SEND_NOTE_AFTERTOUCH;
         options |= PLUGIN_OPTION_SEND_PITCHBEND;
         options |= PLUGIN_OPTION_SEND_ALL_SOUND_OFF;
+        options |= PLUGIN_OPTION_SKIP_SENDING_NOTES;
 
         return options;
     }
@@ -309,7 +311,7 @@ public:
     // -------------------------------------------------------------------
     // Plugin processing
 
-    void process(const float** const, float** const audioOut, const float** const, float** const, const uint32_t frames) override
+    void process(const float* const* const, float** const audioOut, const float* const*, float**, const uint32_t frames) override
     {
         // --------------------------------------------------------------------------------------------------------
         // Check if active
@@ -407,28 +409,28 @@ public:
 
                     case kEngineControlEventTypeParameter:
                     {
+                        float value;
+
 #ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
                         // Control backend stuff
                         if (event.channel == pData->ctrlChannel)
                         {
-                            float value;
-
                             if (MIDI_IS_CONTROL_BREATH_CONTROLLER(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_DRYWET) != 0)
                             {
-                                value = ctrlEvent.value;
+                                value = ctrlEvent.normalizedValue;
                                 setDryWetRT(value, true);
                             }
 
                             if (MIDI_IS_CONTROL_CHANNEL_VOLUME(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_VOLUME) != 0)
                             {
-                                value = ctrlEvent.value*127.0f/100.0f;
+                                value = ctrlEvent.normalizedValue*127.0f/100.0f;
                                 setVolumeRT(value, true);
                             }
 
                             if (MIDI_IS_CONTROL_BALANCE(ctrlEvent.param) && (pData->hints & PLUGIN_CAN_BALANCE) != 0)
                             {
                                 float left, right;
-                                value = ctrlEvent.value/0.5f - 1.0f;
+                                value = ctrlEvent.normalizedValue/0.5f - 1.0f;
 
                                 if (value < 0.0f)
                                 {
@@ -456,33 +458,20 @@ public:
                         {
                             if (pData->param.data[k].midiChannel != event.channel)
                                 continue;
-                            if (pData->param.data[k].midiCC != ctrlEvent.param)
+                            if (pData->param.data[k].mappedControlIndex != ctrlEvent.param)
                                 continue;
                             if (pData->param.data[k].hints != PARAMETER_INPUT)
                                 continue;
                             if ((pData->param.data[k].hints & PARAMETER_IS_AUTOMABLE) == 0)
                                 continue;
 
-                            float value;
-
-                            if (pData->param.data[k].hints & PARAMETER_IS_BOOLEAN)
-                            {
-                                value = (ctrlEvent.value < 0.5f) ? pData->param.ranges[k].min : pData->param.ranges[k].max;
-                            }
-                            else
-                            {
-                                value = pData->param.ranges[k].getUnnormalizedValue(ctrlEvent.value);
-
-                                if (pData->param.data[k].hints & PARAMETER_IS_INTEGER)
-                                    value = std::rint(value);
-                            }
-
+                            value = pData->param.getFinalUnnormalizedValue(k, ctrlEvent.normalizedValue);
                             setParameterValueRT(k, value, true);
                         }
 
-                        if ((pData->options & PLUGIN_OPTION_SEND_CONTROL_CHANGES) != 0 && ctrlEvent.param < MAX_MIDI_CONTROL)
+                        if ((pData->options & PLUGIN_OPTION_SEND_CONTROL_CHANGES) != 0 && ctrlEvent.param < MAX_MIDI_VALUE)
                         {
-                            fSynth.handleController(event.channel+1, ctrlEvent.param, int(ctrlEvent.value*127.0f));
+                            fSynth.handleController(event.channel+1, ctrlEvent.param, int(ctrlEvent.normalizedValue*127.0f));
                         }
 
                         break;
@@ -518,6 +507,8 @@ public:
 
                     uint8_t status = uint8_t(MIDI_GET_STATUS_FROM_DATA(midiData));
 
+                    if ((status == MIDI_STATUS_NOTE_OFF || status == MIDI_STATUS_NOTE_ON) && (pData->options & PLUGIN_OPTION_SKIP_SENDING_NOTES))
+                        continue;
                     if (status == MIDI_STATUS_CHANNEL_PRESSURE && (pData->options & PLUGIN_OPTION_SEND_CHANNEL_PRESSURE) == 0)
                         continue;
                     if (status == MIDI_STATUS_CONTROL_CHANGE && (pData->options & PLUGIN_OPTION_SEND_CONTROL_CHANGES) == 0)
@@ -542,20 +533,11 @@ public:
 
                     if (status == MIDI_STATUS_NOTE_ON)
                     {
-                        pData->postponeRtEvent(kPluginPostRtEventNoteOn,
-                                               true,
-                                               event.channel,
-                                               midiData[1],
-                                               midiData[2],
-                                               0.0f);
+                        pData->postponeNoteOnRtEvent(true, event.channel, midiData[1], midiData[2]);
                     }
                     else if (status == MIDI_STATUS_NOTE_OFF)
                     {
-                        pData->postponeRtEvent(kPluginPostRtEventNoteOff,
-                                               true,
-                                               event.channel,
-                                               midiData[1],
-                                               0, 0.0f);
+                        pData->postponeNoteOffRtEvent(true, event.channel, midiData[1]);
                     }
                 } break;
                 }
@@ -674,7 +656,8 @@ public:
 
     // -------------------------------------------------------------------
 
-    bool init(const char* const filename, const char* const name, const char* const label, const uint options)
+    bool init(const CarlaPluginPtr plugin,
+              const char* const filename, const char* const name, const char* const label, const uint options)
     {
         CARLA_SAFE_ASSERT_RETURN(pData->engine != nullptr, false);
 
@@ -741,7 +724,7 @@ public:
         // ---------------------------------------------------------------
         // register client
 
-        pData->client = pData->engine->addClient(this);
+        pData->client = pData->engine->addClient(plugin);
 
         if (pData->client == nullptr || ! pData->client->isOk())
         {
@@ -750,18 +733,24 @@ public:
         }
 
         // ---------------------------------------------------------------
-        // set default options
+        // set options
 
-        pData->options  = 0x0;
-        pData->options |= PLUGIN_OPTION_SEND_CONTROL_CHANGES;
-        pData->options |= PLUGIN_OPTION_SEND_CHANNEL_PRESSURE;
-        pData->options |= PLUGIN_OPTION_SEND_NOTE_AFTERTOUCH;
-        pData->options |= PLUGIN_OPTION_SEND_PITCHBEND;
-        pData->options |= PLUGIN_OPTION_SEND_ALL_SOUND_OFF;
+        pData->options = 0x0;
+
+        if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_CONTROL_CHANGES))
+            pData->options |= PLUGIN_OPTION_SEND_CONTROL_CHANGES;
+        if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_CHANNEL_PRESSURE))
+            pData->options |= PLUGIN_OPTION_SEND_CHANNEL_PRESSURE;
+        if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_NOTE_AFTERTOUCH))
+            pData->options |= PLUGIN_OPTION_SEND_NOTE_AFTERTOUCH;
+        if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_PITCHBEND))
+            pData->options |= PLUGIN_OPTION_SEND_PITCHBEND;
+        if (isPluginOptionEnabled(options, PLUGIN_OPTION_SEND_ALL_SOUND_OFF))
+            pData->options |= PLUGIN_OPTION_SEND_ALL_SOUND_OFF;
+        if (isPluginOptionInverseEnabled(options, PLUGIN_OPTION_SKIP_SENDING_NOTES))
+            pData->options |= PLUGIN_OPTION_SKIP_SENDING_NOTES;
 
         return true;
-
-        (void)options;
     }
 
     // -------------------------------------------------------------------
@@ -778,7 +767,7 @@ private:
 
 // -------------------------------------------------------------------------------------------------------------------
 
-CarlaPlugin* CarlaPlugin::newSFZero(const Initializer& init)
+CarlaPluginPtr CarlaPlugin::newSFZero(const Initializer& init)
 {
     carla_debug("CarlaPluginSFZero::newSFZero({%p, \"%s\", \"%s\", \"%s\", " P_INT64 "})",
                 init.engine, init.filename, init.name, init.label, init.uniqueId);
@@ -792,13 +781,10 @@ CarlaPlugin* CarlaPlugin::newSFZero(const Initializer& init)
         return nullptr;
     }
 
-    CarlaPluginSFZero* const plugin(new CarlaPluginSFZero(init.engine, init.id));
+    std::shared_ptr<CarlaPluginSFZero> plugin(new CarlaPluginSFZero(init.engine, init.id));
 
-    if (! plugin->init(init.filename, init.name, init.label, init.options))
-    {
-        delete plugin;
+    if (! plugin->init(plugin, init.filename, init.name, init.label, init.options))
         return nullptr;
-    }
 
     return plugin;
 }

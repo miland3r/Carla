@@ -34,6 +34,13 @@ using water::MidiBuffer;
 CARLA_BACKEND_START_NAMESPACE
 
 // -----------------------------------------------------------------------
+
+struct PatchbayPosition {
+    bool active;
+    int x1, y1, x2, y2;
+};
+
+// -----------------------------------------------------------------------
 // External Graph stuff
 
 enum ExternalGraphGroupIds {
@@ -80,6 +87,7 @@ struct ExternalGraphPorts {
 struct ExternalGraph {
     PatchbayConnectionList connections;
     ExternalGraphPorts audioPorts, midiPorts;
+    PatchbayPosition positions[kExternalGraphGroupMax];
     mutable CharStringListPtr retCon;
     ExternalGraph(CarlaEngine* engine) noexcept;
 
@@ -89,10 +97,13 @@ struct ExternalGraph {
                  uint groupA, uint portA, uint groupB, uint portB) noexcept;
     bool disconnect(bool sendHost, bool sendOSC,
                     uint connectionId) noexcept;
+    void setGroupPos(bool sendHost, bool sendOSC,
+                     uint groupId, int x1, int y1, int x2, int y2);
     void refresh(bool sendHost, bool sendOSC,
                  const char* deviceName);
 
     const char* const* getConnections() const noexcept;
+    bool getGroupFromName(const char* groupName, uint& groupId) const noexcept;
     bool getGroupAndPortIdFromFullName(const char* fullPortName, uint& groupId, uint& portId) const noexcept;
 
     CarlaEngine* const kEngine;
@@ -179,18 +190,24 @@ public:
     void setSampleRate(double sampleRate);
     void setOffline(bool offline);
 
-    void addPlugin(CarlaPlugin* plugin);
-    void replacePlugin(CarlaPlugin* oldPlugin, CarlaPlugin* newPlugin);
-    void renamePlugin(CarlaPlugin* plugin, const char* newName);
-    void removePlugin(CarlaPlugin* plugin);
+    void addPlugin(CarlaPluginPtr plugin);
+    void replacePlugin(CarlaPluginPtr oldPlugin, CarlaPluginPtr newPlugin);
+    void renamePlugin(CarlaPluginPtr plugin, const char* newName);
+    void switchPlugins(CarlaPluginPtr pluginA, CarlaPluginPtr pluginB);
+    void reconfigureForCV(CarlaPluginPtr plugin, const uint portIndex, bool added);
+    void reconfigurePlugin(CarlaPluginPtr plugin, bool portsAdded);
+    void removePlugin(CarlaPluginPtr plugin);
     void removeAllPlugins();
 
     bool connect(bool external, uint groupA, uint portA, uint groupB, uint portB);
     bool disconnect(bool external, uint connectionId);
     void disconnectInternalGroup(uint groupId) noexcept;
+    void setGroupPos(bool sendHost, bool sendOsc, bool external, uint groupId, int x1, int y1, int x2, int y2);
     void refresh(bool sendHost, bool sendOsc, bool external, const char* deviceName);
 
     const char* const* getConnections(bool external) const;
+    const CarlaEngine::PatchbayPosition* getPositions(bool external, uint& count) const;
+    bool getGroupFromName(bool external, const char* groupName, uint& groupId) const;
     bool getGroupAndPortIdFromFullName(bool external, const char* fullPortName, uint& groupId, uint& portId) const;
 
     void process(CarlaEngine::ProtectedData* data,

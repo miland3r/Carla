@@ -35,6 +35,7 @@ int     ad_close_null(void *x) { UNUSED(x); return -1; }
 int     ad_info_null(void *x, struct adinfo *n) { UNUSED(x); UNUSED(n); return -1; }
 int64_t ad_seek_null(void *x, int64_t p) { UNUSED(x); UNUSED(p); return -1; }
 ssize_t ad_read_null(void *x, float*d, size_t s) { UNUSED(x); UNUSED(d); UNUSED(s); return -1;}
+int     ad_bitrate_null(void *x) { UNUSED(x); return -1;}
 
 typedef struct {
 	ad_plugin const *b; ///< decoder back-end
@@ -43,8 +44,6 @@ typedef struct {
 
 /* samplecat api */
 
-void ad_init() { /* global init */ }
-
 static ad_plugin const * choose_backend(const char *fn) {
 	int max, val;
 	ad_plugin const *b=NULL;
@@ -52,6 +51,16 @@ static ad_plugin const * choose_backend(const char *fn) {
 
 	val=adp_get_sndfile()->eval(fn);
 	if (val>max) {max=val; b=adp_get_sndfile();}
+
+#if 0
+	// NOTE seek is broken for minimp3
+	val = adp_get_minimp3()->eval(fn);
+	if (val > max) {max=val; b=adp_get_minimp3();}
+#else
+	// NOTE dr_mp3 has memory corruption issues
+	val = adp_get_dr_mp3()->eval(fn);
+	if (val > max) {max=val; b=adp_get_dr_mp3();}
+#endif
 
 	val=adp_get_ffmpeg()->eval(fn);
 	if (val>max) {max=val; b=adp_get_ffmpeg();}
@@ -101,6 +110,12 @@ ssize_t ad_read(void *sf, float* out, size_t len){
 	adecoder *d = (adecoder*) sf;
 	if (!d) return -1;
 	return d->b->read(d->d, out, len);
+}
+
+int ad_get_bitrate(void *sf) {
+	adecoder *d = (adecoder*) sf;
+	if (!d) return -1;
+	return d->b->bitrate(d->d);
 }
 
 /*

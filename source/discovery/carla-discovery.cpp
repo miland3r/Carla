@@ -1,6 +1,6 @@
 /*
  * Carla Plugin discovery
- * Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -25,18 +25,45 @@
 # undef HAVE_FLUIDSYNTH
 #endif
 
-#if defined(USING_JUCE) && (defined(CARLA_OS_MAC) || defined(CARLA_OS_WIN))
+#ifdef USING_JUCE
+# if defined(__clang__)
+#  pragma clang diagnostic push
+#  pragma clang diagnostic ignored "-Wfloat-equal"
+#  pragma clang diagnostic ignored "-Wimplicit-int-float-conversion"
+# elif defined(__GNUC__) && (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6))
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wconversion"
+#  pragma GCC diagnostic ignored "-Wdouble-promotion"
+#  pragma GCC diagnostic ignored "-Weffc++"
+#  pragma GCC diagnostic ignored "-Wfloat-equal"
+# endif
+# include "../backend/utils/JUCE.cpp"
 # include "AppConfig.h"
 # include "juce_audio_processors/juce_audio_processors.h"
-# define USE_JUCE_PROCESSORS
+# if JUCE_PLUGINHOST_VST
+#  define USING_JUCE_FOR_VST2
+# endif
+# if defined(__GNUC__) && (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6))
+#  pragma GCC diagnostic pop
+# endif
 #endif
 
 #include "CarlaLadspaUtils.hpp"
 #include "CarlaLv2Utils.hpp"
-#include "CarlaVstUtils.hpp"
+
+#ifndef USING_JUCE_FOR_VST2
+# include "CarlaVstUtils.hpp"
+#endif
 
 #ifdef CARLA_OS_MAC
+# define Component CocoaComponent
+# define MemoryBlock CocoaMemoryBlock
+# define Point CocoaPoint
 # import <Foundation/Foundation.h>
+# undef Component
+# undef MemoryBlock
+# undef Point
+# include "CarlaMacUtils.cpp"
 #endif
 
 #ifdef CARLA_OS_WIN
@@ -50,8 +77,9 @@
 
 #include <iostream>
 
+#include "water/files/File.h"
+
 #ifndef BUILD_BRIDGE
-# include "water/files/File.h"
 # include "water/text/StringArray.h"
 # include "CarlaDssiUtils.cpp"
 # include "../backend/utils/CachedPlugins.cpp"
@@ -67,7 +95,7 @@ using water::StringArray;
 
 CARLA_BACKEND_USE_NAMESPACE
 
-// --------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------------------------------------
 // Dummy values to test plugins with
 
 static const uint32_t kBufferSize  = 512;
@@ -75,7 +103,7 @@ static const double   kSampleRate  = 44100.0;
 static const int32_t  kSampleRatei = 44100;
 static const float    kSampleRatef = 44100.0f;
 
-// --------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------------------------------------
 // Don't print ELF/EXE related errors since discovery can find multi-architecture binaries
 
 static void print_lib_error(const char* const filename)
@@ -84,6 +112,7 @@ static void print_lib_error(const char* const filename)
 
     if (error != nullptr &&
         std::strstr(error, "wrong ELF class") == nullptr &&
+        std::strstr(error, "invalid ELF header") == nullptr &&
         std::strstr(error, "Bad EXE format") == nullptr &&
         std::strstr(error, "no suitable image found") == nullptr &&
         std::strstr(error, "not a valid Win32 application") == nullptr)
@@ -103,6 +132,7 @@ static void print_cached_plugin(const CarlaCachedPluginInfo* const pinfo)
     DISCOVERY_OUT("init", "-----------");
     DISCOVERY_OUT("build", BINARY_NATIVE);
     DISCOVERY_OUT("hints", pinfo->hints);
+    DISCOVERY_OUT("category", getPluginCategoryAsString(pinfo->category));
     DISCOVERY_OUT("name", pinfo->name);
     DISCOVERY_OUT("maker", pinfo->maker);
     DISCOVERY_OUT("label", pinfo->label);
@@ -134,6 +164,11 @@ static void do_cached_check(const PluginType type)
         break;
     }
 
+# ifdef USING_JUCE
+    if (type == PLUGIN_AU)
+        carla_juce_init();
+# endif
+
     const uint count = carla_get_cached_plugin_count(type, plugPath);
 
     for (uint i=0; i<count; ++i)
@@ -143,6 +178,11 @@ static void do_cached_check(const PluginType type)
 
         print_cached_plugin(pinfo);
     }
+
+# ifdef USING_JUCE
+    if (type == PLUGIN_AU)
+        carla_juce_cleanup();
+# endif
 }
 #endif
 
@@ -367,6 +407,7 @@ static void do_ladspa_check(lib_t& libHandle, const char* const filename, const 
         DISCOVERY_OUT("init", "-----------");
         DISCOVERY_OUT("build", BINARY_NATIVE);
         DISCOVERY_OUT("hints", hints);
+        DISCOVERY_OUT("category", getPluginCategoryAsString(getPluginCategoryFromName(descriptor->Name)));
         DISCOVERY_OUT("name", descriptor->Name);
         DISCOVERY_OUT("label", descriptor->Label);
         DISCOVERY_OUT("maker", descriptor->Maker);
@@ -665,6 +706,9 @@ static void do_dssi_check(lib_t& libHandle, const char* const filename, const bo
 
         DISCOVERY_OUT("init", "-----------");
         DISCOVERY_OUT("build", BINARY_NATIVE);
+        DISCOVERY_OUT("category", ((hints & PLUGIN_IS_SYNTH)
+                                   ? "synth"
+                                   : getPluginCategoryAsString(getPluginCategoryFromName(ldescriptor->Name))));
         DISCOVERY_OUT("hints", hints);
         DISCOVERY_OUT("name", ldescriptor->Name);
         DISCOVERY_OUT("label", ldescriptor->Label);
@@ -699,7 +743,7 @@ static void do_lv2_check(const char* const bundle, const bool doInit)
     const Lilv::Plugins lilvPlugins(lv2World.get_all_plugins());
 
     // Get all plugin URIs in this bundle
-    StringArray URIs;
+    water::StringArray URIs;
 
     LILV_FOREACH(plugins, it, lilvPlugins)
     {
@@ -719,7 +763,7 @@ static void do_lv2_check(const char* const bundle, const bool doInit)
     for (int i=0, count=URIs.size(); i < count; ++i)
     {
         const char* const URI = URIs[i].toRawUTF8();
-        ScopedPointer<const LV2_RDF_Descriptor> rdfDescriptor(lv2_rdf_new(URI, false));
+        CarlaScopedPointer<const LV2_RDF_Descriptor> rdfDescriptor(lv2_rdf_new(URI, false));
 
         if (rdfDescriptor == nullptr || rdfDescriptor->URI == nullptr)
         {
@@ -764,8 +808,8 @@ static void do_lv2_check(const char* const bundle, const bool doInit)
 }
 #endif
 
-#ifndef USE_JUCE_PROCESSORS
-// --------------------------------------------------------------------------
+#ifndef USING_JUCE_FOR_VST2
+// -------------------------------------------------------------------------------------------------------------------
 // VST stuff
 
 // Check if plugin is currently processing
@@ -1054,6 +1098,7 @@ static void do_vst_check(lib_t& libHandle, const char* const filename, const boo
     CarlaString cName;
     CarlaString cProduct;
     CarlaString cVendor;
+    PluginCategory category;
     LinkedList<intptr_t> uniqueIds;
 
     if (isShell)
@@ -1122,6 +1167,35 @@ static void do_vst_check(lib_t& libHandle, const char* const filename, const boo
         else
             cVendor.clear();
 
+        // get category
+        switch (effect->dispatcher(effect, effGetPlugCategory, 0, 0, nullptr, 0.0f))
+        {
+        case kPlugCategSynth:
+            category = PLUGIN_CATEGORY_SYNTH;
+            break;
+        case kPlugCategAnalysis:
+            category = PLUGIN_CATEGORY_UTILITY;
+            break;
+        case kPlugCategMastering:
+            category = PLUGIN_CATEGORY_DYNAMICS;
+            break;
+        case kPlugCategRoomFx:
+            category = PLUGIN_CATEGORY_DELAY;
+            break;
+        case kPlugCategRestoration:
+            category = PLUGIN_CATEGORY_UTILITY;
+            break;
+        case kPlugCategGenerator:
+            category = PLUGIN_CATEGORY_SYNTH;
+            break;
+        default:
+            if (effect->flags & effFlagsIsSynth)
+                category = PLUGIN_CATEGORY_SYNTH;
+            else
+                category = PLUGIN_CATEGORY_NONE;
+            break;
+        }
+
         // get everything else
         uint hints = 0x0;
         uint audioIns = static_cast<uint>(std::max(0, effect->numInputs));
@@ -1134,7 +1208,10 @@ static void do_vst_check(lib_t& libHandle, const char* const filename, const boo
             hints |= PLUGIN_HAS_CUSTOM_UI;
 
         if (effect->flags & effFlagsIsSynth)
+        {
             hints |= PLUGIN_IS_SYNTH;
+            midiIns = 1;
+        }
 
         if (vstPluginCanDo(effect, "receiveVstEvents") || vstPluginCanDo(effect, "receiveVstMidiEvent") || (effect->flags & effFlagsIsSynth) != 0)
             midiIns = 1;
@@ -1256,6 +1333,7 @@ static void do_vst_check(lib_t& libHandle, const char* const filename, const boo
         DISCOVERY_OUT("init", "-----------");
         DISCOVERY_OUT("build", BINARY_NATIVE);
         DISCOVERY_OUT("hints", hints);
+        DISCOVERY_OUT("category", getPluginCategoryAsString(category));
         DISCOVERY_OUT("name", cName.buffer());
         DISCOVERY_OUT("label", cProduct.buffer());
         DISCOVERY_OUT("maker", cVendor.buffer());
@@ -1301,23 +1379,50 @@ static void do_vst_check(lib_t& libHandle, const char* const filename, const boo
     (void)filename;
 #endif
 }
-#endif // ! USE_JUCE_PROCESSORS
+#endif // ! USING_JUCE_FOR_VST2
 
-#ifdef USE_JUCE_PROCESSORS
-namespace juce {
-extern bool juce_isRunningInWine();
+#ifdef USING_JUCE
+// -------------------------------------------------------------------------------------------------------------------
+// find all available plugin audio ports
+
+static void findMaxTotalChannels(juce::AudioProcessor* const filter, int& maxTotalIns, int& maxTotalOuts)
+{
+    filter->enableAllBuses();
+
+    int numInputBuses  = filter->getBusCount(true);
+    int numOutputBuses = filter->getBusCount(false);
+
+    if (numInputBuses > 1 || numOutputBuses > 1)
+    {
+        maxTotalIns = maxTotalOuts = 0;
+
+        for (int i = 0; i < numInputBuses; ++i)
+            maxTotalIns += filter->getChannelCountOfBus(true, i);
+
+        for (int i = 0; i < numOutputBuses; ++i)
+            maxTotalOuts += filter->getChannelCountOfBus(false, i);
+    }
+    else
+    {
+        maxTotalIns  = numInputBuses  > 0 ? filter->getBus(true,  0)->getMaxSupportedChannels(64) : 0;
+        maxTotalOuts = numOutputBuses > 0 ? filter->getBus(false, 0)->getMaxSupportedChannels(64) : 0;
+    }
 }
 
-static void do_juce_check(const char* const filename_, const char* const stype, const bool doInit)
+// -------------------------------------------------------------------------------------------------------------------
+
+static bool do_juce_check(const char* const filename_, const char* const stype, const bool doInit)
 {
-    CARLA_SAFE_ASSERT_RETURN(stype != nullptr && stype[0] != 0,) // FIXME
+    CARLA_SAFE_ASSERT_RETURN(stype != nullptr && stype[0] != 0, false) // FIXME
     carla_debug("do_juce_check(%s, %s, %s)", filename_, stype, bool2str(doInit));
+
+    carla_juce_init();
 
     juce::String filename;
 
 #ifdef CARLA_OS_WIN
     // Fix for wine usage
-    if (juce::juce_isRunningInWine() && filename_[0] == '/')
+    if (juce::File("Z:\\usr\\").isDirectory() && filename_[0] == '/')
     {
         filename = filename_;
         filename.replace("/", "\\");
@@ -1327,14 +1432,15 @@ static void do_juce_check(const char* const filename_, const char* const stype, 
 #endif
     filename = juce::File(filename_).getFullPathName();
 
-    juce::ScopedPointer<juce::AudioPluginFormat> pluginFormat;
+    CarlaScopedPointer<juce::AudioPluginFormat> pluginFormat;
 
     /* */ if (std::strcmp(stype, "VST2") == 0)
     {
 #if JUCE_PLUGINHOST_VST
         pluginFormat = new juce::VSTPluginFormat();
 #else
-        DISCOVERY_OUT("error", "VST support not available");
+        DISCOVERY_OUT("error", "VST2 support not available");
+        return false;
 #endif
     }
     else if (std::strcmp(stype, "VST3") == 0)
@@ -1343,6 +1449,7 @@ static void do_juce_check(const char* const filename_, const char* const stype, 
         pluginFormat = new juce::VST3PluginFormat();
 #else
         DISCOVERY_OUT("error", "VST3 support not available");
+        return false;
 #endif
     }
     else if (std::strcmp(stype, "AU") == 0)
@@ -1351,27 +1458,32 @@ static void do_juce_check(const char* const filename_, const char* const stype, 
         pluginFormat = new juce::AudioUnitPluginFormat();
 #else
         DISCOVERY_OUT("error", "AU support not available");
+        return false;
 #endif
     }
 
     if (pluginFormat == nullptr)
     {
         DISCOVERY_OUT("error", stype << " support not available");
-        return;
+        return false;
     }
 
 #ifdef CARLA_OS_WIN
-    CARLA_SAFE_ASSERT_RETURN(juce::File(filename).existsAsFile(),);
+    CARLA_CUSTOM_SAFE_ASSERT_RETURN("Plugin file/folder does not exist", juce::File(filename).exists(), false);
 #endif
-    CARLA_SAFE_ASSERT_RETURN(pluginFormat->fileMightContainThisPluginType(filename),);
+    CARLA_SAFE_ASSERT_RETURN(pluginFormat->fileMightContainThisPluginType(filename), false);
 
     juce::OwnedArray<juce::PluginDescription> results;
     pluginFormat->findAllTypesForFile(results, filename);
 
     if (results.size() == 0)
     {
+#if defined(CARLA_OS_MAC) && defined(__aarch64__)
+        if (std::strcmp(stype, "VST2") == 0 || std::strcmp(stype, "VST3") == 0)
+            return true;
+#endif
         DISCOVERY_OUT("error", "No plugins found");
-        return;
+        return false;
     }
 
     for (juce::PluginDescription **it = results.begin(), **end = results.end(); it != end; ++it)
@@ -1386,15 +1498,22 @@ static void do_juce_check(const char* const filename_, const char* const stype, 
         int parameters = 0;
 
         if (desc->isInstrument)
+        {
             hints |= PLUGIN_IS_SYNTH;
+            midiIns = 1;
+        }
 
         if (doInit)
         {
-            if (juce::AudioPluginInstance* const instance = pluginFormat->createInstanceFromDescription(*desc, kSampleRate, kBufferSize))
+            if (std::unique_ptr<juce::AudioPluginInstance> instance
+                    = pluginFormat->createInstanceFromDescription(*desc, kSampleRate, kBufferSize))
             {
+                carla_juce_idle();
+
+                findMaxTotalChannels(instance.get(), audioIns, audioOuts);
                 instance->refreshParameterList();
 
-                parameters = instance->getNumParameters();
+                parameters = instance->getParameters().size();
 
                 if (instance->hasEditor())
                     hints |= PLUGIN_HAS_CUSTOM_UI;
@@ -1402,14 +1521,13 @@ static void do_juce_check(const char* const filename_, const char* const stype, 
                     midiIns = 1;
                 if (instance->producesMidi())
                     midiOuts = 1;
-
-                delete instance;
             }
         }
 
         DISCOVERY_OUT("init", "-----------");
         DISCOVERY_OUT("build", BINARY_NATIVE);
         DISCOVERY_OUT("hints", hints);
+        DISCOVERY_OUT("category", getPluginCategoryAsString(getPluginCategoryFromName(desc->category.toRawUTF8())));
         DISCOVERY_OUT("name", desc->descriptiveName);
         DISCOVERY_OUT("label", desc->name);
         DISCOVERY_OUT("maker", desc->manufacturerName);
@@ -1421,14 +1539,18 @@ static void do_juce_check(const char* const filename_, const char* const stype, 
         DISCOVERY_OUT("parameters.ins", parameters);
         DISCOVERY_OUT("end", "------------");
     }
-}
-#endif // USE_JUCE_PROCESSORS
 
-static void do_fluidsynth_check(const char* const filename, const bool doInit)
+    carla_juce_idle();
+    carla_juce_cleanup();
+    return false;
+}
+#endif // USING_JUCE_FOR_VST2
+
+static void do_fluidsynth_check(const char* const filename, const PluginType type, const bool doInit)
 {
 #ifdef HAVE_FLUIDSYNTH
-    const water::String jfilename = water::String(CharPointer_UTF8(filename));
-    const File file(jfilename);
+    const water::String jfilename = water::String(water::CharPointer_UTF8(filename));
+    const water::File file(jfilename);
 
     if (! file.existsAsFile())
     {
@@ -1436,7 +1558,7 @@ static void do_fluidsynth_check(const char* const filename, const bool doInit)
         return;
     }
 
-    if (! fluid_is_soundfont(filename))
+    if (type == PLUGIN_SF2 && ! fluid_is_soundfont(filename))
     {
         DISCOVERY_OUT("error", "Not a SF2 file");
         return;
@@ -1452,26 +1574,33 @@ static void do_fluidsynth_check(const char* const filename, const bool doInit)
         fluid_synth_t* const f_synth = new_fluid_synth(f_settings);
         CARLA_SAFE_ASSERT_RETURN(f_synth != nullptr,);
 
-        const int f_id = fluid_synth_sfload(f_synth, filename, 0);
+        const int f_id_test = fluid_synth_sfload(f_synth, filename, 0);
 
-        if (f_id < 0)
+        if (f_id_test < 0)
         {
             DISCOVERY_OUT("error", "Failed to load SF2 file");
             return;
         }
 
-        if (fluid_sfont_t* const f_sfont = fluid_synth_get_sfont_by_id(f_synth, static_cast<uint>(f_id)))
+#if FLUIDSYNTH_VERSION_MAJOR >= 2
+        const int f_id = f_id_test;
+#else
+        const uint f_id = static_cast<uint>(f_id_test);
+#endif
+
+        if (fluid_sfont_t* const f_sfont = fluid_synth_get_sfont_by_id(f_synth, f_id))
         {
-#if FLUIDSYNTH_VERSION_MAJOR < 2
+#if FLUIDSYNTH_VERSION_MAJOR >= 2
+            fluid_sfont_iteration_start(f_sfont);
+            for (; fluid_sfont_iteration_next(f_sfont);)
+                ++programs;
+#else
             fluid_preset_t f_preset;
 
             f_sfont->iteration_start(f_sfont);
             for (; f_sfont->iteration_next(f_sfont, &f_preset);)
-#else
-            fluid_sfont_iteration_start(f_sfont);
-            for (; fluid_sfont_iteration_next(f_sfont);)
-#endif
                 ++programs;
+#endif
         }
 
         delete_fluid_synth(f_synth);
@@ -1485,6 +1614,7 @@ static void do_fluidsynth_check(const char* const filename, const bool doInit)
     DISCOVERY_OUT("init", "-----------");
     DISCOVERY_OUT("build", BINARY_NATIVE);
     DISCOVERY_OUT("hints", PLUGIN_IS_SYNTH);
+    DISCOVERY_OUT("category", "synth");
     DISCOVERY_OUT("name", name.buffer());
     DISCOVERY_OUT("label", label.buffer());
     DISCOVERY_OUT("audio.outs", 2);
@@ -1502,6 +1632,7 @@ static void do_fluidsynth_check(const char* const filename, const bool doInit)
     DISCOVERY_OUT("init", "-----------");
     DISCOVERY_OUT("build", BINARY_NATIVE);
     DISCOVERY_OUT("hints", PLUGIN_IS_SYNTH);
+    DISCOVERY_OUT("category", "synth");
     DISCOVERY_OUT("name", name.buffer());
     DISCOVERY_OUT("label", label.buffer());
     DISCOVERY_OUT("audio.outs", 32);
@@ -1515,6 +1646,7 @@ static void do_fluidsynth_check(const char* const filename, const bool doInit)
 
     // unused
     (void)filename;
+    (void)type;
     (void)doInit;
 #endif
 }
@@ -1545,6 +1677,10 @@ int main(int argc, char* argv[])
     case PLUGIN_DSSI:
     case PLUGIN_VST2:
         openLib = true;
+        break;
+    case PLUGIN_VST3:
+        openLib = water::File(filename).existsAsFile();
+        break;
     default:
         break;
     }
@@ -1560,8 +1696,14 @@ int main(int argc, char* argv[])
         openLib = false;
 #endif
 
-    // ---------------------------------------------------------------------
+    // ---------------------------------------------------------------------------------------------------------------
     // Initialize OS features
+
+    // we want stuff in English so we can parse error messages
+    ::setlocale(LC_ALL, "C");
+#ifndef CARLA_OS_WIN
+    carla_setenv("LC_ALL", "C");
+#endif
 
 #ifdef CARLA_OS_WIN
     OleInitialize(nullptr);
@@ -1573,7 +1715,7 @@ int main(int argc, char* argv[])
 # endif
 #endif
 
-    // ---------------------------------------------------------------------
+    // ---------------------------------------------------------------------------------------------------------------
 
     if (openLib)
     {
@@ -1592,7 +1734,7 @@ int main(int argc, char* argv[])
     if (doInit && getenv("CARLA_DISCOVERY_NO_PROCESSING_CHECKS") != nullptr)
         doInit = false;
 
-    // ---------------------------------------------------------------------
+    // ---------------------------------------------------------------------------------------------------------------
 
     if (doInit && openLib && handle != nullptr)
     {
@@ -1620,6 +1762,25 @@ int main(int argc, char* argv[])
     }
 #endif
 
+#ifdef CARLA_OS_MAC
+    // Plugin might be in quarentine due to Apple stupid notarization rules, let's remove that if possible
+    switch (type)
+    {
+    case PLUGIN_LADSPA:
+    case PLUGIN_DSSI:
+    case PLUGIN_VST2:
+    case PLUGIN_VST3:
+        removeFileFromQuarantine(filename);
+        break;
+    default:
+        break;
+    }
+#endif
+#ifdef USING_JUCE
+    // some macOS plugins have not been yet ported to arm64, re-run them in x86_64 mode if discovery fails
+    bool retryJucePlugin = false;
+#endif
+
     switch (type)
     {
     case PLUGIN_LADSPA:
@@ -1637,41 +1798,65 @@ int main(int argc, char* argv[])
 #endif
 
     case PLUGIN_VST2:
-#ifdef USE_JUCE_PROCESSORS
-        do_juce_check(filename, "VST2", doInit);
+#if defined(USING_JUCE) && JUCE_PLUGINHOST_VST
+        retryJucePlugin = do_juce_check(filename, "VST2", doInit);
 #else
         do_vst_check(handle, filename, doInit);
 #endif
         break;
 
     case PLUGIN_VST3:
-#ifdef USE_JUCE_PROCESSORS
-        do_juce_check(filename, "VST3", doInit);
+#if defined(USING_JUCE) && JUCE_PLUGINHOST_VST3
+        retryJucePlugin = do_juce_check(filename, "VST3", doInit);
 #else
         DISCOVERY_OUT("error", "VST3 support not available");
 #endif
         break;
 
     case PLUGIN_AU:
-#ifdef USE_JUCE_PROCESSORS
+#if defined(USING_JUCE) && JUCE_PLUGINHOST_AU
         do_juce_check(filename, "AU", doInit);
 #else
         DISCOVERY_OUT("error", "AU support not available");
 #endif
          break;
 
+    case PLUGIN_DLS:
+    case PLUGIN_GIG:
     case PLUGIN_SF2:
-        do_fluidsynth_check(filename, doInit);
+        do_fluidsynth_check(filename, type, doInit);
         break;
 
     default:
         break;
     }
 
+#if defined(CARLA_OS_MAC) && defined(USING_JUCE) && defined(__aarch64__)
+    if (retryJucePlugin)
+    {
+        DISCOVERY_OUT("warning", "No plugins found while scanning in arm64 mode, will try x86_64 now");
+
+        const pid_t pid = vfork();
+        if (pid >= 0)
+        {
+            if (pid == 0)
+            {
+                execl("/usr/bin/arch", "/usr/bin/arch", "-arch", "x86_64", argv[0], argv[1], argv[2], nullptr);
+                exit(1);
+            }
+            else
+            {
+                int status;
+                waitpid(pid, &status, 0);
+            }
+        }
+    }
+#endif
+
     if (openLib && handle != nullptr)
         lib_close(handle);
 
-    // ---------------------------------------------------------------------
+    // ---------------------------------------------------------------------------------------------------------------
 
 #ifdef CARLA_OS_WIN
 #ifndef __WINPTHREADS_VERSION
@@ -1683,6 +1868,11 @@ int main(int argc, char* argv[])
 #endif
 
     return 0;
+
+#ifdef USING_JUCE
+    // might be unused
+    (void)retryJucePlugin;
+#endif
 }
 
-// --------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------------------------------------

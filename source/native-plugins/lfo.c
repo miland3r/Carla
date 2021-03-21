@@ -120,7 +120,7 @@ static const NativeParameter* lfo_get_parameter_info(NativePluginHandle handle, 
         param.unit = "(coef)";
         param.ranges.def = 1.0f;
         param.ranges.min = 0.01f;
-        param.ranges.max = 32.0f;
+        param.ranges.max = 2048.0f;
         param.ranges.step = 0.25f;
         param.ranges.stepSmall = 0.1f;
         param.ranges.stepLarge = 0.5f;
@@ -205,8 +205,9 @@ static void lfo_set_parameter_value(NativePluginHandle handle, uint32_t index, f
     }
 }
 
+// FIXME for v3.0, use const for the input buffer
 static void lfo_process(NativePluginHandle handle,
-                        const float** inBuffer, float** outBuffer, uint32_t frames,
+                        float** inBuffer, float** outBuffer, uint32_t frames,
                         const NativeMidiEvent* midiEvents, uint32_t midiEventCount)
 {
     const NativeHostDescriptor* const host     = handlePtr->host;
@@ -311,9 +312,7 @@ static const NativePluginDescriptor lfoDesc = {
     .get_state = NULL,
     .set_state = NULL,
 
-    .dispatcher = NULL,
-
-    .render_inline_display = NULL
+    .dispatcher = NULL
 };
 
 // -----------------------------------------------------------------------

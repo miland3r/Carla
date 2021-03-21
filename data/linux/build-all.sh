@@ -1,5 +1,7 @@
 #!/bin/bash
 
+VERSION="2.3.0-alpha1"
+
 # ---------------------------------------------------------------------------------------------------------------------
 # check dependencies
 
@@ -9,23 +11,27 @@ if ! which debootstrap > /dev/null; then
 fi
 
 # ---------------------------------------------------------------------------------------------------------------------
-# stop on error
+# startup as main script
 
-set -e
+if [ -z "${SOURCED_BY_DOCKER}" ]; then
+    # stop on error
+    set -e
 
-# ---------------------------------------------------------------------------------------------------------------------
-# cd to correct path
-
-cd $(dirname $0)
+    # cd to correct path
+    cd $(dirname $0)
+fi
 
 # ---------------------------------------------------------------------------------------------------------------------
 # set variables
 
 source common.env
 
+# where we build stuff inside the chroot
 CHROOT_CARLA_DIR="/tmp/carla-src"
-PKG_FOLDER="Carla_2.1b1-linux"
-PKGS_NUM="20190227"
+
+# used for downloading packages from kxstudio repos, in order to get lv2-gtk3 and windows bridges
+CARLA_GIT_VER="2.2~rc1+git20200718"
+PKGS_NUM="20200718"
 
 # ---------------------------------------------------------------------------------------------------------------------
 # function to remove old stuff
@@ -53,6 +59,22 @@ fi
 if [ -d ${TARGETDIR}/chroot64 ]; then
     sudo mv ${TARGETDIR}/chroot64 ${TARGETDIR}/chroot64-deleteme2
     sudo rm -rf ${TARGETDIR}/chroot64-deleteme || true
+fi
+
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# create chroots
+
+prepare()
+{
+
+if [ ! -d ${TARGETDIR}/chroot32 ]; then
+    sudo debootstrap --no-check-gpg --arch=i386 lucid ${TARGETDIR}/chroot32 http://old-releases.ubuntu.com/ubuntu/
+fi
+
+if [ ! -d ${TARGETDIR}/chroot64 ]; then
+    sudo debootstrap --no-check-gpg --arch=amd64 lucid ${TARGETDIR}/chroot64 http://old-releases.ubuntu.com/ubuntu/
 fi
 
 }
@@ -132,12 +154,13 @@ if [ ! -d ${CHROOT_CARLA_DIR} ]; then
 fi
 
 if [ ! -f ${CHROOT_CARLA_DIR}/source/native-plugins/external/README.md ]; then
-  git clone --depth=1 -b develop git://github.com/falkTX/Carla-Plugins ${CHROOT_CARLA_DIR}/source/native-plugins/external
+  git clone git://github.com/falkTX/Carla-Plugins ${CHROOT_CARLA_DIR}/source/native-plugins/external
 fi
 
 cd ${CHROOT_CARLA_DIR}
 git checkout .
 git pull
+git submodule init
 git submodule update
 
 # might be updated by git pull
@@ -189,7 +212,12 @@ fi
 
 ${CHROOT_CARLA_DIR}/data/linux/build-pyqt.sh ${ARCH}
 
-apt-get install -y --no-install-recommends libasound2-dev libpulse-dev libgtk2.0-dev libqt4-dev qt4-dev-tools zip unzip
+if [ ! -f /tmp/setup-repo-packages-extra4 ]; then
+  apt-get install -y --no-install-recommends libasound2-dev libpulse-dev libgtk2.0-dev libqt4-dev qt4-dev-tools zip unzip
+  apt-get install -y --no-install-recommends libfreetype6-dev libxcursor-dev libxext-dev
+  apt-get clean
+  touch /tmp/setup-repo-packages-extra4
+fi
 
 EOF
 
@@ -214,7 +242,7 @@ set -e
 
 export OLDPATH=\${PATH}
 export CFLAGS="-I${CHROOT_TARGET_DIR}/carla${ARCH}/include"
-export CXXFLAGS=${CFLAGS}
+export CXXFLAGS="${CFLAGS}"
 export LDFLAGS="-L${CHROOT_TARGET_DIR}/carla${ARCH}/lib"
 export PKG_CONFIG_PATH=${CHROOT_TARGET_DIR}/carla${ARCH}/lib/pkgconfig
 export LINUX=true
@@ -246,7 +274,6 @@ download_carla_extras()
 {
 
 CHROOT_DIR=${TARGETDIR}/chroot${ARCH}
-CARLA_GIT_VER="2.1~alpha2+git20191016"
 
 cat <<EOF | sudo chroot ${CHROOT_DIR}
 set -e
@@ -329,6 +356,9 @@ cd ${CHROOT_CARLA_DIR}
 rm -rf ./tmp-install
 make ${MAKE_ARGS} install DESTDIR=./tmp-install PREFIX=/usr
 
+make -C data/windows/unzipfx-carla -f Makefile.linux clean
+make -C data/windows/unzipfx-carla-control -f Makefile.linux clean
+
 make -C data/windows/unzipfx-carla -f Makefile.linux ${MAKE_ARGS}
 make -C data/windows/unzipfx-carla-control -f Makefile.linux ${MAKE_ARGS}
 
@@ -370,6 +400,9 @@ mv build-carla/lib/library.zip build-carla/lib/library-midipattern.zip
 TARGET_NAME="notes-ui" python3 ./data/linux/app-plugin.py build_exe
 mv build-carla/lib/library.zip build-carla/lib/library-notes.zip
 
+TARGET_NAME="xycontroller-ui" python3 ./data/linux/app-plugin.py build_exe
+mv build-carla/lib/library.zip build-carla/lib/library-xycontroller.zip
+
 TARGET_NAME="carla-plugin" python3 ./data/linux/app-plugin.py build_exe
 mv build-carla/lib/library.zip build-carla/lib/library-carla-p1.zip
 
@@ -385,6 +418,7 @@ pushd build-carla/lib/_lib
 unzip -o ../library-bigmeter.zip
 unzip -o ../library-midipattern.zip
 unzip -o ../library-notes.zip
+unzip -o ../library-xycontroller.zip
 unzip -o ../library-carla-p1.zip
 unzip -o ../library-carla-p2.zip
 unzip -o ../library-carla.zip
@@ -393,7 +427,7 @@ popd
 rm -r build-carla/lib/_lib build-carla/lib/library-*.zip
 
 # move resource binaries into right dir
-mv build-carla/{bigmeter-ui,midipattern-ui,notes-ui,carla-plugin} build-carla/resources/
+mv build-carla/{bigmeter-ui,midipattern-ui,notes-ui,xycontroller-ui,carla-plugin} build-carla/resources/
 rm build-carla/carla-plugin-patchbay
 
 # symlink for carla-plugin-patchbay, lib and styles
@@ -450,17 +484,17 @@ ln -s carla-plugin build-vst/carla.vst/resources/carla-plugin-patchbay
 rm build-{lv2,vst}/carla.*/carla-bridge-lv2-modgui
 rm build-{lv2,vst}/carla.*/libcarla_native-plugin.so
 
-mv build-carla carla
-zip --symlinks -r -9 carla.zip carla
+mv build-carla carla-${VERSION}
+zip --symlinks -r -9 carla.zip carla-${VERSION}
 cat data/windows/unzipfx-carla/unzipfx2cat carla.zip > Carla
 chmod +x Carla
-rm -rf carla carla.zip
+rm -rf carla carla-${VERSION} carla.zip
 
-mv build-carla-control carla-control
-zip --symlinks -r -9 carla-control.zip carla-control
+mv build-carla-control carla-control-${VERSION}
+zip --symlinks -r -9 carla-control.zip carla-control-${VERSION}
 cat data/windows/unzipfx-carla-control/unzipfx2cat carla-control.zip > CarlaControl
 chmod +x CarlaControl
-rm -rf carla-control carla-control.zip
+rm -rf carla-control carla-control-${VERSION} carla-control.zip
 
 rm -rf ${PKG_FOLDER}${ARCH}
 mkdir ${PKG_FOLDER}${ARCH}
@@ -475,52 +509,30 @@ EOF
 }
 
 # ---------------------------------------------------------------------------------------------------------------------
-# cleanup here if needed
-
-# cleanup
-
-# ---------------------------------------------------------------------------------------------------------------------
-# create chroots
-
-if [ ! -d ${TARGETDIR}/chroot32 ]; then
-    sudo debootstrap --no-check-gpg --arch=i386 lucid ${TARGETDIR}/chroot32 http://old-releases.ubuntu.com/ubuntu/
-fi
-
-if [ ! -d ${TARGETDIR}/chroot64 ]; then
-    sudo debootstrap --no-check-gpg --arch=amd64 lucid ${TARGETDIR}/chroot64 http://old-releases.ubuntu.com/ubuntu/
-fi
-
-# ---------------------------------------------------------------------------------------------------------------------
 # run the functions
 
-export ARCH=32
-chroot_setup
+if [ -z "${SOURCED_BY_DOCKER}" ]; then
+    # name of final dir and xz file, needed only by chroot_pack_carla
+    export PKG_FOLDER="Carla_${VERSION}-linux"
 
-export ARCH=64
-chroot_setup
+    # cleanup
+    prepare
 
-export ARCH=32
-chroot_build_deps
+    # 32bit build
+    export ARCH=32
+    chroot_setup
+    chroot_build_deps
+    chroot_build_carla
+    download_carla_extras
+    chroot_pack_carla
 
-export ARCH=64
-chroot_build_deps
-
-export ARCH=32
-chroot_build_carla
-
-export ARCH=64
-chroot_build_carla
-
-export ARCH=32
-download_carla_extras
-
-export ARCH=64
-download_carla_extras
-
-export ARCH=32
-chroot_pack_carla
-
-export ARCH=64
-chroot_pack_carla
+    # 64bit build
+    export ARCH=64
+    chroot_setup
+    chroot_build_deps
+    chroot_build_carla
+    download_carla_extras
+    chroot_pack_carla
+fi
 
 # ---------------------------------------------------------------------------------------------------------------------

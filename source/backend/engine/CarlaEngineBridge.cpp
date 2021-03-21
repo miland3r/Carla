@@ -1,6 +1,6 @@
 ﻿/*
  * Carla Plugin Host
- * Copyright (C) 2011-2019 Filipe Coelho <falktx@falktx.com>
+ * Copyright (C) 2011-2020 Filipe Coelho <falktx@falktx.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -19,7 +19,8 @@
 # error This file should not be compiled if not building bridge
 #endif
 
-#include "CarlaEngineInternal.hpp"
+#include "CarlaEngineClient.hpp"
+#include "CarlaEngineInit.hpp"
 #include "CarlaPlugin.hpp"
 
 #include "CarlaBackendUtils.hpp"
@@ -45,6 +46,16 @@ using water::Time;
 CARLA_BACKEND_START_NAMESPACE
 
 // -----------------------------------------------------------------------
+
+// just want to access private options...
+struct CarlaPlugin::ProtectedData {
+    CarlaEngine* const engine;
+    CarlaEngineClient* client;
+    uint id, hints, options;
+    // ...etc
+};
+
+// -----------------------------------------------------------------------
 // Bridge Engine client
 
 struct LatencyChangedCallback {
@@ -52,12 +63,21 @@ struct LatencyChangedCallback {
     virtual void latencyChanged(const uint32_t samples) noexcept = 0;
 };
 
-class CarlaEngineBridgeClient : public CarlaEngineClient
+class CarlaEngineBridgeClient : public CarlaEngineClientForSubclassing
 {
 public:
-    CarlaEngineBridgeClient(const CarlaEngine& engine, LatencyChangedCallback* const cb)
-        : CarlaEngineClient(engine),
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+    CarlaEngineBridgeClient(const CarlaEngine& engine,
+                            EngineInternalGraph& egraph,
+                            const CarlaPluginPtr plugin,
+                            LatencyChangedCallback* const cb)
+        : CarlaEngineClientForSubclassing(engine, egraph, plugin),
           fLatencyCallback(cb) {}
+#else
+    CarlaEngineBridgeClient(const CarlaEngine& engine, LatencyChangedCallback* const cb)
+        : CarlaEngineClientForSubclassing(engine),
+          fLatencyCallback(cb) {}
+#endif
 
 protected:
     void setLatency(const uint32_t samples) noexcept override
@@ -123,49 +143,56 @@ public:
 
         if (! fShmAudioPool.attachClient(fBaseNameAudioPool))
         {
-            carla_stderr("Failed to attach to audio pool shared memory");
+            pData->close();
+            setLastError("Failed to attach to audio pool shared memory");
             return false;
         }
 
         if (! fShmRtClientControl.attachClient(fBaseNameRtClientControl))
         {
+            pData->close();
             clear();
-            carla_stderr("Failed to attach to rt client control shared memory");
+            setLastError("Failed to attach to rt client control shared memory");
             return false;
         }
 
         if (! fShmRtClientControl.mapData())
         {
+            pData->close();
             clear();
-            carla_stderr("Failed to map rt client control shared memory");
+            setLastError("Failed to map rt client control shared memory");
             return false;
         }
 
         if (! fShmNonRtClientControl.attachClient(fBaseNameNonRtClientControl))
         {
+            pData->close();
             clear();
-            carla_stderr("Failed to attach to non-rt client control shared memory");
+            setLastError("Failed to attach to non-rt client control shared memory");
             return false;
         }
 
         if (! fShmNonRtClientControl.mapData())
         {
+            pData->close();
             clear();
-            carla_stderr("Failed to map non-rt control client shared memory");
+            setLastError("Failed to map non-rt control client shared memory");
             return false;
         }
 
         if (! fShmNonRtServerControl.attachClient(fBaseNameNonRtServerControl))
         {
+            pData->close();
             clear();
-            carla_stderr("Failed to attach to non-rt server control shared memory");
+            setLastError("Failed to attach to non-rt server control shared memory");
             return false;
         }
 
         if (! fShmNonRtServerControl.mapData())
         {
+            pData->close();
             clear();
-            carla_stderr("Failed to map non-rt control server shared memory");
+            setLastError("Failed to map non-rt control server shared memory");
             return false;
         }
 
@@ -175,7 +202,7 @@ public:
         CARLA_SAFE_ASSERT_RETURN(opcode == kPluginBridgeNonRtClientVersion, false);
 
         const uint32_t apiVersion = fShmNonRtClientControl.readUInt();
-        CARLA_SAFE_ASSERT_RETURN(apiVersion == CARLA_PLUGIN_BRIDGE_API_VERSION, false);
+        CARLA_SAFE_ASSERT_RETURN(apiVersion >= CARLA_PLUGIN_BRIDGE_API_VERSION_MINIMUM, false);
 
         const uint32_t shmRtClientDataSize = fShmNonRtClientControl.readUInt();
         CARLA_SAFE_ASSERT_INT2(shmRtClientDataSize == sizeof(BridgeRtClientData), shmRtClientDataSize, sizeof(BridgeRtClientData));
@@ -190,7 +217,9 @@ public:
             shmNonRtClientDataSize != sizeof(BridgeNonRtClientData) ||
             shmNonRtServerDataSize != sizeof(BridgeNonRtServerData))
         {
-            carla_stderr2("CarlaEngineBridge: data size mismatch");
+            pData->close();
+            clear();
+            setLastError("Shared memory data size mismatch");
             return false;
         }
 
@@ -202,7 +231,9 @@ public:
 
         if (pData->bufferSize == 0 || carla_isZero(pData->sampleRate))
         {
-            carla_stderr2("CarlaEngineBridge: invalid empty state");
+            pData->close();
+            clear();
+            setLastError("Shared memory has invalid data");
             return false;
         }
 
@@ -212,7 +243,17 @@ public:
         {
             const CarlaMutexLocker _cml(fShmNonRtServerControl.mutex);
 
-            fShmNonRtServerControl.writeOpcode(kPluginBridgeNonRtServerPong);
+            // kPluginBridgeNonRtServerVersion was added in API 7
+            if (apiVersion >= 7)
+            {
+                fShmNonRtServerControl.writeOpcode(kPluginBridgeNonRtServerVersion);
+                fShmNonRtServerControl.writeUInt(CARLA_PLUGIN_BRIDGE_API_VERSION_CURRENT);
+            }
+            else
+            {
+                fShmNonRtServerControl.writeOpcode(kPluginBridgeNonRtServerPong);
+            }
+
             fShmNonRtServerControl.commitWrite();
         }
 
@@ -267,16 +308,23 @@ public:
         fShmNonRtServerControl.commitWrite();
     }
 
-    CarlaEngineClient* addClient(CarlaPlugin* const) override
+    CarlaEngineClient* addClient(const CarlaPluginPtr plugin) override
     {
+#ifndef BUILD_BRIDGE_ALTERNATIVE_ARCH
+        return new CarlaEngineBridgeClient(*this, pData->graph, plugin, this);
+#else
         return new CarlaEngineBridgeClient(*this, this);
+
+        // unused
+        (void)plugin;
+#endif
     }
 
     void idle() noexcept override
     {
-        CarlaPlugin* const plugin(pData->plugins[0].plugin);
+        const CarlaPluginPtr plugin = pData->plugins[0].plugin;
 
-        if (plugin == nullptr)
+        if (plugin.get() == nullptr)
         {
             if (const uint32_t length = static_cast<uint32_t>(pData->lastError.length()))
             {
@@ -445,7 +493,7 @@ public:
                         fShmNonRtServerControl.writeInt(paramData.rindex);
                         fShmNonRtServerControl.writeUInt(paramData.type);
                         fShmNonRtServerControl.writeUInt(paramData.hints);
-                        fShmNonRtServerControl.writeShort(paramData.midiCC);
+                        fShmNonRtServerControl.writeShort(paramData.mappedControlIndex);
                         fShmNonRtServerControl.commitWrite();
                     }
 
@@ -455,19 +503,19 @@ public:
                         fShmNonRtServerControl.writeOpcode(kPluginBridgeNonRtServerParameterData2);
                         fShmNonRtServerControl.writeUInt(i);
 
-                        if (plugin->getParameterName(i, bufStr))
-                            bufStr[0] = '\0';
+                        if (! plugin->getParameterName(i, bufStr))
+                            std::snprintf(bufStr, STR_MAX, "Param %u", i+1);
                         bufStrSize = carla_fixedValue(1U, 32U, static_cast<uint32_t>(std::strlen(bufStr)));
                         fShmNonRtServerControl.writeUInt(bufStrSize);
                         fShmNonRtServerControl.writeCustomData(bufStr, bufStrSize);
 
-                        if (plugin->getParameterSymbol(i, bufStr))
+                        if (! plugin->getParameterSymbol(i, bufStr))
                             bufStr[0] = '\0';
                         bufStrSize = carla_fixedValue(1U, 64U, static_cast<uint32_t>(std::strlen(bufStr)));
                         fShmNonRtServerControl.writeUInt(bufStrSize);
                         fShmNonRtServerControl.writeCustomData(bufStr, bufStrSize);
 
-                        if (plugin->getParameterUnit(i, bufStr))
+                        if (! plugin->getParameterUnit(i, bufStr))
                             bufStr[0] = '\0';
                         bufStrSize = carla_fixedValue(1U, 32U, static_cast<uint32_t>(std::strlen(bufStr)));
                         fShmNonRtServerControl.writeUInt(bufStrSize);
@@ -519,7 +567,7 @@ public:
                     fShmNonRtServerControl.writeOpcode(kPluginBridgeNonRtServerProgramName);
                     fShmNonRtServerControl.writeUInt(i);
 
-                    if (plugin->getProgramName(i, bufStr))
+                    if (! plugin->getProgramName(i, bufStr))
                         bufStr[0] = '\0';
                     bufStrSize = carla_fixedValue(1U, 32U, static_cast<uint32_t>(std::strlen(bufStr)));
                     fShmNonRtServerControl.writeUInt(bufStrSize);
@@ -615,7 +663,7 @@ public:
     {
         CarlaEngine::callback(sendHost, sendOsc, action, pluginId, value1, value2, value3, valuef, valueStr);
 
-        if (fClosingDown)
+        if (fClosingDown || ! sendHost)
             return;
 
         switch (action)
@@ -668,7 +716,7 @@ public:
             break;
 
         case ENGINE_CALLBACK_RELOAD_PARAMETERS:
-            if (CarlaPlugin* const plugin = pData->plugins[0].plugin)
+            if (const CarlaPluginPtr plugin = pData->plugins[0].plugin)
             {
                 if (const uint32_t count = std::min(pData->options.maxParameters, plugin->getParameterCount()))
                 {
@@ -711,16 +759,17 @@ public:
 
     void handleNonRtData()
     {
-        CarlaPlugin* const plugin(pData->plugins[0].plugin);
-        CARLA_SAFE_ASSERT_RETURN(plugin != nullptr,);
+        const CarlaPluginPtr plugin = pData->plugins[0].plugin;
+        CARLA_SAFE_ASSERT_RETURN(plugin.get() != nullptr,);
 
         for (; fShmNonRtClientControl.isDataAvailableForReading();)
         {
-            const PluginBridgeNonRtClientOpcode opcode(fShmNonRtClientControl.readOpcode());
+            const PluginBridgeNonRtClientOpcode opcode = fShmNonRtClientControl.readOpcode();
 
 #ifdef DEBUG
             if (opcode != kPluginBridgeNonRtClientPing) {
-                carla_debug("CarlaEngineBridge::handleNonRtData() - got opcode: %s", PluginBridgeNonRtClientOpcode2str(opcode));
+                carla_debug("CarlaEngineBridge::handleNonRtData() - got opcode: %i:%s",
+                            opcode, PluginBridgeNonRtClientOpcode2str(opcode));
             }
 #endif
 
@@ -734,7 +783,8 @@ public:
 
             case kPluginBridgeNonRtClientVersion: {
                 const uint apiVersion = fShmNonRtServerControl.readUInt();
-                CARLA_SAFE_ASSERT_UINT2(apiVersion == CARLA_PLUGIN_BRIDGE_API_VERSION, apiVersion, CARLA_PLUGIN_BRIDGE_API_VERSION);
+                CARLA_SAFE_ASSERT_UINT2(apiVersion >= CARLA_PLUGIN_BRIDGE_API_VERSION_MINIMUM,
+                                        apiVersion, CARLA_PLUGIN_BRIDGE_API_VERSION_MINIMUM);
             }   break;
 
             case kPluginBridgeNonRtClientPing: {
@@ -751,12 +801,12 @@ public:
             }   break;
 
             case kPluginBridgeNonRtClientActivate:
-                if (plugin != nullptr && plugin->isEnabled())
+                if (plugin->isEnabled())
                     plugin->setActive(true, false, false);
                 break;
 
             case kPluginBridgeNonRtClientDeactivate:
-                if (plugin != nullptr && plugin->isEnabled())
+                if (plugin->isEnabled())
                     plugin->setActive(false, false, false);
                 break;
 
@@ -770,7 +820,7 @@ public:
                 const uint32_t index(fShmNonRtClientControl.readUInt());
                 const float    value(fShmNonRtClientControl.readFloat());
 
-                if (plugin != nullptr && plugin->isEnabled())
+                if (plugin->isEnabled())
                     plugin->setParameterValue(index, value, false, false, false);
                 break;
             }
@@ -779,24 +829,34 @@ public:
                 const uint32_t index(fShmNonRtClientControl.readUInt());
                 const uint8_t  channel(fShmNonRtClientControl.readByte());
 
-                if (plugin != nullptr && plugin->isEnabled())
+                if (plugin->isEnabled())
                     plugin->setParameterMidiChannel(index, channel, false, false);
                 break;
             }
 
-            case kPluginBridgeNonRtClientSetParameterMidiCC: {
+            case kPluginBridgeNonRtClientSetParameterMappedControlIndex: {
                 const uint32_t index(fShmNonRtClientControl.readUInt());
-                const int16_t  cc(fShmNonRtClientControl.readShort());
+                const int16_t  ctrl(fShmNonRtClientControl.readShort());
 
-                if (plugin != nullptr && plugin->isEnabled())
-                    plugin->setParameterMidiCC(index, cc, false, false);
+                if (plugin->isEnabled())
+                    plugin->setParameterMappedControlIndex(index, ctrl, false, false, true);
+                break;
+            }
+
+            case kPluginBridgeNonRtClientSetParameterMappedRange: {
+                const uint32_t index   = fShmNonRtClientControl.readUInt();
+                const float    minimum = fShmNonRtClientControl.readFloat();
+                const float    maximum = fShmNonRtClientControl.readFloat();
+
+                if (plugin->isEnabled())
+                    plugin->setParameterMappedRange(index, minimum, maximum, false, false);
                 break;
             }
 
             case kPluginBridgeNonRtClientSetProgram: {
                 const int32_t index(fShmNonRtClientControl.readInt());
 
-                if (plugin != nullptr && plugin->isEnabled())
+                if (plugin->isEnabled())
                     plugin->setProgram(index, true, false, false);
                 break;
             }
@@ -804,7 +864,7 @@ public:
             case kPluginBridgeNonRtClientSetMidiProgram: {
                 const int32_t index(fShmNonRtClientControl.readInt());
 
-                if (plugin != nullptr && plugin->isEnabled())
+                if (plugin->isEnabled())
                     plugin->setMidiProgram(index, true, false, false);
                 break;
             }
@@ -830,7 +890,7 @@ public:
                 if (valueSize > 0)
                     fShmNonRtClientControl.readCustomData(valueStr, valueSize);
 
-                if (plugin != nullptr && plugin->isEnabled())
+                if (plugin->isEnabled())
                     plugin->setCustomData(typeStr, keyStr, valueStr, true);
                 break;
             }
@@ -844,7 +904,7 @@ public:
                 fShmNonRtClientControl.readCustomData(chunkFilePathTry, size);
 
                 CARLA_SAFE_ASSERT_BREAK(chunkFilePathTry[0] != '\0');
-                if (plugin == nullptr || ! plugin->isEnabled()) break;
+                if (! plugin->isEnabled()) break;
 
                 String chunkFilePath(chunkFilePathTry);
 
@@ -875,7 +935,7 @@ public:
                 const int16_t channel(fShmNonRtClientControl.readShort());
                 CARLA_SAFE_ASSERT_BREAK(channel >= -1 && channel < MAX_MIDI_CHANNELS);
 
-                if (plugin != nullptr && plugin->isEnabled())
+                if (plugin->isEnabled())
                     plugin->setCtrlChannel(static_cast<int8_t>(channel), false, false);
                 break;
             }
@@ -884,15 +944,34 @@ public:
                 const uint32_t option(fShmNonRtClientControl.readUInt());
                 const bool     yesNo(fShmNonRtClientControl.readBool());
 
-                if (plugin != nullptr && plugin->isEnabled())
+                if (plugin->isEnabled())
                     plugin->setOption(option, yesNo, false);
                 break;
             }
 
-            case kPluginBridgeNonRtClientGetParameterText: {
-                const int32_t index(fShmNonRtClientControl.readInt());
+            case kPluginBridgeNonRtClientSetOptions: {
+                const uint32_t options(fShmNonRtClientControl.readUInt());
 
-                if (index >= 0 && plugin != nullptr && plugin->isEnabled())
+                plugin->pData->options = options;
+                break;
+            }
+
+            case kPluginBridgeNonRtClientSetWindowTitle: {
+                const uint32_t size = fShmNonRtClientControl.readUInt();
+                CARLA_SAFE_ASSERT_BREAK(size > 0);
+
+                char title[size+1];
+                carla_zeroChars(title, size+1);
+                fShmNonRtClientControl.readCustomData(title, size);
+
+                plugin->setCustomUITitle(title);
+                break;
+            }
+
+            case kPluginBridgeNonRtClientGetParameterText: {
+                const int32_t index = fShmNonRtClientControl.readInt();
+
+                if (index >= 0 && plugin->isEnabled())
                 {
                     char bufStr[STR_MAX+1];
                     carla_zeroChars(bufStr, STR_MAX+1);
@@ -912,15 +991,29 @@ public:
 
                     fShmNonRtServerControl.waitIfDataIsReachingLimit();
                 }
+                else
+                {
+                    const CarlaMutexLocker _cml(fShmNonRtServerControl.mutex);
+
+                    fShmNonRtServerControl.writeOpcode(kPluginBridgeNonRtServerSetParameterText);
+                    fShmNonRtServerControl.writeInt(index);
+                    fShmNonRtServerControl.writeUInt(0);
+                    fShmNonRtServerControl.commitWrite();
+                }
 
                 break;
             }
 
             case kPluginBridgeNonRtClientPrepareForSave: {
-                if (plugin == nullptr || ! plugin->isEnabled())
-                    break;
+                if (! plugin->isEnabled())
+                {
+                    const CarlaMutexLocker _cml(fShmNonRtServerControl.mutex);
+                    fShmNonRtServerControl.writeOpcode(kPluginBridgeNonRtServerSaved);
+                    fShmNonRtServerControl.commitWrite();
+                    return;
+                }
 
-                plugin->prepareForSave();
+                plugin->prepareForSave(false);
 
                 for (uint32_t i=0, count=plugin->getCustomDataCount(); i<count; ++i)
                 {
@@ -993,17 +1086,17 @@ public:
             }
 
             case kPluginBridgeNonRtClientRestoreLV2State:
-                if (plugin != nullptr && plugin->isEnabled())
-                    plugin->restoreLV2State();
+                if (plugin->isEnabled())
+                    plugin->restoreLV2State(false);
                 break;
 
             case kPluginBridgeNonRtClientShowUI:
-                if (plugin != nullptr && plugin->isEnabled())
+                if (plugin->isEnabled())
                     plugin->showCustomUI(true);
                 break;
 
             case kPluginBridgeNonRtClientHideUI:
-                if (plugin != nullptr && plugin->isEnabled())
+                if (plugin->isEnabled())
                     plugin->showCustomUI(false);
                 break;
 
@@ -1011,7 +1104,7 @@ public:
                 const uint32_t index(fShmNonRtClientControl.readUInt());
                 const float    value(fShmNonRtClientControl.readFloat());
 
-                if (plugin != nullptr && plugin->isEnabled())
+                if (plugin->isEnabled())
                     plugin->uiParameterChange(index, value);
                 break;
             }
@@ -1019,7 +1112,7 @@ public:
             case kPluginBridgeNonRtClientUiProgramChange: {
                 const uint32_t index(fShmNonRtClientControl.readUInt());
 
-                if (plugin != nullptr && plugin->isEnabled())
+                if (plugin->isEnabled())
                     plugin->uiProgramChange(index);
                 break;
             }
@@ -1027,7 +1120,7 @@ public:
             case kPluginBridgeNonRtClientUiMidiProgramChange: {
                 const uint32_t index(fShmNonRtClientControl.readUInt());
 
-                if (plugin != nullptr && plugin->isEnabled())
+                if (plugin->isEnabled())
                     plugin->uiMidiProgramChange(index);
                 break;
             }
@@ -1037,7 +1130,7 @@ public:
                 const uint8_t note(fShmNonRtClientControl.readByte());
                 const uint8_t velo(fShmNonRtClientControl.readByte());
 
-                if (plugin != nullptr && plugin->isEnabled())
+                if (plugin->isEnabled())
                     plugin->uiNoteOn(chnl, note, velo);
                 break;
             }
@@ -1046,7 +1139,7 @@ public:
                 const uint8_t chnl(fShmNonRtClientControl.readByte());
                 const uint8_t note(fShmNonRtClientControl.readByte());
 
-                if (plugin != nullptr && plugin->isEnabled())
+                if (plugin->isEnabled())
                     plugin->uiNoteOff(chnl, note);
                 break;
             }
@@ -1082,7 +1175,7 @@ protected:
             for (; fShmRtClientControl.isDataAvailableForReading();)
             {
                 const PluginBridgeRtClientOpcode opcode(fShmRtClientControl.readOpcode());
-                CarlaPlugin* const plugin(pData->plugins[0].plugin);
+                const CarlaPluginPtr plugin = pData->plugins[0].plugin;
 
 #ifdef DEBUG
                 if (opcode != kPluginBridgeRtClientProcess && opcode != kPluginBridgeRtClientMidiEvent) {
@@ -1126,6 +1219,7 @@ protected:
                     offlineModeChanged(fIsOffline);
                     break;
 
+                // NOTE this is never used
                 case kPluginBridgeRtClientControlEventParameter: {
                     const uint32_t time(fShmRtClientControl.readUInt());
                     const uint8_t  channel(fShmRtClientControl.readByte());
@@ -1134,12 +1228,14 @@ protected:
 
                     if (EngineEvent* const event = getNextFreeInputEvent())
                     {
-                        event->type    = kEngineEventTypeControl;
-                        event->time    = time;
-                        event->channel = channel;
-                        event->ctrl.type  = kEngineControlEventTypeParameter;
-                        event->ctrl.param = param;
-                        event->ctrl.value = value;
+                        event->type                 = kEngineEventTypeControl;
+                        event->time                 = time;
+                        event->channel              = channel;
+                        event->ctrl.type            = kEngineControlEventTypeParameter;
+                        event->ctrl.param           = param;
+                        event->ctrl.midiValue       = -1;
+                        event->ctrl.normalizedValue = value;
+                        event->ctrl.handled         = true;
                     }
                     break;
                 }
@@ -1151,12 +1247,14 @@ protected:
 
                     if (EngineEvent* const event = getNextFreeInputEvent())
                     {
-                        event->type    = kEngineEventTypeControl;
-                        event->time    = time;
-                        event->channel = channel;
-                        event->ctrl.type  = kEngineControlEventTypeMidiBank;
-                        event->ctrl.param = index;
-                        event->ctrl.value = 0.0f;
+                        event->type                 = kEngineEventTypeControl;
+                        event->time                 = time;
+                        event->channel              = channel;
+                        event->ctrl.type            = kEngineControlEventTypeMidiBank;
+                        event->ctrl.param           = index;
+                        event->ctrl.midiValue       = -1;
+                        event->ctrl.normalizedValue = 0.0f;
+                        event->ctrl.handled         = true;
                     }
                     break;
                 }
@@ -1168,12 +1266,14 @@ protected:
 
                     if (EngineEvent* const event = getNextFreeInputEvent())
                     {
-                        event->type    = kEngineEventTypeControl;
-                        event->time    = time;
-                        event->channel = channel;
-                        event->ctrl.type  = kEngineControlEventTypeMidiProgram;
-                        event->ctrl.param = index;
-                        event->ctrl.value = 0.0f;
+                        event->type                 = kEngineEventTypeControl;
+                        event->time                 = time;
+                        event->channel              = channel;
+                        event->ctrl.type            = kEngineControlEventTypeMidiProgram;
+                        event->ctrl.param           = index;
+                        event->ctrl.midiValue       = -1;
+                        event->ctrl.normalizedValue = 0.0f;
+                        event->ctrl.handled         = true;
                     }
                     break;
                 }
@@ -1184,12 +1284,14 @@ protected:
 
                     if (EngineEvent* const event = getNextFreeInputEvent())
                     {
-                        event->type    = kEngineEventTypeControl;
-                        event->time    = time;
-                        event->channel = channel;
-                        event->ctrl.type  = kEngineControlEventTypeAllSoundOff;
-                        event->ctrl.param = 0;
-                        event->ctrl.value = 0.0f;
+                        event->type                 = kEngineEventTypeControl;
+                        event->time                 = time;
+                        event->channel              = channel;
+                        event->ctrl.type            = kEngineControlEventTypeAllSoundOff;
+                        event->ctrl.param           = 0;
+                        event->ctrl.midiValue       = -1;
+                        event->ctrl.normalizedValue = 0.0f;
+                        event->ctrl.handled         = true;
                     }
                 }   break;
 
@@ -1199,12 +1301,14 @@ protected:
 
                     if (EngineEvent* const event = getNextFreeInputEvent())
                     {
-                        event->type    = kEngineEventTypeControl;
-                        event->time    = time;
-                        event->channel = channel;
-                        event->ctrl.type  = kEngineControlEventTypeAllNotesOff;
-                        event->ctrl.param = 0;
-                        event->ctrl.value = 0.0f;
+                        event->type                 = kEngineEventTypeControl;
+                        event->time                 = time;
+                        event->channel              = channel;
+                        event->ctrl.type            = kEngineControlEventTypeAllNotesOff;
+                        event->ctrl.param           = 0;
+                        event->ctrl.midiValue       = -1;
+                        event->ctrl.normalizedValue = 0.0f;
+                        event->ctrl.handled         = true;
                     }
                 }   break;
 
@@ -1255,7 +1359,7 @@ protected:
 
                     CARLA_SAFE_ASSERT_BREAK(fShmAudioPool.data != nullptr);
 
-                    if (plugin != nullptr && plugin->isEnabled() && plugin->tryLock(fIsOffline))
+                    if (plugin.get() != nullptr && plugin->isEnabled() && plugin->tryLock(fIsOffline))
                     {
                         const BridgeTimeInfo& bridgeTimeInfo(fShmRtClientControl.data->timeInfo);
 
@@ -1461,9 +1565,16 @@ private:
 
 // -----------------------------------------------------------------------
 
-CarlaEngine* CarlaEngine::newBridge(const char* const audioPoolBaseName, const char* const rtClientBaseName, const char* const nonRtClientBaseName, const char* const nonRtServerBaseName)
+namespace EngineInit {
+
+CarlaEngine* newBridge(const char* const audioPoolBaseName,
+                       const char* const rtClientBaseName,
+                       const char* const nonRtClientBaseName,
+                       const char* const nonRtServerBaseName)
 {
     return new CarlaEngineBridge(audioPoolBaseName, rtClientBaseName, nonRtClientBaseName, nonRtServerBaseName);
+}
+
 }
 
 // -----------------------------------------------------------------------

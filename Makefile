@@ -22,6 +22,8 @@ else
 MODULEDIR := $(CURDIR)/build/modules/Release
 endif
 
+VERSION   := 2.3
+
 # ---------------------------------------------------------------------------------------------------------------------
 
 all: backend discovery bridges-plugin bridges-ui frontend interposer libjack plugin theme
@@ -40,6 +42,7 @@ ALL_LIBS += $(MODULEDIR)/rtmempool.a
 3RD_LIBS += $(MODULEDIR)/lilv.a
 3RD_LIBS += $(MODULEDIR)/sfzero.a
 3RD_LIBS += $(MODULEDIR)/water.a
+3RD_LIBS += $(MODULEDIR)/zita-resampler.a
 
 ifeq ($(HAVE_DGL),true)
 3RD_LIBS += $(MODULEDIR)/dgl.a
@@ -59,17 +62,21 @@ endif
 
 ifeq ($(USING_JUCE),true)
 3RD_LIBS += $(MODULEDIR)/juce_audio_basics.a
+ifeq ($(USING_JUCE_AUDIO_DEVICES),true)
 3RD_LIBS += $(MODULEDIR)/juce_audio_devices.a
+endif
 3RD_LIBS += $(MODULEDIR)/juce_audio_processors.a
 3RD_LIBS += $(MODULEDIR)/juce_core.a
 3RD_LIBS += $(MODULEDIR)/juce_data_structures.a
 3RD_LIBS += $(MODULEDIR)/juce_events.a
 3RD_LIBS += $(MODULEDIR)/juce_graphics.a
 3RD_LIBS += $(MODULEDIR)/juce_gui_basics.a
-ifeq ($(MACOS),true)
+ifeq ($(USING_JUCE_GUI_EXTRA),true)
 3RD_LIBS += $(MODULEDIR)/juce_gui_extra.a
 endif
-else
+endif
+
+ifneq ($(USING_JUCE_AUDIO_DEVICES),true)
 3RD_LIBS += $(MODULEDIR)/rtaudio.a
 3RD_LIBS += $(MODULEDIR)/rtmidi.a
 endif
@@ -146,6 +153,9 @@ endif
 $(MODULEDIR)/dgl.wine.a: .FORCE
 	@$(MAKE) -C source/modules/dgl wine
 
+$(MODULEDIR)/water.files.a: .FORCE
+	@$(MAKE) -C source/modules/water files
+
 $(MODULEDIR)/%.a: .FORCE
 	@$(MAKE) -C source/modules/$*
 
@@ -163,7 +173,7 @@ bridges-ui: libs
 discovery: libs
 	@$(MAKE) -C source/discovery
 
-frontend:
+frontend: libs
 ifeq ($(HAVE_PYQT),true)
 	@$(MAKE) -C source/frontend
 endif
@@ -175,6 +185,12 @@ endif
 
 libjack: libs
 	@$(MAKE) -C source/libjack
+
+lv2-bundles-dep: $(MODULEDIR)/audio_decoder.a $(MODULEDIR)/water.a $(MODULEDIR)/zita-resampler.a
+	@$(MAKE) -C source/native-plugins bundles
+
+lv2-bundles: lv2-bundles-dep
+	@$(MAKE) -C source/plugin bundles
 
 plugin: backend bridges-plugin bridges-ui discovery
 	@$(MAKE) -C source/plugin
@@ -194,37 +210,17 @@ theme: libs
 	@$(MAKE) -C source/theme
 
 # ---------------------------------------------------------------------------------------------------------------------
-# nuitka
+# hacks
 
-nuitka: bin/carla bin/carla-rack bin/carla-plugin
-
-bin/carla:
-	python3 -m nuitka \
-		-j 4 \
-		--python-flag -O --warn-unusual-code --warn-implicit-exceptions \
-		--follow-imports \
-		-o ./$@ \
-		./source/frontend/carla
-
-bin/carla-rack:
-	python3 -m nuitka \
-		-j 8 \
-		--recurse-all \
-		--python-flag -O --warn-unusual-code --warn-implicit-exceptions \
-		--recurse-not-to=PyQt5 \
-		--file-reference-choice=runtime \
-		-o ./$@ \
-		./source/frontend/carla
-
-bin/carla-plugin:
-	python3 -m nuitka \
-		-j 8 \
-		--recurse-all \
-		--python-flag -O --warn-unusual-code --warn-implicit-exceptions \
-		--recurse-not-to=PyQt5 \
-		--file-reference-choice=runtime \
-		-o ./$@ \
-		./source/native-plugins/resources/carla-plugin
+msys2fix:
+	rm -rf source/includes/serd
+	rm -rf source/includes/sord
+	rm -rf source/includes/sratom
+	rm -rf source/includes/lilv
+	cp -r source/modules/lilv/serd-0.24.0/serd source/includes/serd
+	cp -r source/modules/lilv/sord-0.16.0/sord source/includes/sord
+	cp -r source/modules/lilv/sratom-0.6.0/sratom source/includes/sratom
+	cp -r source/modules/lilv/lilv-0.24.0/lilv source/includes/lilv
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Binaries (arm32)
@@ -252,9 +248,10 @@ LIBS_POSIX32 += $(MODULEDIR)/juce_audio_processors.posix32.a
 LIBS_POSIX32 += $(MODULEDIR)/juce_data_structures.posix32.a
 LIBS_POSIX32 += $(MODULEDIR)/juce_core.posix32.a
 LIBS_POSIX32 += $(MODULEDIR)/juce_events.posix32.a
-ifeq ($(MACOS_OR_WIN32),true)
 LIBS_POSIX32 += $(MODULEDIR)/juce_graphics.posix32.a
 LIBS_POSIX32 += $(MODULEDIR)/juce_gui_basics.posix32.a
+ifeq ($(USING_JUCE_GUI_EXTRA),true)
+LIBS_POSIX32 += $(MODULEDIR)/juce_gui_extra.posix32.a
 endif
 endif
 
@@ -276,9 +273,10 @@ LIBS_POSIX64 += $(MODULEDIR)/juce_audio_processors.posix64.a
 LIBS_POSIX64 += $(MODULEDIR)/juce_data_structures.posix64.a
 LIBS_POSIX64 += $(MODULEDIR)/juce_core.posix64.a
 LIBS_POSIX64 += $(MODULEDIR)/juce_events.posix64.a
-ifeq ($(MACOS_OR_WIN32),true)
 LIBS_POSIX64 += $(MODULEDIR)/juce_graphics.posix64.a
 LIBS_POSIX64 += $(MODULEDIR)/juce_gui_basics.posix64.a
+ifeq ($(USING_JUCE_GUI_EXTRA),true)
+LIBS_POSIX64 += $(MODULEDIR)/juce_gui_extra.posix64.a
 endif
 endif
 
@@ -289,11 +287,6 @@ posix64: $(LIBS_POSIX64)
 # ---------------------------------------------------------------------------------------------------------------------
 # Binaries (win32)
 
-ifeq ($(BUILDING_FOR_WINDOWS),true)
-LIBS_WIN32  = $(MODULEDIR)/jackbridge.win32.a
-else
-LIBS_WIN32  = $(MODULEDIR)/jackbridge.win32e.a
-endif
 LIBS_WIN32 += $(MODULEDIR)/lilv.win32.a
 LIBS_WIN32 += $(MODULEDIR)/rtmempool.win32.a
 LIBS_WIN32 += $(MODULEDIR)/water.win32.a
@@ -306,20 +299,30 @@ LIBS_WIN32 += $(MODULEDIR)/juce_core.win32.a
 LIBS_WIN32 += $(MODULEDIR)/juce_events.win32.a
 LIBS_WIN32 += $(MODULEDIR)/juce_graphics.win32.a
 LIBS_WIN32 += $(MODULEDIR)/juce_gui_basics.win32.a
+ifeq ($(USING_JUCE_GUI_EXTRA),true)
+LIBS_WIN32 += $(MODULEDIR)/juce_gui_extra.win32.a
+endif
 endif
 
-win32: $(LIBS_WIN32)
+LIBS_WINE32 = $(LIBS_WIN32) $(MODULEDIR)/jackbridge.win32e.a
+LIBS_RWIN32 = $(LIBS_WIN32) $(MODULEDIR)/jackbridge.win32.a
+
+win32: $(LIBS_WINE32)
+	$(MAKE) BUILDING_FOR_WINE=true -C source/bridges-plugin win32
+	$(MAKE) BUILDING_FOR_WINE=true -C source/discovery win32
+
+win32r: $(LIBS_RWIN32)
+ifeq ($(CC),x86_64-w64-mingw32-gcc)
+	$(MAKE) CC=i686-w64-mingw32-gcc CXX=i686-w64-mingw32-g++ -C source/bridges-plugin win32
+	$(MAKE) CC=i686-w64-mingw32-gcc CXX=i686-w64-mingw32-g++ -C source/discovery win32
+else
 	$(MAKE) -C source/bridges-plugin win32
 	$(MAKE) -C source/discovery win32
+endif
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Binaries (win64)
 
-ifeq ($(BUILDING_FOR_WINDOWS),true)
-LIBS_WIN64  = $(MODULEDIR)/jackbridge.win64.a
-else
-LIBS_WIN64  = $(MODULEDIR)/jackbridge.win64e.a
-endif
 LIBS_WIN64 += $(MODULEDIR)/lilv.win64.a
 LIBS_WIN64 += $(MODULEDIR)/rtmempool.win64.a
 LIBS_WIN64 += $(MODULEDIR)/water.win64.a
@@ -332,11 +335,26 @@ LIBS_WIN64 += $(MODULEDIR)/juce_core.win64.a
 LIBS_WIN64 += $(MODULEDIR)/juce_events.win64.a
 LIBS_WIN64 += $(MODULEDIR)/juce_graphics.win64.a
 LIBS_WIN64 += $(MODULEDIR)/juce_gui_basics.win64.a
+ifeq ($(USING_JUCE_GUI_EXTRA),true)
+LIBS_WIN64 += $(MODULEDIR)/juce_gui_extra.win64.a
+endif
 endif
 
-win64: $(LIBS_WIN64)
+LIBS_WINE64 = $(LIBS_WIN64) $(MODULEDIR)/jackbridge.win64e.a
+LIBS_RWIN64 = $(LIBS_WIN64) $(MODULEDIR)/jackbridge.win64.a
+
+win64: $(LIBS_WINE64)
+	$(MAKE) BUILDING_FOR_WINE=true -C source/bridges-plugin win64
+	$(MAKE) BUILDING_FOR_WINE=true -C source/discovery win64
+
+win64r: $(LIBS_RWIN64)
+ifeq ($(CC),i686-w64-mingw32-gcc)
+	$(MAKE) CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ -C source/bridges-plugin win64
+	$(MAKE) CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ -C source/discovery win64
+else
 	$(MAKE) -C source/bridges-plugin win64
 	$(MAKE) -C source/discovery win64
+endif
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Binaries (wine)
@@ -362,6 +380,7 @@ clean:
 	$(MAKE) clean -C source/modules
 	$(MAKE) clean -C source/native-plugins
 	$(MAKE) clean -C source/plugin
+	$(MAKE) clean -C source/tests
 	$(MAKE) clean -C source/theme
 	rm -f *~ source/*~
 
@@ -369,11 +388,17 @@ distclean: clean
 	rm -f bin/*.exe bin/*.dll bin/*.dylib bin/*.so
 	rm -rf build build-lv2
 
+cpp:
+	$(MAKE) CPPMODE=true
+
 debug:
 	$(MAKE) DEBUG=true
 
 doxygen:
 	$(MAKE) doxygen -C source/backend
+
+tests:
+	$(MAKE) -C source/tests
 
 stoat:
 	stoat --recursive ./build/ --suppression ./data/stoat-supression.txt --whitelist ./data/stoat-whitelist.txt --graph-view ./data/stoat-callgraph.png
@@ -388,6 +413,7 @@ stoat:
 install_main:
 	# Create directories
 	install -d $(DESTDIR)$(BINDIR)
+	install -d $(DESTDIR)$(DATADIR)/carla/resources
 ifeq ($(LINUX),true)
 	install -d $(DESTDIR)$(LIBDIR)/carla/jack
 else
@@ -413,7 +439,7 @@ ifeq ($(HAVE_PYQT),true)
 	install -d $(DESTDIR)$(DATADIR)/icons/hicolor/256x256/apps
 	install -d $(DESTDIR)$(DATADIR)/icons/hicolor/scalable/apps
 	install -d $(DESTDIR)$(DATADIR)/mime/packages
-	install -d $(DESTDIR)$(DATADIR)/carla/resources
+	install -d $(DESTDIR)$(DATADIR)/carla/resources/translations
 	install -d $(DESTDIR)$(DATADIR)/carla/modgui
 	install -d $(DESTDIR)$(DATADIR)/carla/patchcanvas
 	install -d $(DESTDIR)$(DATADIR)/carla/widgets
@@ -466,16 +492,19 @@ endif
 
 	# Adjust PREFIX, LIBDIR and INCLUDEDIR in pkg-config files
 	sed $(SED_ARGS) 's?X-PREFIX-X?$(PREFIX)?' \
+		$(DESTDIR)$(LIBDIR)/pkgconfig/carla-host-plugin.pc \
 		$(DESTDIR)$(LIBDIR)/pkgconfig/carla-native-plugin.pc \
 		$(DESTDIR)$(LIBDIR)/pkgconfig/carla-standalone.pc \
 		$(DESTDIR)$(LIBDIR)/pkgconfig/carla-utils.pc
 
 	sed $(SED_ARGS) 's?X-LIBDIR-X?$(LIBDIR)?' \
+		$(DESTDIR)$(LIBDIR)/pkgconfig/carla-host-plugin.pc \
 		$(DESTDIR)$(LIBDIR)/pkgconfig/carla-native-plugin.pc \
 		$(DESTDIR)$(LIBDIR)/pkgconfig/carla-standalone.pc \
 		$(DESTDIR)$(LIBDIR)/pkgconfig/carla-utils.pc
 
 	sed $(SED_ARGS) 's?X-INCLUDEDIR-X?$(INCLUDEDIR)?' \
+		$(DESTDIR)$(LIBDIR)/pkgconfig/carla-host-plugin.pc \
 		$(DESTDIR)$(LIBDIR)/pkgconfig/carla-native-plugin.pc \
 		$(DESTDIR)$(LIBDIR)/pkgconfig/carla-standalone.pc \
 		$(DESTDIR)$(LIBDIR)/pkgconfig/carla-utils.pc
@@ -500,12 +529,15 @@ endif
 	# -------------------------------------------------------------------------------------------------------------
 
 ifeq ($(HAVE_PYQT),true)
+ifneq ($(CPPMODE),true)
 	# Install script files (gui)
 	install -m 755 \
 		data/carla \
 		data/carla-database \
 		data/carla-jack-multi \
 		data/carla-jack-single \
+		data/carla-jack-patchbayplugin \
+		data/carla-osc-gui \
 		data/carla-patchbay \
 		data/carla-rack \
 		data/carla-settings \
@@ -517,6 +549,8 @@ ifeq ($(HAVE_PYQT),true)
 		$(DESTDIR)$(BINDIR)/carla-database \
 		$(DESTDIR)$(BINDIR)/carla-jack-multi \
 		$(DESTDIR)$(BINDIR)/carla-jack-single \
+		$(DESTDIR)$(BINDIR)/carla-jack-patchbayplugin \
+		$(DESTDIR)$(BINDIR)/carla-osc-gui \
 		$(DESTDIR)$(BINDIR)/carla-patchbay \
 		$(DESTDIR)$(BINDIR)/carla-rack \
 		$(DESTDIR)$(BINDIR)/carla-settings
@@ -574,6 +608,7 @@ endif
 		bin/resources/carla-plugin-patchbay \
 		bin/resources/*-ui \
 		$(DESTDIR)$(DATADIR)/carla/resources
+endif # CPPMODE
 
 ifeq ($(HAVE_THEME),true)
 	# Install theme
@@ -583,9 +618,13 @@ ifeq ($(HAVE_THEME),true)
 endif
 
 	# Install desktop files
-	install -m 644 data/carla.desktop         $(DESTDIR)$(DATADIR)/applications
+	install -m 644 data/desktop/carla.desktop             $(DESTDIR)$(DATADIR)/applications
+	install -m 644 data/desktop/carla-rack.desktop        $(DESTDIR)$(DATADIR)/applications
+	install -m 644 data/desktop/carla-patchbay.desktop    $(DESTDIR)$(DATADIR)/applications
+	install -m 644 data/desktop/carla-jack-single.desktop $(DESTDIR)$(DATADIR)/applications
+	install -m 644 data/desktop/carla-jack-multi.desktop  $(DESTDIR)$(DATADIR)/applications
 ifeq ($(HAVE_LIBLO),true)
-	install -m 644 data/carla-control.desktop $(DESTDIR)$(DATADIR)/applications
+	install -m 644 data/desktop/carla-control.desktop     $(DESTDIR)$(DATADIR)/applications
 endif
 
 	# Install mime package
@@ -618,9 +657,9 @@ endif
 	$(LINK) ../carla_app.py                $(DESTDIR)$(DATADIR)/carla/resources
 	$(LINK) ../carla_backend.py            $(DESTDIR)$(DATADIR)/carla/resources
 	$(LINK) ../carla_backend_qt.py         $(DESTDIR)$(DATADIR)/carla/resources
-	$(LINK) ../carla_control.py            $(DESTDIR)$(DATADIR)/carla/resources
 	$(LINK) ../carla_database.py           $(DESTDIR)$(DATADIR)/carla/resources
 	$(LINK) ../carla_host.py               $(DESTDIR)$(DATADIR)/carla/resources
+	$(LINK) ../carla_host_control.py       $(DESTDIR)$(DATADIR)/carla/resources
 	$(LINK) ../carla_settings.py           $(DESTDIR)$(DATADIR)/carla/resources
 	$(LINK) ../carla_skin.py               $(DESTDIR)$(DATADIR)/carla/resources
 	$(LINK) ../carla_shared.py             $(DESTDIR)$(DATADIR)/carla/resources
@@ -645,10 +684,16 @@ endif
 	$(LINK) ../ui_carla_settings_driver.py $(DESTDIR)$(DATADIR)/carla/resources
 	$(LINK) ../ui_inputdialog_value.py     $(DESTDIR)$(DATADIR)/carla/resources
 	$(LINK) ../ui_midipattern.py           $(DESTDIR)$(DATADIR)/carla/resources
+
+	# Install translations
+	$(foreach l,$(I18N_LANGUAGES),install -m 644 \
+		source/frontend/translations/carla_$(l).qm \
+		$(DESTDIR)$(DATADIR)/carla/resources/translations/;)
 endif # HAVE_PYQT
 
 	# -------------------------------------------------------------------------------------------------------------
 
+ifeq ($(CAN_GENERATE_LV2_TTL),true)
 	# Install lv2 plugin
 	install -d $(DESTDIR)$(LIBDIR)/lv2/carla.lv2
 
@@ -668,6 +713,7 @@ ifeq ($(LINUX),true)
 	rm -rf $(DESTDIR)$(LIBDIR)/lv2/carla.lv2/jack
 	$(LINK) ../../carla/jack $(DESTDIR)$(LIBDIR)/lv2/carla.lv2/jack
 endif
+endif # CAN_GENERATE_LV2_TTL
 
 ifeq ($(HAVE_PYQT),true)
 	# Link resources for lv2 plugin
@@ -716,7 +762,9 @@ endif
 ifneq ($(HAVE_PYQT),true)
 	# Remove gui files for non-gui build
 	rm $(DESTDIR)$(LIBDIR)/carla/carla-bridge-lv2-modgui
+ifeq ($(CAN_GENERATE_LV2_TTL),true)
 	rm $(DESTDIR)$(LIBDIR)/lv2/carla.lv2/carla-bridge-lv2-modgui
+endif
 endif
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -731,6 +779,7 @@ install: install_main install_external_plugins
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/carla*
+	rm -f $(DESTDIR)$(LIBDIR)/pkgconfig/carla-host-plugin.pc
 	rm -f $(DESTDIR)$(LIBDIR)/pkgconfig/carla-native-plugin.pc
 	rm -f $(DESTDIR)$(LIBDIR)/pkgconfig/carla-standalone.pc
 	rm -f $(DESTDIR)$(LIBDIR)/pkgconfig/carla-utils.pc
@@ -750,203 +799,23 @@ uninstall:
 
 # ----------------------------------------------------------------------------------------------------------------------------
 
-ifneq ($(MAKE_TERMOUT),)
-ANS_NO=\033[31mNO\033[0m
-ANS_YES=\033[32mYES\033[0m
-mS=\033[33m[
-mZ=\033[30;1m[
-mE=]\033[0m
-tS=\033[36m
-tE=\033[0m
-else
-ANS_NO=NO
-ANS_YES=YES
-mS=[
-mZ=[
-mE=]
-endif
-
-features_print_main:
-	@printf -- "$(tS)---> Main features $(tE)\n"
-ifeq ($(HAVE_PYQT),true)
-	@printf -- "Front-End:     $(ANS_YES)\n"
-	@printf -- "LV2 plugin:    $(ANS_YES)\n"
-ifneq ($(HAIKU),true)
-	@printf -- "VST plugin:    $(ANS_YES)\n"
-else
-	@printf -- "VST plugin:    $(ANS_NO)  $(mZ)Not available for Haiku$(mE)\n"
-endif
-else
-	@printf -- "Front-End:     $(ANS_NO)  $(mS)Missing PyQt$(mE)\n"
-	@printf -- "LV2 plugin:    $(ANS_NO)  $(mS)No front-end$(mE)\n"
-	@printf -- "VST plugin:    $(ANS_NO)  $(mS)No front-end$(mE)\n"
-endif
-ifeq ($(HAVE_HYLIA),true)
-	@printf -- "Link support:  $(ANS_YES)\n"
-else
-ifeq ($(MACOS_OLD),true)
-	@printf -- "Link support:  $(ANS_NO)  $(mZ)MacOS >= 10.10 only$(mE)\n"
-else
-	@printf -- "Link support:  $(ANS_NO)  $(mZ)Linux, MacOS and Windows only$(mE)\n"
-endif
-endif
-ifeq ($(HAVE_LIBLO),true)
-	@printf -- "OSC support:   $(ANS_YES)\n"
-else
-	@printf -- "OSC support:   $(ANS_NO)  $(mS)Missing liblo$(mE)\n"
-endif
-ifeq ($(WIN32),true)
-	@printf -- "Binary detect: $(ANS_YES)\n"
-else
-ifeq ($(HAVE_LIBMAGIC),true)
-	@printf -- "Binary detect: $(ANS_YES)\n"
-else
-	@printf -- "Binary detect: $(ANS_NO)  $(mS)Missing libmagic/file$(mE)\n"
-endif
-endif
-	@printf -- "\n"
-
-	@printf -- "$(tS)---> Engine drivers $(tE)\n"
-	@printf -- "JACK:        $(ANS_YES)\n"
-ifeq ($(LINUX),true)
-ifeq ($(HAVE_ALSA),true)
-	@printf -- "ALSA:        $(ANS_YES)\n"
-else
-	@printf -- "ALSA:        $(ANS_NO)  $(mS)Missing ALSA$(mE)\n"
-endif
-else
-	@printf -- "ALSA:        $(ANS_NO)  $(mZ)Linux only$(mE)\n"
-endif
-ifeq ($(UNIX),true)
-ifneq ($(MACOS),true)
-ifeq ($(HAVE_PULSEAUDIO),true)
-	@printf -- "PulseAudio:  $(ANS_YES)\n"
-else
-	@printf -- "PulseAudio:  $(ANS_NO)  $(mS)Missing PulseAudio$(mE)\n"
-endif
-else
-	@printf -- "PulseAudio:  $(ANS_NO)  $(mZ)Not available for MacOS$(mE)\n"
-endif
-else
-	@printf -- "PulseAudio:  $(ANS_NO)  $(mZ)Only available for Unix systems$(mE)\n"
-endif
 ifeq ($(MACOS),true)
-	@printf -- "CoreAudio:   $(ANS_YES)\n"
-else
-	@printf -- "CoreAudio:   $(ANS_NO)  $(mZ)MacOS only$(mE)\n"
+ifneq ($(MACOS_OLD),true)
+HAVE_DIST = true
 endif
+endif
+
 ifeq ($(WIN32),true)
-	@printf -- "ASIO:        $(ANS_YES)\n"
-	@printf -- "DirectSound: $(ANS_YES)\n"
-	@printf -- "WASAPI:      $(ANS_YES)\n"
-else
-	@printf -- "ASIO:        $(ANS_NO)  $(mZ)Windows only$(mE)\n"
-	@printf -- "DirectSound: $(ANS_NO)  $(mZ)Windows only$(mE)\n"
-	@printf -- "WASAPI:      $(ANS_NO)  $(mZ)Windows only$(mE)\n"
-endif
-	@printf -- "\n"
-
-	@printf -- "$(tS)---> Plugin formats: $(tE)\n"
-	@printf -- "Internal: $(ANS_YES)\n"
-	@printf -- "LADSPA:   $(ANS_YES)\n"
-	@printf -- "DSSI:     $(ANS_YES)\n"
-	@printf -- "LV2:      $(ANS_YES)\n"
-ifeq ($(MACOS_OR_WIN32),true)
-	@printf -- "VST:      $(ANS_YES) (with UI)\n"
-else
-ifeq ($(HAIKU),true)
-	@printf -- "VST:      $(ANS_YES) (without UI)\n"
-else
-ifeq ($(HAVE_X11),true)
-	@printf -- "VST:      $(ANS_YES) (with UI)\n"
-else
-	@printf -- "VST:      $(ANS_YES) (without UI) $(mS)Missing X11$(mE)\n"
-endif
-endif
-endif
-	@printf -- "\n"
-
-	@printf -- "$(tS)---> LV2 UI toolkit support: $(tE)\n"
-	@printf -- "External: $(ANS_YES) (direct)\n"
-ifneq ($(MACOS_OR_WIN32),true)
-ifeq ($(HAVE_GTK2),true)
-	@printf -- "Gtk2:     $(ANS_YES) (bridge)\n"
-else
-	@printf -- "Gtk2:     $(ANS_NO)  $(mS)Gtk2 missing$(mE)\n"
-endif
-ifeq ($(HAVE_GTK3),true)
-	@printf -- "Gtk3:     $(ANS_YES) (bridge)\n"
-else
-	@printf -- "Gtk3:     $(ANS_NO)  $(mS)Gtk3 missing$(mE)\n"
-endif
-ifeq ($(HAVE_QT4),true)
-	@printf -- "Qt4:      $(ANS_YES) (bridge)\n"
-else
-	@printf -- "Qt4:      $(ANS_NO)  $(mS)Qt4 missing$(mE)\n"
-endif
-ifeq ($(HAVE_QT5),true)
-	@printf -- "Qt5:      $(ANS_YES) (bridge)\n"
-else
-	@printf -- "Qt5:      $(ANS_NO)  $(mS)Qt5 missing$(mE)\n"
-endif
-ifeq ($(HAVE_X11),true)
-	@printf -- "X11:      $(ANS_YES) (direct+bridge)\n"
-else
-	@printf -- "X11:      $(ANS_NO)  $(mS)X11 missing$(mE)\n"
-endif
-else # LINUX
-	@printf -- "Gtk2:     $(ANS_NO)  $(mZ)Not available for Windows or MacOS$(mE)\n"
-	@printf -- "Gtk3:     $(ANS_NO)  $(mZ)Not available for Windows or MacOS$(mE)\n"
-	@printf -- "Qt4:      $(ANS_NO)  $(mZ)Not available for Windows or MacOS$(mE)\n"
-	@printf -- "Qt5:      $(ANS_NO)  $(mZ)Not available for Windows or MacOS$(mE)\n"
-	@printf -- "X11:      $(ANS_NO)  $(mZ)Not available for Windows or MacOS$(mE)\n"
-endif # LINUX
-ifeq ($(MACOS),true)
-	@printf -- "Cocoa:    $(ANS_YES) (direct+bridge)\n"
-else
-	@printf -- "Cocoa:    $(ANS_NO)  $(mZ)MacOS only$(mE)\n"
-endif
-ifeq ($(WIN32),true)
-	@printf -- "Windows:  $(ANS_YES) (direct+bridge)\n"
-else
-	@printf -- "Windows:  $(ANS_NO)  $(mZ)Windows only$(mE)\n"
-endif
-	@printf -- "\n"
-
-	@printf -- "$(tS)---> File formats: $(tE)\n"
-ifeq ($(HAVE_SNDFILE),true)
-	@printf -- "Basic: $(ANS_YES)\n"
-else
-	@printf -- "Basic: $(ANS_NO) $(mS)libsndfile missing$(mE)\n"
-endif
-ifeq ($(HAVE_FFMPEG),true)
-	@printf -- "Extra: $(ANS_YES)\n"
-else
-	@printf -- "Extra: $(ANS_NO) $(mS)FFmpeg missing or too new$(mE)\n"
-endif
-ifeq ($(HAVE_FLUIDSYNTH),true)
-	@printf -- "SF2/3: $(ANS_YES)\n"
-else
-	@printf -- "SF2/3: $(ANS_NO) $(mS)FluidSynth missing or too old$(mE)\n"
-endif
-	@printf -- "SFZ:   $(ANS_YES)\n"
-	@printf -- "\n"
-
-	@printf -- "$(tS)---> Internal plugins: $(tE)\n"
-	@printf -- "Basic Plugins:    $(ANS_YES)\n"
-	@printf -- "Carla-Patchbay:   $(ANS_YES)\n"
-	@printf -- "Carla-Rack:       $(ANS_YES)\n"
-ifeq ($(EXTERNAL_PLUGINS),true)
-	@printf -- "External Plugins: $(ANS_YES)\n"
-else
-	@printf -- "External Plugins: $(ANS_NO)\n"
+HAVE_DIST = true
 endif
 
-ifneq ($(EXTERNAL_PLUGINS),true)
-features_print_external_plugins:
+ifeq ($(HAVE_DIST),true)
+include Makefile.dist.mk
+else
+dist:
 endif
 
-features: features_print_main features_print_external_plugins
+include Makefile.print.mk
 
 # ---------------------------------------------------------------------------------------------------------------------
 
